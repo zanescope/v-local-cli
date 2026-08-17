@@ -1,0 +1,11 @@
+.v-local-cli-review/
+.codex-temp/
+keys.json
+*.keys.json
+sample_*.db
+*.db
+build/
+dist/
+npm/bin/
+npm/skill/
+npm/*.tgz

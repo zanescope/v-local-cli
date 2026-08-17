@@ -1,0 +1,500 @@
+package app
+
+import (
+	"bytes"
+	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+var documentedFlagPattern = regexp.MustCompile(`--([a-z][a-z0-9-]+)`)
+
+func schemaCommands(t *testing.T) map[string]any {
+	t.Helper()
+	value, err := runSchema(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value.(map[string]any)["commands"].(map[string]any)
+}
+
+func usageFlags(usage string) map[string]bool {
+	flags := make(map[string]bool)
+	for _, match := range documentedFlagPattern.FindAllStringSubmatch(usage, -1) {
+		flags[match[1]] = true
+	}
+	return flags
+}
+
+func implementationFlagSets(t *testing.T, root string) map[string]map[string]bool {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(root, "internal", "app", "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(map[string]map[string]bool)
+	constructors := map[string]bool{
+		"Bool": true, "Duration": true, "Float64": true, "Int": true, "Int64": true,
+		"String": true, "Uint": true, "Uint64": true, "Var": true,
+	}
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		parsed, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		for _, declaration := range parsed.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Body == nil {
+				continue
+			}
+			flagSets := make(map[string]string)
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				assignment, ok := node.(*ast.AssignStmt)
+				if !ok {
+					return true
+				}
+				for index, expression := range assignment.Rhs {
+					call, ok := expression.(*ast.CallExpr)
+					if !ok || len(call.Args) == 0 || index >= len(assignment.Lhs) {
+						continue
+					}
+					selector, ok := call.Fun.(*ast.SelectorExpr)
+					if !ok {
+						continue
+					}
+					owner, ownerOK := selector.X.(*ast.Ident)
+					variable, variableOK := assignment.Lhs[index].(*ast.Ident)
+					literal, literalOK := call.Args[0].(*ast.BasicLit)
+					if !ownerOK || !variableOK || !literalOK || owner.Name != "flag" || selector.Sel.Name != "NewFlagSet" {
+						continue
+					}
+					command, unquoteErr := strconv.Unquote(literal.Value)
+					if unquoteErr != nil {
+						t.Fatal(unquoteErr)
+					}
+					flagSets[variable.Name] = command
+					if result[command] == nil {
+						result[command] = make(map[string]bool)
+					}
+				}
+				return true
+			})
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok || len(call.Args) == 0 {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				owner, ownerOK := selector.X.(*ast.Ident)
+				if !ownerOK || !constructors[selector.Sel.Name] {
+					return true
+				}
+				command, found := flagSets[owner.Name]
+				literal, literalOK := call.Args[0].(*ast.BasicLit)
+				if !found || !literalOK {
+					return true
+				}
+				name, unquoteErr := strconv.Unquote(literal.Value)
+				if unquoteErr != nil {
+					t.Fatal(unquoteErr)
+				}
+				result[command][name] = true
+				return true
+			})
+		}
+	}
+	return result
+}
+
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("无法定位 Skill 契约测试")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+}
+
+func TestSkillContractMatchesCommandSchema(t *testing.T) {
+	root := repositoryRoot(t)
+	payload, err := os.ReadFile(filepath.Join(root, "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	skill := string(payload)
+	if !strings.HasPrefix(skill, "---\nname: v-local-cli\ndescription:") {
+		t.Fatal("SKILL.md frontmatter 必须只以 v-local-cli 名称和 description 开始")
+	}
+	commands := schemaCommands(t)
+	var help bytes.Buffer
+	writeHelp(&help)
+	for name, rawDefinition := range commands {
+		needle := "v-local-cli " + name
+		if !strings.Contains(skill, needle) {
+			t.Errorf("SKILL.md 缺少命令：%s", name)
+		}
+		usage := rawDefinition.(map[string]any)["usage"].(string)
+		if !strings.Contains(help.String(), "  "+usage+"\n") {
+			t.Errorf("帮助文本与 schema 用法不一致：%s", name)
+		}
+	}
+	commandPattern := regexp.MustCompile(`\bv-local-cli ([a-z][a-z0-9-]*)`)
+	for _, match := range commandPattern.FindAllStringSubmatch(skill, -1) {
+		name := match[1]
+		if _, ok := commands[name]; !ok {
+			t.Errorf("SKILL.md 引用了 schema 中不存在的命令：%s", name)
+		}
+	}
+	metadata, err := os.ReadFile(filepath.Join(root, "agents", "openai.yaml"))
+	if err != nil || !bytes.Contains(metadata, []byte("v-local-cli")) {
+		t.Fatal("agents/openai.yaml 缺失或与 v-local-cli 不匹配")
+	}
+}
+
+func TestImplementedFlagsMatchCommandSchema(t *testing.T) {
+	root := repositoryRoot(t)
+	commands := schemaCommands(t)
+	implemented := implementationFlagSets(t, root)
+	for command, flags := range implemented {
+		rawDefinition, found := commands[command]
+		if !found {
+			t.Errorf("实现包含 schema 未声明的命令：%s", command)
+			continue
+		}
+		definition := rawDefinition.(map[string]any)
+		declared := usageFlags(definition["usage"].(string))
+		for name := range flags {
+			if !declared[name] {
+				t.Errorf("%s 实现了 schema 未声明的选项 --%s", command, name)
+			}
+		}
+		for name := range declared {
+			if name == "fresh" {
+				if definition["fresh_snapshot"] != true {
+					t.Errorf("%s 声明 --fresh 但未声明 fresh_snapshot=true", command)
+				}
+				continue
+			}
+			if !flags[name] {
+				t.Errorf("%s schema 声明了实现中不存在的选项 --%s", command, name)
+			}
+		}
+	}
+}
+
+func TestDocumentationCommandOptionsMatchSchema(t *testing.T) {
+	root := repositoryRoot(t)
+	commands := schemaCommands(t)
+	paths := []string{
+		filepath.Join(root, "README.md"), filepath.Join(root, "SECURITY.md"), filepath.Join(root, "SKILL.md"),
+	}
+	references, err := filepath.Glob(filepath.Join(root, "references", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths = append(paths, references...)
+	commandPattern := regexp.MustCompile(`\bv-local-cli[ \t]+([a-z][a-z0-9-]*)([^\x60\r\n]*)`)
+	for _, path := range paths {
+		payload, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		for _, match := range commandPattern.FindAllStringSubmatch(string(payload), -1) {
+			command := match[1]
+			rawDefinition, found := commands[command]
+			if !found {
+				t.Errorf("%s 引用了 schema 中不存在的命令：%s", filepath.Base(path), command)
+				continue
+			}
+			valid := usageFlags(rawDefinition.(map[string]any)["usage"].(string))
+			for _, option := range documentedFlagPattern.FindAllStringSubmatch(match[2], -1) {
+				if !valid[option[1]] {
+					t.Errorf("%s 为 %s 记录了 schema 中不存在的选项 --%s", filepath.Base(path), command, option[1])
+				}
+			}
+		}
+	}
+}
+
+func TestExternalCommandErrorsHaveRecoveryDocumentation(t *testing.T) {
+	root := repositoryRoot(t)
+	paths, err := filepath.Glob(filepath.Join(root, "internal", "app", "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var source strings.Builder
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		payload, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		source.Write(payload)
+	}
+	var documentation strings.Builder
+	for _, path := range []string{filepath.Join(root, "SKILL.md"), filepath.Join(root, "references", "troubleshooting.md")} {
+		payload, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		documentation.Write(payload)
+	}
+	errorPattern := regexp.MustCompile(`typeName:\s*"([a-z][a-z0-9_]+)"`)
+	externalErrors := make(map[string]bool)
+	for _, match := range errorPattern.FindAllStringSubmatch(source.String(), -1) {
+		externalErrors[match[1]] = true
+	}
+	publicMappers := map[string]bool{"momentMediaCommandError": true, "officialArticleCommandError": true}
+	identifierPattern := regexp.MustCompile(`^[a-z][a-z0-9_]+$`)
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		parsed, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		for _, declaration := range parsed.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Body == nil || !publicMappers[function.Name.Name] {
+				continue
+			}
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				literal, ok := node.(*ast.BasicLit)
+				if !ok || literal.Kind != token.STRING {
+					return true
+				}
+				value, unquoteErr := strconv.Unquote(literal.Value)
+				if unquoteErr != nil {
+					t.Fatal(unquoteErr)
+				}
+				if identifierPattern.MatchString(value) {
+					externalErrors[value] = true
+				}
+				return true
+			})
+		}
+	}
+	for name := range externalErrors {
+		if !strings.Contains(documentation.String(), "`"+name+"`") {
+			t.Errorf("外部错误缺少恢复文档：%s", name)
+		}
+	}
+}
+
+func TestPackageVersionMatchesRuntimeVersion(t *testing.T) {
+	root := repositoryRoot(t)
+	payload, err := os.ReadFile(filepath.Join(root, "npm", "package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var packageMetadata struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(payload, &packageMetadata); err != nil {
+		t.Fatal(err)
+	}
+	if packageMetadata.Version != Version {
+		t.Fatalf("npm 版本 %s 与运行时版本 %s 不一致", packageMetadata.Version, Version)
+	}
+	for _, path := range []string{filepath.Join(root, "README.md"), filepath.Join(root, "SECURITY.md")} {
+		documentation, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !strings.Contains(string(documentation), "`"+Version+"`") {
+			t.Errorf("%s 没有声明当前运行时版本 %s", filepath.Base(path), Version)
+		}
+	}
+}
+
+func TestDocumentationRelativeLinksResolve(t *testing.T) {
+	root := repositoryRoot(t)
+	paths := []string{filepath.Join(root, "README.md"), filepath.Join(root, "SECURITY.md"), filepath.Join(root, "SKILL.md")}
+	references, err := filepath.Glob(filepath.Join(root, "references", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths = append(paths, references...)
+	linkPattern := regexp.MustCompile(`\[[^\]]*\]\(([^)]+)\)`)
+	for _, path := range paths {
+		payload, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		for _, match := range linkPattern.FindAllStringSubmatch(string(payload), -1) {
+			target := strings.TrimSpace(match[1])
+			if target == "" || strings.HasPrefix(target, "#") || strings.HasPrefix(target, "http://") ||
+				strings.HasPrefix(target, "https://") || strings.HasPrefix(target, "mailto:") {
+				continue
+			}
+			target = strings.SplitN(target, "#", 2)[0]
+			if _, statErr := os.Stat(filepath.Join(filepath.Dir(path), filepath.FromSlash(target))); statErr != nil {
+				t.Errorf("%s 包含无效相对链接 %s：%v", filepath.Base(path), target, statErr)
+			}
+		}
+	}
+}
+
+func TestOfficialArticleDNSFallbackDocumentationMatchesImplementation(t *testing.T) {
+	root := repositoryRoot(t)
+	expectations := map[string]string{
+		filepath.Join(root, "SKILL.md"):                          "公众号正文不启用外部 DNS 回退",
+		filepath.Join(root, "references", "troubleshooting.md"):  "公众号正文不使用外部 DNS 回退",
+		filepath.Join(root, "references", "moments-official.md"): "公众号正文不启用朋友圈 CDN 使用的 DNSPod DoT 回退",
+	}
+	for path, expected := range expectations {
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(payload), expected) {
+			t.Errorf("%s 没有声明公众号正文的真实 DNS 回退边界", filepath.Base(path))
+		}
+	}
+	definition := schemaCommands(t)["official-article"].(map[string]any)
+	if value, found := definition["tun_fake_ip_dns_fallback"]; !found || value != false {
+		t.Fatalf("official-article schema 未声明不使用 fake-IP DNS 回退：%v", definition)
+	}
+}
+
+func TestNativeOCRSandboxBoundaryIsDocumented(t *testing.T) {
+	root := repositoryRoot(t)
+	for _, path := range []string{
+		filepath.Join(root, "README.md"), filepath.Join(root, "SECURITY.md"), filepath.Join(root, "references", "architecture.md"),
+	} {
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(payload), "no-sandbox") {
+			t.Errorf("%s 没有披露实验 OCR 子进程的沙箱边界", filepath.Base(path))
+		}
+	}
+	for _, command := range []string{"ocr-file", "ocr-recognize"} {
+		definition := schemaCommands(t)[command].(map[string]any)
+		if definition["subprocess_sandboxed"] != false || definition["vendor_no_sandbox_switch"] != true {
+			t.Errorf("%s schema 没有披露实验 OCR 子进程的沙箱边界：%v", command, definition)
+		}
+	}
+}
+
+func TestMacOSAcceptanceBoundaryMatchesCapabilities(t *testing.T) {
+	result, err := runCapabilities(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities := result.(map[string]any)
+	validation := capabilities["data_layout_validation"].(map[string]any)
+	if validation["darwin_arm64"] != "build_only" {
+		t.Fatalf("darwin/arm64 能力边界在真机验收前被扩大：%v", validation)
+	}
+	root := repositoryRoot(t)
+	acceptancePath := filepath.Join(root, "references", "macos-acceptance.md")
+	acceptance, err := os.ReadFile(acceptancePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	documentation := string(acceptance)
+	for _, expected := range []string{
+		"`darwin/amd64` 为 `real_device_verified`", "user_supplied_candidate_file", "macOS 不支持微信原生 OCR", "darwin/arm64` 必须继续保持 `build_only`",
+	} {
+		if !strings.Contains(documentation, expected) {
+			t.Errorf("macOS 验收文档缺少边界：%s", expected)
+		}
+	}
+	for _, path := range []string{filepath.Join(root, "README.md"), filepath.Join(root, "SKILL.md"), filepath.Join(root, "references", "architecture.md")} {
+		payload, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !strings.Contains(string(payload), "macos-acceptance.md") {
+			t.Errorf("%s 没有链接 macOS 真机验收边界", filepath.Base(path))
+		}
+	}
+}
+
+func TestDocumentedEnvironmentVariablesMatchImplementation(t *testing.T) {
+	root := repositoryRoot(t)
+	variablePattern := regexp.MustCompile(`\bV_LOCAL_CLI_[A-Z0-9_]+\b`)
+	implemented := make(map[string]bool)
+	for _, pattern := range []string{
+		filepath.Join(root, "cmd", "**", "*.go"),
+		filepath.Join(root, "internal", "**", "*.go"),
+		filepath.Join(root, "npm", "scripts", "*.js"),
+	} {
+		var paths []string
+		if strings.Contains(pattern, "**") {
+			base := strings.Split(pattern, "**")[0]
+			walkErr := filepath.WalkDir(filepath.Clean(base), func(path string, entry os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if !entry.IsDir() && strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+					paths = append(paths, path)
+				}
+				return nil
+			})
+			if walkErr != nil {
+				t.Fatal(walkErr)
+			}
+		} else {
+			var globErr error
+			paths, globErr = filepath.Glob(pattern)
+			if globErr != nil {
+				t.Fatal(globErr)
+			}
+		}
+		for _, path := range paths {
+			payload, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			for _, name := range variablePattern.FindAllString(string(payload), -1) {
+				implemented[name] = true
+			}
+		}
+	}
+	documented := make(map[string]bool)
+	documentPaths := []string{filepath.Join(root, "README.md"), filepath.Join(root, "SECURITY.md"), filepath.Join(root, "SKILL.md")}
+	references, err := filepath.Glob(filepath.Join(root, "references", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	documentPaths = append(documentPaths, references...)
+	for _, path := range documentPaths {
+		payload, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		for _, name := range variablePattern.FindAllString(string(payload), -1) {
+			documented[name] = true
+		}
+	}
+	for name := range implemented {
+		if !documented[name] {
+			t.Errorf("生产代码环境变量缺少文档：%s", name)
+		}
+	}
+	for name := range documented {
+		if !implemented[name] {
+			t.Errorf("文档环境变量在生产代码中不存在：%s", name)
+		}
+	}
+}

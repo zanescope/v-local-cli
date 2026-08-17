@@ -1,0 +1,164 @@
+name: Audit gates
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-cli:
+    name: Go CLI / ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-amd64
+            suffix: .exe
+          - os: macos-latest
+            target: macos-arm64
+            suffix: ""
+          - os: macos-15-intel
+            target: macos-amd64
+            suffix: ""
+          - os: ubuntu-latest
+            target: linux-amd64
+            suffix: ""
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: 配置 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: 运行测试与静态检查
+        run: |
+          go mod verify
+          go test ./...
+          go vet ./...
+      - name: Run Windows filesystem and plaintext failure injection
+        if: runner.os == 'Windows'
+        run: |
+          go test ./internal/app -run 'Test(NoForcePublishingRejectsConcurrentTargetCreation|ForcePublishingBreaksHardlinkWithoutMutatingPeer|PrepareOutputTargetRejectsSymbolicLink|PublishFilePreservesLockedWindowsTarget|RunLocalASRProviderCleansTemporaryAudioWhenCommandCannotStart|RunLocalWhisperCleansTemporaryPlaintextWhenCommandFails|RecognizeTemporaryChatImageCleansPlaintextAfterRecognitionFailure|RecognizeTemporaryChatImageReportsLockedWindowsPlaintext)$' -count=1
+          go test ./internal/state -run 'Test(LoadRecoversAfterProcessExitBetweenBackupAndPublish|CommitStateFileRestoresOldStateWhenPublishFails)$' -count=1
+      - name: Run macOS path, Unix security, and publication failure injection
+        if: runner.os == 'macOS'
+        run: |
+          go test ./internal/platform -run '^TestDefaultDataRootsDarwinCoversKnownWeChatContainers$' -count=1
+          go test ./internal/state -run 'Test(DarwinPrivateDirectoryUsesOwnerOnlyPermissions|DarwinPrivateHierarchyRejectsAccountSymlink|AccountLockRejectsConcurrentTransactionAndReleases|LoadRecoversAfterProcessExitBetweenBackupAndPublish)$' -count=1
+          go test ./internal/app -run 'Test(NoForcePublishingRejectsConcurrentTargetCreation|ForcePublishingBreaksHardlinkWithoutMutatingPeer|PrepareOutputTargetRejectsSymbolicLink|CapabilitiesKeepMacOSAtBuildOnlyBoundary)$' -count=1
+      - name: 运行竞态检查
+        if: runner.os == 'Linux'
+        run: go test -race ./...
+      - name: 运行解析器模糊测试烟测
+        if: runner.os == 'Linux'
+        run: |
+          go test ./internal/cryptoutil -run=^$ -fuzz=FuzzValidateImageStructure -fuzztime=5s
+          go test ./internal/cryptoutil -run=^$ -fuzz=FuzzValidateMP4Structure -fuzztime=5s
+          go test ./internal/store -run=^$ -fuzz=FuzzParseXML -fuzztime=5s
+          go test ./internal/store -run=^$ -fuzz=FuzzBuildMomentMediaURL -fuzztime=5s
+          go test ./internal/store -run=^$ -fuzz=FuzzCanonicalOfficialArticleURL -fuzztime=5s
+          go test ./internal/store -run=^$ -fuzz=FuzzParseOfficialArticleHTML -fuzztime=5s
+      - name: 构建纯 Go CLI
+        run: |
+          node -e "require('fs').mkdirSync('build',{recursive:true})"
+          go build -trimpath -o build/v-local-cli${{ matrix.suffix }} ./cmd/v-local-cli
+      - name: 验证 npm 本地二进制安装与启动
+        run: node npm/tests/e2e-local.js build/v-local-cli${{ matrix.suffix }}
+      - name: 检查拉取请求差异格式
+        if: github.event_name == 'pull_request'
+        run: git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+      - name: 检查推送差异格式
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        # windows runner 的默认 shell 是 PowerShell，这里的 if/else 是 bash 语法，需显式指定。
+        shell: bash
+        run: |
+          # 强制推送（如把历史压成单个 init 提交）会让 event.before 成为不可达的孤儿提交，
+          # 此时 git diff 会因 bad object 失败；退回到只检查新提交自身的空白字符与冲突标记。
+          if git cat-file -e "${{ github.event.before }}^{commit}" 2>/dev/null; then
+            git diff --check "${{ github.event.before }}" "${{ github.sha }}"
+          else
+            git show --check --format= "${{ github.sha }}"
+          fi
+      - name: 检查新分支或手动运行的提交格式
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.before == '0000000000000000000000000000000000000000')
+        run: git show --check --format= "${{ github.sha }}"
+
+  npm-and-skill:
+    name: npm wrapper and Agent Skill
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 配置 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: 运行 npm 包装层测试
+        working-directory: npm
+        run: node --test tests/*.test.js
+      - name: 检查 npm 发布内容
+        working-directory: npm
+        run: npm pack --dry-run
+      - name: 检查命令、文档与 Skill 契约
+        run: |
+          test -f SKILL.md
+          test -f agents/openai.yaml
+          go test ./internal/app -run 'Test(SkillContractMatchesCommandSchema|ImplementedFlagsMatchCommandSchema|DocumentationCommandOptionsMatchSchema|ExternalCommandErrorsHaveRecoveryDocumentation|PackageVersionMatchesRuntimeVersion|DocumentationRelativeLinksResolve|OfficialArticleDNSFallbackDocumentationMatchesImplementation|NativeOCRSandboxBoundaryIsDocumented|MacOSAcceptanceBoundaryMatchesCapabilities|DocumentedEnvironmentVariablesMatchImplementation)$'
+
+  dependency-inventory:
+    name: Go dependency inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 配置 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # govulncheck 按运行时工具链的 stdlib 版本判定标准库漏洞，因此这里固定用
+          # 1.25 线的最新补丁，让已修复的 stdlib 公告自动就位，而不是把 go.mod 的
+          # 语言下限钉到某个具体补丁（那样每出一个新 stdlib CVE 就会断）。
+          # check-latest 强制拉取最新匹配补丁，避免用到 runner 缓存里偏旧的补丁版。
+          go-version: '1.25.x'
+          check-latest: true
+          cache: false
+      - name: 检查依赖与标准库的已知漏洞
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+      - name: 生成模块清单与二进制构建信息
+        run: |
+          mkdir -p build/audit
+          go mod verify
+          go list -m -json all > build/audit/go-modules.jsonl
+          CGO_ENABLED=0 go build -trimpath -o build/audit/v-local-cli ./cmd/v-local-cli
+          go version -m build/audit/v-local-cli > build/audit/v-local-cli-build-info.txt
+      - name: 保存依赖清单
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: go-dependency-inventory
+          path: |
+            build/audit/go-modules.jsonl
+            build/audit/v-local-cli-build-info.txt
+          if-no-files-found: error
+          retention-days: 14

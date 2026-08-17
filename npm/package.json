@@ -1,0 +1,40 @@
+{
+  "name": "@zanescope/v-local-cli",
+  "version": "0.1.0-dev.1",
+  "description": "v-local-cli 的跨平台 Go 安装入口",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zanescope/v-local-cli.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "bin": {
+    "v-local-cli": "scripts/run.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js",
+    "prepack": "node scripts/stage-skill.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "files": [
+    "scripts/",
+    "skill/",
+    "checksums.txt",
+    "LICENSE"
+  ]
+}
