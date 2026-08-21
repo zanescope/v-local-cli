@@ -4,11 +4,51 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	localplatform "github.com/zanescope/v-local-cli/internal/platform"
 )
+
+func writeDatabaseOnlyProviderFixture(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	if runtime.GOOS == "windows" {
+		providerPath := filepath.Join(directory, "provider.cmd")
+		powerShellPath := filepath.Join(directory, "provider.ps1")
+		const powerShell = `$ErrorActionPreference = 'Stop'
+$request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$scopes = @($request.scopes)
+if ($scopes.Count -ne 1 -or $scopes[0] -ne 'database') { exit 42 }
+$response = [ordered]@{
+  protocol = 'v-local-key-provider/v2'
+  request_id = $request.request_id
+  database_keys = [ordered]@{'*' = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}
+}
+[Console]::Out.WriteLine(($response | ConvertTo-Json -Compress -Depth 4))
+`
+		if err := os.WriteFile(powerShellPath, []byte(powerShell), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		const wrapper = "@echo off\r\npowershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0provider.ps1\"\r\n"
+		if err := os.WriteFile(providerPath, []byte(wrapper), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return providerPath
+	}
+	providerPath := filepath.Join(directory, "provider")
+	const script = `#!/bin/sh
+payload=$(cat)
+case "$payload" in *'"scopes":["database"]'*) ;; *) exit 42 ;; esac
+request_id=$(printf '%s' "$payload" | sed -n 's/.*"request_id":"\([0-9a-f]*\)".*/\1/p')
+printf '{"protocol":"v-local-key-provider/v2","request_id":"%s","database_keys":{"*":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}\n' "$request_id"
+`
+	if err := os.WriteFile(providerPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return providerPath
+}
 
 func TestValidateBundleNormalizesDatabaseKey(t *testing.T) {
 	bundle := CandidateBundle{DatabaseKeys: map[string]string{"contact.db": "AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA"}}
@@ -31,16 +71,7 @@ func TestValidateBundleRejectsInvalidImageKeys(t *testing.T) {
 }
 
 func TestAcquireScopesSendsDatabaseOnlyRequest(t *testing.T) {
-	providerPath := filepath.Join(t.TempDir(), "provider")
-	const script = `#!/bin/sh
-payload=$(cat)
-case "$payload" in *'"scopes":["database"]'*) ;; *) exit 42 ;; esac
-request_id=$(printf '%s' "$payload" | sed -n 's/.*"request_id":"\([0-9a-f]*\)".*/\1/p')
-printf '{"protocol":"v-local-key-provider/v2","request_id":"%s","database_keys":{"*":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}\n' "$request_id"
-`
-	if err := os.WriteFile(providerPath, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	providerPath := writeDatabaseOnlyProviderFixture(t)
 	bundle, err := AcquireScopes(context.Background(), providerPath, localplatform.Account{Path: "/tmp/account", DBDir: "/tmp/db"}, []string{"database"})
 	if err != nil {
 		t.Fatalf("database-only provider request failed: %v", err)

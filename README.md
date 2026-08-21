@@ -146,7 +146,7 @@ go vet ./...
 node --test npm/tests/*.test.js
 ```
 
-发布前门槛（Authenticode 与 Developer ID 签名及 notarization、npm Trusted Publishing、真机验收清单等）见 [SECURITY.md](SECURITY.md)；在全部通过之前不发布 `latest`。
+发布前门槛（Authenticode 与 Developer ID 签名及 notarization、npm Trusted Publishing、真机验收清单等）见 [SECURITY.md](SECURITY.md)；在全部通过之前不发布 `latest`。候选件与正式签名发布步骤见 [RELEASING.md](RELEASING.md)。
 
 ## 许可
 
