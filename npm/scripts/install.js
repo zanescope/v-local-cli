@@ -42,6 +42,17 @@ function parseChecksums(text) {
   return values;
 }
 
+function releaseTag(version) {
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
+    throw new Error(`npm 包版本无法映射到 GitHub Release：${version}`);
+  }
+  return `v${version}`;
+}
+
+function releaseUrl(version, asset) {
+  return `https://github.com/zanescope/v-local-cli/releases/download/${releaseTag(version)}/${asset}`;
+}
+
 function sha256(file) {
   const hash = crypto.createHash('sha256');
   const descriptor = fs.openSync(file, 'r');
@@ -201,8 +212,7 @@ async function install() {
       // 已存在但摘要不匹配时下载干净副本并进行原子替换。
     }
   }
-  const releaseVersion = packageInfo.version;
-  const url = `https://github.com/zanescope/v-local-cli/releases/download/v${releaseVersion}/${selected.asset}`;
+  const url = releaseUrl(packageInfo.version, selected.asset);
   const reservation = reserveSiblingFile(destination, 'tmp', 0o700);
   const temporary = reservation.path;
   try {
@@ -226,4 +236,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = {assertDownloadUrl, expectedChecksum, install, parseChecksums, replaceFile, reserveSibling, target, verifyHash};
+module.exports = {assertDownloadUrl, expectedChecksum, install, parseChecksums, releaseTag, releaseUrl, replaceFile, reserveSibling, target, verifyHash};

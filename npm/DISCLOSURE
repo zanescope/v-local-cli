@@ -1,0 +1,7 @@
+Dual-use functionality disclosure
+
+This package installs v-local-cli, a local-only command line tool for exporting and searching data that the current user owns or is explicitly authorized to access. With explicit user approval it can use user-supplied candidate keys or a separately installed local key provider to validate and decrypt the user's local WeChat database and media snapshots.
+
+The intended legitimate use is personal data access, backup, migration, audit, and local analysis. The tool does not include credential theft, persistence, remote control, or telemetry. It does not bypass operating-system account permissions, and its limited network operations require explicit per-command authorization.
+
+Users must only process data they own or are explicitly authorized to access and must comply with applicable law and platform terms.

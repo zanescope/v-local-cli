@@ -1,0 +1,296 @@
+name: Signed release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      npm-tag: ${{ steps.version.outputs.npm-tag }}
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 配置 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: 配置 Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - name: 验证标签、版本与测试
+        id: version
+        shell: bash
+        run: |
+          version="$(node -p "require('./npm/package.json').version")"
+          test "v${version}" = "${GITHUB_REF_NAME}"
+          if [[ "${version}" == *-* ]]; then
+            echo "npm-tag=next" >> "${GITHUB_OUTPUT}"
+          else
+            echo "npm-tag=latest" >> "${GITHUB_OUTPUT}"
+          fi
+          go mod verify
+          go test ./...
+          go vet ./...
+          npm --prefix npm test
+
+  windows:
+    name: Sign Windows ${{ matrix.arch }}
+    needs: validate
+    runs-on: windows-latest
+    timeout-minutes: 25
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 配置 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: 导入 Authenticode 证书
+        id: certificate
+        shell: pwsh
+        env:
+          SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE_BASE64)) { throw '缺少 Windows 签名证书' }
+          $path = Join-Path $env:RUNNER_TEMP 'windows-signing.pfx'
+          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:SIGNING_CERTIFICATE_BASE64))
+          $password = ConvertTo-SecureString $env:SIGNING_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          if (-not $certificate.Thumbprint) { throw 'Windows 签名证书导入失败' }
+          "thumbprint=$($certificate.Thumbprint)" >> $env:GITHUB_OUTPUT
+      - name: 构建、签名并验证 Windows 发布件
+        shell: pwsh
+        run: |
+          ./scripts/build-windows-release.ps1 -Arch '${{ matrix.arch }}' -CertificateThumbprint '${{ steps.certificate.outputs.thumbprint }}'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item 'build/windows-${{ matrix.arch }}/v-local-cli.exe' 'dist/v-local-cli-windows-${{ matrix.arch }}.exe'
+      - name: 移除临时证书
+        if: always() && steps.certificate.outputs.thumbprint != ''
+        shell: pwsh
+        run: Remove-Item -LiteralPath 'Cert:\CurrentUser\My\${{ steps.certificate.outputs.thumbprint }}' -Force
+      - name: 保存签名资产
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-cli-windows-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: Sign and notarize ${{ matrix.name }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: darwin-amd64
+            runner: macos-15-intel
+            arch: amd64
+          - name: darwin-arm64
+            runner: macos-latest
+            arch: arm64
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 配置 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: 导入 Developer ID 证书
+        shell: bash
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.MACOS_SIGNING_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+        run: |
+          test -n "${CERTIFICATE_BASE64}"
+          test -n "${CODESIGN_IDENTITY}"
+          certificate_path="${RUNNER_TEMP}/developer-id.p12"
+          keychain_path="${RUNNER_TEMP}/release-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          printf '%s' "${CERTIFICATE_BASE64}" | openssl base64 -d -A -out "${certificate_path}"
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security import "${certificate_path}" -P "${CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${keychain_path}"
+          security set-key-partition-list -S apple-tool:,apple: -k "${keychain_password}" "${keychain_path}"
+          security list-keychains -d user -s "${keychain_path}"
+          echo "V_LOCAL_CLI_CODESIGN_IDENTITY=${CODESIGN_IDENTITY}" >> "${GITHUB_ENV}"
+      - name: 构建并签名 macOS 发布件
+        shell: bash
+        run: |
+          bash scripts/build-macos-release.sh '${{ matrix.arch }}'
+          mkdir -p dist
+          cp 'build/darwin-${{ matrix.arch }}/v-local-cli' 'dist/v-local-cli-darwin-${{ matrix.arch }}'
+      - name: 提交 Apple notarization 并验收
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_NOTARY_APP_PASSWORD }}
+        run: |
+          test -n "${APPLE_ID}"
+          archive="${RUNNER_TEMP}/v-local-cli-${{ matrix.name }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent 'dist/v-local-cli-darwin-${{ matrix.arch }}' "${archive}"
+          xcrun notarytool submit "${archive}" --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" --password "${APPLE_APP_PASSWORD}" --wait
+          codesign --verify --strict --verbose=2 'dist/v-local-cli-darwin-${{ matrix.arch }}'
+          spctl --assess --type execute --verbose=4 'dist/v-local-cli-darwin-${{ matrix.arch }}'
+      - name: 保存签名资产
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-cli-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  linux:
+    name: Build Linux ${{ matrix.arch }}
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 配置 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: 构建 Linux 发布件
+        shell: bash
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH='${{ matrix.arch }}' CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o 'dist/v-local-cli-linux-${{ matrix.arch }}' ./cmd/v-local-cli
+      - name: 保存 Linux 资产
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-cli-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release and npm package
+    needs: [validate, windows, macos, linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 配置 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: 配置 Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - name: 配置 npm staged publishing 客户端
+        run: npm install --global npm@11.19.0
+      - name: 收集发布资产
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-cli-*
+          merge-multiple: true
+          path: dist
+      - name: 生成并验证发布清单
+        shell: bash
+        run: |
+          expected=(
+            v-local-cli-windows-amd64.exe
+            v-local-cli-windows-arm64.exe
+            v-local-cli-darwin-amd64
+            v-local-cli-darwin-arm64
+            v-local-cli-linux-amd64
+            v-local-cli-linux-arm64
+          )
+          : > dist/checksums.txt
+          for file in "${expected[@]}"; do
+            test -f "dist/${file}"
+            (cd dist && sha256sum "${file}") >> dist/checksums.txt
+          done
+          cp dist/checksums.txt npm/checksums.txt
+          go list -m -json all > dist/go-modules.jsonl
+          for binary in dist/v-local-cli-*; do go version -m "${binary}"; done > dist/build-info.txt
+          npm --prefix npm test
+          npm --prefix npm run verify-release
+          (cd npm && npm pack)
+      - name: 为正式发布件生成 GitHub 来源证明
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            dist/*
+            npm/*.tgz
+      - name: 创建 GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then prerelease=(--prerelease); fi
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* npm/*.tgz --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* npm/*.tgz --verify-tag --generate-notes --title "${GITHUB_REF_NAME}" "${prerelease[@]}"
+          fi
+      - name: 检查 npm 首次发布状态
+        id: npm-registry
+        shell: bash
+        run: |
+          if npm view '@zanescope/v-local-cli' name --json >/dev/null 2>&1; then
+            echo 'exists=true' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'exists=false' >> "${GITHUB_OUTPUT}"
+            echo '::notice::npm 包尚不存在；请下载本次 Release 的 tgz，用交互式 2FA 完成首次发布，再配置 Trusted Publisher。'
+          fi
+      - name: 通过 npm Trusted Publishing 提交 staged publish
+        if: steps.npm-registry.outputs.exists == 'true'
+        shell: bash
+        run: npm stage publish npm/*.tgz --access public --provenance --tag '${{ needs.validate.outputs.npm-tag }}'

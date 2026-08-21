@@ -10,22 +10,48 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 
 	_ "modernc.org/sqlite"
 )
 
-func writeProviderFixture(t *testing.T, path string, aesKey string, xorKey int) {
+func writeProviderFixture(t *testing.T, aesKey string, xorKey int) string {
 	t.Helper()
+	t.Setenv("V_LOCAL_TEST_AES", aesKey)
+	t.Setenv("V_LOCAL_TEST_XOR", strconv.Itoa(xorKey))
+	directory := t.TempDir()
+	if runtime.GOOS == "windows" {
+		providerPath := filepath.Join(directory, "mock-provider.cmd")
+		powerShellPath := filepath.Join(directory, "mock-provider.ps1")
+		const powerShell = `$ErrorActionPreference = 'Stop'
+$request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$response = [ordered]@{
+  protocol = 'v-local-key-provider/v2'
+  request_id = $request.request_id
+  database_keys = [ordered]@{'*' = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}
+  image_keys = [ordered]@{aes = $env:V_LOCAL_TEST_AES; xor = [int]$env:V_LOCAL_TEST_XOR}
+}
+[Console]::Out.WriteLine(($response | ConvertTo-Json -Compress -Depth 4))
+`
+		if err := os.WriteFile(powerShellPath, []byte(powerShell), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		const wrapper = "@echo off\r\npowershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0mock-provider.ps1\"\r\n"
+		if err := os.WriteFile(providerPath, []byte(wrapper), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return providerPath
+	}
+	providerPath := filepath.Join(directory, "mock-provider")
 	const script = "#!/bin/sh\n" +
 		"request_id=$(sed -n 's/.*\"request_id\":\"\\([0-9a-f]*\\)\".*/\\1/p')\n" +
 		"printf '{\"protocol\":\"v-local-key-provider/v2\",\"request_id\":\"%s\",\"database_keys\":{\"*\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"image_keys\":{\"aes\":\"%s\",\"xor\":%s}}\\n' \"$request_id\" \"$V_LOCAL_TEST_AES\" \"$V_LOCAL_TEST_XOR\"\n"
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(providerPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("V_LOCAL_TEST_AES", aesKey)
-	t.Setenv("V_LOCAL_TEST_XOR", strconv.Itoa(xorKey))
+	return providerPath
 }
 
 func writeSyntheticV2DAT(t *testing.T, path string, plain []byte, aesKey string, xorKey byte) {
@@ -97,8 +123,7 @@ func TestSetupProviderKeychainRefreshAndExportMedia(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeSyntheticV2DAT(t, datPath, plain, aesKey, xorKey)
-	providerPath := filepath.Join(t.TempDir(), "mock-provider")
-	writeProviderFixture(t, providerPath, aesKey, int(xorKey))
+	providerPath := writeProviderFixture(t, aesKey, int(xorKey))
 
 	t.Setenv("V_LOCAL_CLI_ACCOUNT_DIR", account)
 	t.Setenv("V_LOCAL_CLI_HOME", testHome(t))
