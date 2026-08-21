@@ -28,7 +28,7 @@ var Version = "0.1.0-dev.1"
 
 const responseSchemaVersion = 1
 
-const setupUsage = "v-local-cli setup [--dry-run] [--account NAME] [--provider FILE] [--allow-key-access | --keys FILE] [--storage keychain|snapshot-only] [--require-media] [--allow-coverage-regression] [--show-paths]"
+const setupUsage = "v-local-cli setup [--dry-run] [--account NAME] [--provider FILE] [--allow-key-access | --keys FILE] [--storage keychain|snapshot-only] [--database-only] [--require-media] [--allow-coverage-regression] [--show-paths]"
 
 type envelope struct {
 	SchemaVersion int            `json:"schema_version"`
@@ -588,7 +588,7 @@ func runCapabilities(args []string) (any, error) {
 		"data_layout_validation": map[string]any{
 			"windows_amd64": "real_device_verified", "windows_arm64": "build_only",
 			"darwin_amd64": "real_device_verified", "darwin_arm64": "build_only",
-			"linux":        "build_only_import_or_explicit_path",
+			"linux": "build_only_import_or_explicit_path",
 		},
 		"provider": map[string]any{
 			"protocol": provider.Protocol, "separate_repository": true, "required_for_refresh": false,
@@ -720,6 +720,7 @@ func loadCandidateFile(path string) (provider.CandidateBundle, error) {
 type snapshotPublishOptions struct {
 	Storage                   string
 	RequireMedia              bool
+	DatabaseOnly              bool
 	PersistSecrets            bool
 	PreventCoverageRegression bool
 	ProcessAccessPerformed    bool
@@ -729,7 +730,7 @@ type snapshotPublishOptions struct {
 func publishAccountSnapshot(account localplatform.Account, bundle provider.CandidateBundle, options snapshotPublishOptions) (any, error) {
 	media := snapshot.ValidateMedia(account.Path, bundle.ImageKeys)
 	if options.RequireMedia && media.Status != "verified" {
-		return nil, &commandError{typeName: "media_key_unverified", message: "图片 AES/XOR 候选未通过真实 DAT 样本验真", hint: "请打开一条含图片的新消息后重试，或去掉 --require-media 仅发布数据库快照。", code: 5}
+		return nil, &commandError{typeName: "media_key_unverified", message: "图片 AES/XOR 候选未通过真实 DAT 样本验真", hint: "请打开一条含图片的新消息后重试；只有明确只处理文本时才传 --database-only。", code: 5}
 	}
 	accountID := state.AccountID(account.Path)
 	generationsRoot, err := state.EnsureGenerationsPath(accountID)
@@ -765,6 +766,8 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 	effectiveStorage := options.Storage
 	warnings := []string{}
 	secretsPersisted := false
+	databaseKeysPersisted := false
+	imageKeysPersisted := false
 	previousSecrets := provider.CandidateBundle{}
 	previousSecretsExist := false
 	secretsStateKnown := false
@@ -783,6 +786,8 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 		}
 		if media.Status == "verified" {
 			verifiedBundle.ImageKeys = bundle.ImageKeys
+		} else if bundle.ImageKeys != nil {
+			warnings = append(warnings, "图片候选未通过真实本地 DAT 验证；本次仅保存已验证的数据库密钥，图片密钥未写入系统凭据库")
 		}
 		if !secretsStateKnown {
 			effectiveStorage = "snapshot-only"
@@ -791,6 +796,8 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 			warnings = append(warnings, "系统凭据库写入失败；已保留可查询快照，但刷新和图片导出需要重新 setup")
 		} else {
 			secretsPersisted = true
+			databaseKeysPersisted = len(verifiedBundle.DatabaseKeys) > 0
+			imageKeysPersisted = verifiedBundle.ImageKeys != nil
 			secretsChanged = true
 		}
 	}
@@ -826,15 +833,19 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 		warnings = append(warnings, "旧快照代际暂未清理；可稍后运行 v-local-cli gc")
 	}
 	status := "ready"
-	if report.Summary.Failed > 0 || report.Summary.Skipped > 0 || media.Status != "verified" || len(warnings) > 0 {
+	if report.Summary.Failed > 0 || report.Summary.Skipped > 0 || (!options.DatabaseOnly && media.Status != "verified") || len(warnings) > 0 {
 		status = "partial"
 	}
 	return map[string]any{
 		"status": status, "account": publicAccountState(accountState, false), "database": report,
 		"media": media, "storage": effectiveStorage, "warnings": warnings,
+		"database_only":            options.DatabaseOnly,
 		"credential_source":        options.CredentialSource,
 		"process_access_performed": options.ProcessAccessPerformed,
-		"secrets_persisted":        secretsPersisted, "next": "v-local-cli contacts",
+		"secrets_persisted":        secretsPersisted,
+		"database_keys_persisted":  databaseKeysPersisted,
+		"image_keys_persisted":     imageKeysPersisted,
+		"next":                     "v-local-cli contacts",
 	}, nil
 }
 
@@ -893,7 +904,14 @@ func keyProviderCommandError(err error) *commandError {
 	case "wechat_not_running":
 		return &commandError{
 			typeName: "wechat_not_running", message: "没有发现正在运行的微信主进程",
-				hint: "请手动启动并登录微信，然后重新运行同一条 setup 命令。CLI/Provider 不会自动启动微信。", code: 5,
+			hint: "请手动启动并登录微信，然后重新运行同一条 setup 命令。CLI/Provider 不会自动启动微信。", code: 5,
+		}
+	case "process_list_unavailable":
+		return &commandError{
+			typeName: "key_provider_process_list_unavailable",
+			message:  "当前环境无法枚举 macOS 进程，无法确认或读取微信进程",
+			hint:     "请在普通 macOS Terminal 中重试，或确认当前运行环境允许读取进程列表；这不等同于微信未运行。",
+			code:     5,
 		}
 	case "process_access_denied":
 		if acquisition.Platform != "darwin" {
@@ -926,12 +944,12 @@ func keyProviderCommandError(err error) *commandError {
 	case "hook_trigger_required":
 		return &commandError{
 			typeName: "key_provider_hook_trigger_required", message: "动态捕获已安装，但微信尚未触发数据库调用",
-				hint: "当前数据库已经打开，普通切换会话不一定重新触发。请先完全退出微信，再启动下一次 setup；保持终端窗口运行，看到命令尚未返回提示符时，从“应用程序”重新打开微信并完成账号登录。CLI/Provider 不会自动启动或重启微信，也不需要手工运行 helper 或 lldb。", code: 5,
+			hint: "当前数据库已经打开，普通切换会话不一定重新触发。请先完全退出微信，再启动下一次 setup；保持终端窗口运行，看到命令尚未返回提示符时，从“应用程序”重新打开微信并完成账号登录。CLI/Provider 不会自动启动或重启微信，也不需要手工运行 helper 或 lldb。", code: 5,
 		}
 	case "hook_restart_required":
 		return &commandError{
 			typeName: "key_provider_hook_restart_required", message: "微信需要在动态捕获前重新打开数据库",
-				hint: "请先完全退出微信，再启动下一次 setup；保持终端窗口运行，看到命令尚未返回提示符时，从“应用程序”重新打开微信并完成账号登录。CLI/Provider 不会自动启动或重启微信，也不需要手工运行 helper 或 lldb。", code: 5,
+			hint: "请先完全退出微信，再启动下一次 setup；保持终端窗口运行，看到命令尚未返回提示符时，从“应用程序”重新打开微信并完成账号登录。CLI/Provider 不会自动启动或重启微信，也不需要手工运行 helper 或 lldb。", code: 5,
 		}
 	case "deadline_exhausted":
 		return &commandError{
@@ -955,7 +973,8 @@ func runSetup(args []string) (any, error) {
 	allowKeyAccess := set.Bool("allow-key-access", false, "明确授权调用独立密钥提供器")
 	keysFile := set.String("keys", "", "读取用户已有的候选 JSON 文件")
 	storage := set.String("storage", "keychain", "keychain 或 snapshot-only")
-	requireMedia := set.Bool("require-media", false, "要求图片 AES/XOR 候选通过真实样本验真")
+	databaseOnly := set.Bool("database-only", false, "明确只获取和保存数据库密钥，不启用图片能力")
+	requireMedia := set.Bool("require-media", false, "兼容旧调用：显式要求图片 AES/XOR 候选通过真实样本验真")
 	allowCoverageRegression := set.Bool("allow-coverage-regression", false, "明确允许用更少数据库覆盖现有快照")
 	showPaths := set.Bool("show-paths", false, "在预检结果中显示本机绝对路径")
 	if noExtraArguments(set, args) != nil {
@@ -963,6 +982,9 @@ func runSetup(args []string) (any, error) {
 	}
 	if *storage != "keychain" && *storage != "snapshot-only" {
 		return nil, invalidArguments("--storage 只支持 keychain 或 snapshot-only")
+	}
+	if *databaseOnly && *requireMedia {
+		return nil, invalidArguments("--database-only 与 --require-media 不能同时使用")
 	}
 	if *keysFile != "" && *allowKeyAccess {
 		return nil, invalidArguments("--keys 与 --allow-key-access 不能同时使用")
@@ -975,7 +997,7 @@ func runSetup(args []string) (any, error) {
 		return map[string]any{
 			"status": "planned", "account": publicLocalAccount(account, *showPaths), "key_provider": publicProviderStatus(provider.Current(*providerPath), *showPaths),
 			"key_access_authorized": false, "process_access_performed": false,
-			"secrets_persisted": false, "storage": *storage, "paths_included": *showPaths,
+			"secrets_persisted": false, "storage": *storage, "database_only": *databaseOnly, "media_required": !*databaseOnly, "paths_included": *showPaths,
 			"prevents_coverage_regression": !*allowCoverageRegression,
 		}, nil
 	}
@@ -996,7 +1018,11 @@ func runSetup(args []string) (any, error) {
 		if !*allowKeyAccess {
 			return nil, &commandError{typeName: "key_access_not_authorized", message: "尚未授权读取本机微信进程中的密钥候选", hint: "确认风险后传入 --allow-key-access，或使用 --keys FILE。", code: 3}
 		}
-		bundle, err = provider.Acquire(context.Background(), *providerPath, account)
+		scopes := []string{"database", "image"}
+		if *databaseOnly {
+			scopes = []string{"database"}
+		}
+		bundle, err = provider.AcquireScopes(context.Background(), *providerPath, account, scopes)
 		if errors.Is(err, provider.ErrComponentMissing) {
 			return nil, &commandError{
 				typeName: "key_acquisition_component_missing",
@@ -1009,8 +1035,11 @@ func runSetup(args []string) (any, error) {
 			return nil, keyProviderCommandError(err)
 		}
 	}
+	if *databaseOnly {
+		bundle.ImageKeys = nil
+	}
 	return publishAccountSnapshot(account, bundle, snapshotPublishOptions{
-		Storage: *storage, RequireMedia: *requireMedia, PersistSecrets: true,
+		Storage: *storage, RequireMedia: !*databaseOnly, DatabaseOnly: *databaseOnly, PersistSecrets: true,
 		PreventCoverageRegression: !*allowCoverageRegression,
 		ProcessAccessPerformed:    *allowKeyAccess, CredentialSource: credentialSource,
 	})
@@ -1933,7 +1962,7 @@ func commandSchemas() map[string]any {
 		"install":           map[string]any{"usage": "v-local-cli install [--dry-run] [--skip-skill] [--show-paths]", "installs_bundled_skill": true, "external_installer": false},
 		"doctor":            map[string]any{"usage": "v-local-cli doctor [--provider FILE] [--show-paths] [--bundle FILE] [--force]", "read_only_without_bundle": true, "paths_default": "redacted", "bundle_sanitized": true},
 		"capabilities":      map[string]any{"usage": "v-local-cli capabilities", "read_only": true, "separates_build_and_data_layout_validation": true},
-		"setup":             map[string]any{"usage": setupUsage, "reads_process_only_with_authorization": true, "account_lock": true, "prevents_coverage_regression": true, "storage_values": []string{"keychain", "snapshot-only"}, "media_validation_optional": true, "paths_default": "redacted"},
+		"setup":             map[string]any{"usage": setupUsage, "reads_process_only_with_authorization": true, "account_lock": true, "prevents_coverage_regression": true, "storage_values": []string{"keychain", "snapshot-only"}, "media_validation_default_required": true, "database_only_opt_out": true, "paths_default": "redacted"},
 		"refresh":           map[string]any{"usage": "v-local-cli refresh [--account NAME] [--require-media]", "reads_saved_keychain": true, "reads_process": false, "network": false, "writes_snapshot": true, "modifies_saved_secrets": false, "account_lock": true, "prevents_coverage_regression": true},
 		"forget":            map[string]any{"usage": "v-local-cli forget --account NAME [--dry-run | --yes]", "destructive": true, "requires_confirmation": true},
 		"gc":                map[string]any{"usage": "v-local-cli gc [--account NAME] [--dry-run]", "retains_current_and_previous_generation": true},

@@ -78,8 +78,8 @@ v-local-cli capabilities
 | 搜索公众号标题、摘要或作者 | 运行 `official-search`；能限定公众号时传 `--publisher`。 |
 | 获取一篇公众号正文 | 从 `official-history` 或 `official-search` 取得 `publication:` 证据标识；先运行不联网的 `official-article`，仅在返回需授权且用户明确同意后，对同一标识增加 `--allow-network`。 |
 | 生成 JSON/JSONL 文件 | 先完成对应查询，再运行 `export`。 |
-| 解密指定 DAT 图片 | setup 时验证图片候选并使用 `keychain`，再运行 `export-media`。 |
-| 获取最新落盘消息 | 已使用 `keychain` 时在目标查询增加 `--fresh`；需要单独检查刷新结果时运行 `refresh`。仅在凭据不可用或覆盖不足时重新 setup。现有快照不是实时视图。 |
+| 解密指定 DAT 图片 | 首次 setup 使用 `--storage keychain`，默认一次性验证并保存数据库和图片密钥，再运行 `export-media`。 |
+| 获取最新落盘消息 | 已使用 `keychain` 时在目标查询增加 `--fresh`；媒体任务需要单独检查刷新结果时运行 `refresh --require-media`，纯文本任务可运行 `refresh`。仅在凭据不可用或覆盖不足时重新 setup。现有快照不是实时视图。 |
 | 查看或安装 Agent Skill | 先运行 `install --dry-run`；用户要求执行安装时再运行 `install`。 |
 | 清理旧快照空间 | 先运行 `gc --dry-run`，确认只删除旧版本和暂存目录后再执行。 |
 | 删除账号的全部 v-local-cli 本地数据 | 先运行 `forget --dry-run`，展示不可恢复范围并取得明确确认，再增加 `--yes`。 |
@@ -102,7 +102,7 @@ v-local-cli capabilities
 1. 先向用户说明：该组件读取本机微信本地数据以推导候选、需单独安装、以当前桌面用户权限运行；确认用户只对自己或已授权的数据使用。
 2. **取得明确同意后**，才运行该错误 `hint` 中给出的、组件自带的安装命令（下载与校验由组件自己的安装器完成，本 CLI 不代为获取）；不要从其他来源下载或安装。
 3. 用户不同意安装时，改用 `setup --keys FILE` 导入用户自行合法取得的候选（格式见 [references/key-provider.md](references/key-provider.md)），该路径不需要此组件。
-4. 安装后重跑 `setup --allow-key-access`；安装是一次性动作，逐次授权仍单独适用。macOS
+4. 安装后重跑 `setup --allow-key-access --storage keychain`；安装是一次性动作，逐次授权仍单独适用。若当前任务明确只需要文本，才显式增加 `--database-only`。macOS
    Provider 默认会在普通 helper 被拒绝后尝试管理员授权兼容路径；若 SIP 仍开启，则按
    `key_provider_sip_required` 处理，或改用 `--keys` 导入。动态捕获未触发时反馈
    `key_provider_hook_trigger_required` 或 `key_provider_hook_restart_required`，先启动下一次 setup
@@ -121,8 +121,8 @@ v-local-cli provider status
 v-local-cli doctor
 v-local-cli voice-status
 v-local-cli ocr-status
-v-local-cli setup --allow-key-access
-v-local-cli refresh --account <account>
+v-local-cli setup --allow-key-access --storage keychain
+v-local-cli refresh --account <account> --require-media
 v-local-cli install
 v-local-cli gc --account <account>
 v-local-cli forget --account <account> --dry-run

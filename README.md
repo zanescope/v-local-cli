@@ -53,6 +53,10 @@ v-local-cli setup --dry-run
 v-local-cli setup --allow-key-access --storage keychain
 #   没有安装外部密钥组件时，导入自己合法取得的候选文件（格式见 references/key-provider.md）：
 v-local-cli setup --keys keys.json --storage keychain
+#   完整初始化应确认 data.status=ready、data.media.status=verified、
+#   data.database_keys_persisted=true 且 data.image_keys_persisted=true。
+#   只有明确的纯文本任务才使用下面的 database-only 例外：
+#   v-local-cli setup --allow-key-access --storage keychain --database-only
 
 # 3. 查询
 v-local-cli contacts --limit 50 "张三"
@@ -60,7 +64,8 @@ v-local-cli history --start 2026-08-01 --limit 200 <chat_username>
 v-local-cli search --chat <chat_username> "关键词"
 
 # 4. 获取最新数据（复用凭据库中已验证的密钥，不再读微信进程）
-v-local-cli refresh
+v-local-cli refresh --require-media
+#   纯文本任务可以省略 --require-media；图片任务保留它以继续验证 DAT。
 #   或者只让某一次查询取最新数据：加 --fresh，先刷新再执行该命令
 v-local-cli history --fresh --limit 200 <chat_username>
 ```

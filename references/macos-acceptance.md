@@ -31,7 +31,7 @@ GitHub runner 的架构与临时虚拟机边界以 [GitHub-hosted runners refere
 
 1. 验证候选发布件摘要，再在本机运行 `v-local-cli --version`、`capabilities` 和 `schema`。
 2. 确认 `runtime.os=darwin`、架构正确，且在 Apple Silicon 上 `data_layout_validation.darwin_arm64=build_only`。
-3. 运行 `accounts`、`status`、`doctor` 和 `provider status`。默认输出不得包含绝对路径；只有本地排错副本可以临时增加 `--show-paths`，且不得上传。
+3. 运行 `accounts`、`status`、`doctor` 和 `provider status`。默认输出不得包含绝对路径；只有本地排错副本可以临时增加 `--show-paths`，且不得上传。若沙箱或桌面宿主禁止 `/bin/ps`，Provider 会回退到 `launchctl print gui/<uid>` 查询微信应用服务；只有两者都不可用时才报告 `key_provider_process_list_unavailable`，这不等同于微信未运行。
 4. 确认 `provider.darwin_arm64_setup_source=user_supplied_candidate_file`、`darwin_arm64_automatic_helper=experimental_build_only`，原生 OCR 支持目标只有 `windows/amd64`。
 5. 在源码检出目录运行完整 Go/npm 测试；macOS 定向测试必须覆盖账号路径、`0700` 权限、符号链接拒绝、账号锁、状态中断恢复、并发发布和硬链接隔离。
 
@@ -41,7 +41,7 @@ GitHub runner 的架构与临时虚拟机边界以 [GitHub-hosted runners refere
 
 1. 先运行 `accounts`，核对是否只发现含 `db_storage` 的真实账号目录；存在多个账号时必须显式选择，不能默认第一个。
 2. 自动发现失败时，只在本地用 `V_LOCAL_CLI_ACCOUNT_DIR` 指向已核对的账号目录。记录「自动发现失败」，不能把显式路径成功算作自动发现通过。
-3. 使用候选文件执行 `setup --dry-run --account <账号> --keys <本地候选文件> --storage snapshot-only`。
+3. 使用候选文件执行 `setup --dry-run --account <账号> --keys <本地候选文件> --storage snapshot-only --database-only`。这一步明确只验收数据库快照，不保存密钥，也不是完整媒体流程。
 4. 核对计划后执行相同 setup，确认源数据库没有被修改，已发布快照具有 manifest、版本标识和数据库摘要。
 5. 对联系人、私聊、群聊和结构化卡片分别运行受限 `contacts`、`history`、`search` 与 `stats`，再用人工已知样本核对时间、发送方、类型和条数。
 6. 运行一次 JSON/JSONL 导出，验证默认拒绝覆盖、显式 `--force`、符号链接拒绝以及失败后无临时输出残留。
@@ -52,8 +52,8 @@ GitHub runner 的架构与临时虚拟机边界以 [GitHub-hosted runners refere
 
 只在专用测试账号上执行：
 
-1. 用相同候选重新 setup，选择 `--storage keychain`，确认只保存已经真实样本验证的最小候选集合。
-2. 新增一条已知测试消息后执行 `refresh`，确认 `credential_source=saved_keychain`、`process_access_performed=false`、`secrets_persisted=false`。
+1. 用包含数据库和图片两类候选的相同候选重新 setup：`setup --account <账号> --keys <本地候选文件> --storage keychain`。默认流程会强制媒体验证；确认输出同时满足 `status=ready`、`media.status=verified`、`database_keys_persisted=true` 和 `image_keys_persisted=true`；任一字段不满足都不能算完整密钥流程通过。
+2. 新增一条已知测试消息后执行 `refresh --require-media`，确认 `credential_source=saved_keychain`、`process_access_performed=false`、`secrets_persisted=false`，并再次确认 `media.status=verified`。
 3. 验证刷新生成新不可变版本；制造覆盖减少的测试副本时必须返回 `snapshot_coverage_regression` 并保留当前版本。
 4. 退出终端并在同一桌面用户的新会话中再次刷新，验证凭据可读；其他用户身份不得获得这些候选。
 5. 运行 `forget --dry-run` 核对范围。只有可丢弃测试数据才执行 `forget --yes`，并确认状态、快照、临时文件和 Keychain 项全部删除。

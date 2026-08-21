@@ -30,7 +30,7 @@ Windows 实验 OCR 只从 Known Folder API 返回的 Program Files 根发现安�
 1. 主 CLI 发现账号及 `db_storage`，再取得该账号的非阻塞操作系统文件锁；同账号已有 setup/refresh 时立即返回 `snapshot_busy`。
 2. `--keys` 读取用户已有候选；`--allow-key-access` 才启动外部密钥组件。两者互斥。
 3. CLI 绑定一次性 `request_id`，限制外部密钥组件响应大小并检查候选格式。
-4. 图片候选使用真实 DAT 样本验证；`--require-media` 可把它设为硬条件。
+4. 图片候选使用真实 DAT 样本验证；setup 默认把它作为硬条件，只有显式 `--database-only` 才允许 database-only 流程。
 5. 每个数据库和 WAL 先流式复制为大小受限的稳定私有副本，再用 SQLCipher 首页验证并逐页解密；不会把完整大库一次性读入内存。
 6. CLI 校验 WAL 头、salt、帧校验和与最后一次提交，只回放完整提交。
 7. 完整快照先写入私有暂存目录，生成包含版本标识、创建版本、源文件大小/修改时间、明文 SHA-256 和覆盖汇总的 manifest，再原子改名为不可变 `snapshots/<generation_id>`。源大小和修改时间只用于记录稳定复制时的本地状态，不是密码学来源签名。

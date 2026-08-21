@@ -14,6 +14,7 @@
 | `key_provider_failed` | 运行 `v-local-cli provider status`；确认 Provider 是单独安装的正确平台版本。重新登录微信或打开新消息后再试。 |
 | `key_provider_helper_missing` | 运行一次 `npx @zanescope/v-local-key-provider@latest install`；macOS 安装器会同时配置 helper，无需手工运行或传路径。 |
 | `key_provider_helper_failed` | 重新运行同一个 Provider 安装命令以恢复主程序与 helper 的匹配版本，再重试 setup。 |
+| `key_provider_process_list_unavailable` | 当前环境无法枚举 macOS 进程；请在普通 macOS Terminal 中重试，或确认环境允许读取进程列表。这不等同于微信未运行。 |
 | `key_provider_permission_denied` | 已安装 helper，但 macOS 仍拒绝读取微信进程。保持微信登录并重试；Provider 会自动尝试管理员授权，不要手工运行 helper、改签微信或注入进程。 |
 | `key_provider_sip_required` | SIP 仍开启。无 Developer ID 的兼容模式只有在用户明确接受风险后，才能在恢复模式临时关闭 SIP；不希望更改系统安全设置时，改用 `--keys FILE` 导入已取得的候选。 |
 | `key_provider_hook_trigger_required` | 当前数据库已经打开，普通切换会话不一定重新创建加密上下文。先完全退出微信并启动下一次 setup；保持终端窗口运行，看到命令尚未返回提示符时从“应用程序”重新打开微信并完成账号登录；不需要手工运行 helper 或 lldb。 |
@@ -32,7 +33,8 @@
 | `invalid_key_bundle` | 不打印文件内容；让用户确认文件来源和协议格式。 |
 | `media_too_large` | 不绕过 64 MiB 上限；让用户提供更小或正确的输入文件。 |
 | `media_decrypt_failed` | 核对账号、输入 DAT 和图片候选是否匹配，再重新 setup。 |
-| `media_key_unverified` | 刷新时先打开一条含图片的新消息后重试 `refresh`；若已保存图片密钥缺失则重新 setup。纯文本任务可不加 `--require-media`。 |
+| `media_key_unverified` | 默认 setup，以及带 `--require-media` 的媒体刷新，要求图片候选通过真实 DAT 验证；先打开一条含图片的新消息后重试。若当前确实只处理文本，重新 setup 时显式增加 `--database-only`。 |
+| `image_keys_persisted=false` | `snapshot-only` 会有意不保存任何密钥；在 `keychain` 模式下只有显式 `--database-only` 才允许图片密钥缺失。若 keychain 命令未带该标志却出现此结果，应重新运行默认的 `setup --allow-key-access --storage keychain`。 |
 | `need_media_keys` | setup 使用了 `snapshot-only`，或系统凭据库写入失败；用 `--storage keychain` 重新 setup。 |
 | `voice_dependency_required` | 微信已有转写索引和 v-local-cli 私有暂存均缺少部分文字。先询问用户是否安装本地 whisper.cpp 与多语言模型，或独立 `v-local-cli-sensevoice` 适配器与 SenseVoice 模型；同意后只从各自官方发布源安装并校验摘要，可配置 `V_LOCAL_CLI_WHISPER_BIN`/`V_LOCAL_CLI_WHISPER_MODEL` 或 `V_LOCAL_CLI_ASR_PROVIDER`/`V_LOCAL_CLI_ASR_MODEL`。不同意则用 `voice-search --cached-only`，不要改用在线 ASR。 |
 | `voice_evidence_unavailable` | 重新从当前快照的 `history` 取得 `kind=voice` 的 `evidence_id`；确认快照包含相应 `media_*.db`，不要按时间或文件名猜测语音。 |
