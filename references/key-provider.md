@@ -10,6 +10,8 @@ macOS 包含一个与主程序同目录的 companion helper。Provider 自动发
 启动被 `task_for_pid` 拒绝后，Provider 会检查 SIP，并在 SIP 已关闭时弹出系统管理员授权后
 自动重试；SIP 开启时返回 `key_provider_sip_required`，不会自动修改系统安全设置。
 CLI 只接受 `helper_status`、`process_access_status` 等无密钥状态枚举用于生成恢复提示。
+如果 `process_access_status=process_list_unavailable`，表示 `ps` 与 `launchctl` 都无法枚举进程；CLI 会返回
+`key_provider_process_list_unavailable`，不能把它解释成微信未运行。应在普通 macOS Terminal 中重试，或检查当前宿主环境的进程读取权限。
 
 Apple Silicon（`arm64`）和 Intel（`x86_64`）的使用步骤相同，但动态 Hook 使用不同的 CPU ABI。
 Provider 会读取实际微信进程架构：原生 arm64 微信使用 arm64 寄存器，Apple Silicon 上通过 Rosetta
@@ -50,11 +52,15 @@ Intel Mac 重启时按住 `Command-R`。在恢复环境顶部菜单选择“实�
 
 - `database_keys` 的键是相对数据库路径；`*` 表示对所有数据库尝试同一候选。
 - `image_keys.aes` 为 16 字节 ASCII，`image_keys.xor` 为 0–255 的单字节整数。
-- 缺少图片候选时可以只导入数据库候选，先建立文本快照；需要图片能力时再补齐并配合 `--require-media`。
+- 完整初始化应同时包含 `database_keys` 和 `image_keys`，并用严格模式一次性验证和保存两类密钥：
+  `v-local-cli setup --allow-key-access --storage keychain`（导入文件时将
+  `--allow-key-access` 换成 `--keys <file>`）。
+- 默认 setup 就要求图片候选通过 DAT 验证；缺少图片候选时会失败，不会悄悄只保存数据库密钥。
+- 只有明确的纯文本任务才使用 `--database-only`，例如 `v-local-cli setup --allow-key-access --storage keychain --database-only`；该模式向 Provider 只请求 `database` scope，并且不会保存图片候选。
 
 ## 验证与边界
 
-主 CLI 对候选**独立验证**，不信任来源自报的正确性：数据库候选用 SQLCipher 首页校验，图片候选用真实 DAT 样本与容器检查。候选不出现在命令行参数中；从外部组件读入的 stdout 只在进程内使用，不写入日志、不交给 Agent。
+主 CLI 对候选**独立验证**，不信任来源自报的正确性：数据库候选用 SQLCipher 首页校验，图片候选用真实 DAT 样本与容器检查。默认 setup 把数据库和图片候选作为一个整体处理，任一 scope 未验证就不发布或保存；使用 `--storage keychain` 的完整 setup 成功时应检查 `status=ready`、`media.status=verified`、`database_keys_persisted=true` 和 `image_keys_persisted=true`。只有显式 `--database-only` 才允许不验证图片；该模式用 keychain 时输出 `database_only=true`、`image_keys_persisted=false`。`snapshot-only` 即使完成图片验证也不会保存任何密钥。旧的 `--require-media` 仍作为兼容性的显式严格标志接受。候选不出现在命令行参数中；从外部组件读入的 stdout 只在进程内使用，不写入日志、不交给 Agent。
 
 开发构建可用 `--provider <明确路径>` 或 `V_LOCAL_CLI_KEY_PROVIDER` 指向已安装的外部组件；正式发布还应在安装层验证签名与校验和。CLI 在启动前把该路径解析为绝对普通文件，并把子进程工作目录固定到其自身目录，避免从调用方工作区解析相对依赖。
 

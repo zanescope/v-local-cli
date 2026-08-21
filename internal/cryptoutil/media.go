@@ -107,6 +107,9 @@ func DecryptImageDAT(data []byte, aesKey string, xorKey int) ([]byte, string, er
 			return nil, "", err
 		}
 		decrypted = unpadPKCS7(decrypted)
+		if aesSize > len(decrypted) {
+			return nil, "", errors.New("DAT AES 明文长度超过解密结果")
+		}
 		if aesSize < len(decrypted) {
 			decrypted = decrypted[:aesSize]
 		}

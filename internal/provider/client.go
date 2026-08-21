@@ -35,12 +35,13 @@ var ErrComponentMissing = errors.New("未找到 v-local-key-provider")
 // AcquisitionError contains only provider-supplied status enums. It never
 // carries candidate values, paths, stderr, or process memory.
 type AcquisitionError struct {
-	Reason              string
-	Platform            string
-	ProcessAccessStatus string
-	ProcessAccessError  string
-	HelperStatus        string
-	VersionSupport      string
+	Reason                 string
+	Platform               string
+	ProcessAccessStatus    string
+	ProcessAccessError     string
+	ProcessDiscoveryMethod string
+	HelperStatus           string
+	VersionSupport         string
 }
 
 func (err *AcquisitionError) Error() string {
@@ -104,8 +105,17 @@ func newRequestID() (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
-// Acquire 在受限协议上调用独立密钥提供器。密钥只经 stdin/stdout 传递。
+// Acquire 在受限协议上调用独立密钥提供器，并请求完整的数据库和图片候选。
+// 密钥只经 stdin/stdout 传递。
 func Acquire(parent context.Context, explicit string, account localplatform.Account) (CandidateBundle, error) {
+	return AcquireScopes(parent, explicit, account, []string{"database", "image"})
+}
+
+// AcquireScopes 允许调用方为明确的 database-only 流程缩小请求范围。
+func AcquireScopes(parent context.Context, explicit string, account localplatform.Account, scopes []string) (CandidateBundle, error) {
+	if len(scopes) == 0 {
+		return CandidateBundle{}, errors.New("密钥请求至少需要一个 scope")
+	}
 	path, _ := Resolve(explicit)
 	if path == "" {
 		return CandidateBundle{}, ErrComponentMissing
@@ -117,7 +127,7 @@ func Acquire(parent context.Context, explicit string, account localplatform.Acco
 	request := acquireRequest{
 		Protocol: Protocol, RequestID: requestID, Action: "acquire",
 		AccountDir: account.Path, DBDir: account.DBDir,
-		Scopes:     []string{"database", "image"},
+		Scopes:     append([]string(nil), scopes...),
 		DeadlineMS: acquireBudget.Milliseconds(),
 	}
 	payload, err := json.Marshal(request)
@@ -170,14 +180,17 @@ func diagnosticString(values map[string]any, name string) string {
 
 func acquisitionError(values map[string]any) *AcquisitionError {
 	result := &AcquisitionError{
-		Reason:              "no_candidates",
-		Platform:            diagnosticString(values, "platform"),
-		ProcessAccessStatus: diagnosticString(values, "process_access_status"),
-		ProcessAccessError:  diagnosticString(values, "process_access_error"),
-		HelperStatus:        diagnosticString(values, "helper_status"),
-		VersionSupport:      diagnosticString(values, "version_support"),
+		Reason:                 "no_candidates",
+		Platform:               diagnosticString(values, "platform"),
+		ProcessAccessStatus:    diagnosticString(values, "process_access_status"),
+		ProcessAccessError:     diagnosticString(values, "process_access_error"),
+		ProcessDiscoveryMethod: diagnosticString(values, "process_discovery_method"),
+		HelperStatus:           diagnosticString(values, "helper_status"),
+		VersionSupport:         diagnosticString(values, "version_support"),
 	}
 	switch result.ProcessAccessStatus {
+	case "process_list_unavailable":
+		result.Reason = "process_list_unavailable"
 	case "denied":
 		result.Reason = "process_access_denied"
 	case "wechat_not_running":

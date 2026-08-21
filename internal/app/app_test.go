@@ -89,6 +89,13 @@ func TestKeyProviderCommandErrorKeepsMacOSHelperRecoverySimple(t *testing.T) {
 	if err.typeName != "key_provider_hook_restart_required" || !strings.Contains(err.hint, "完成账号登录") {
 		t.Fatalf("unexpected hook restart recovery: %+v", err)
 	}
+
+	err = keyProviderCommandError(&provider.AcquisitionError{
+		Reason: "process_list_unavailable", Platform: "darwin", ProcessDiscoveryMethod: "ps_then_launchctl",
+	})
+	if err.typeName != "key_provider_process_list_unavailable" || !strings.Contains(err.hint, "不等同于微信未运行") {
+		t.Fatalf("unexpected process discovery recovery: %+v", err)
+	}
 }
 
 func privateTestSnapshot(t *testing.T, home, accountID, source string) string {
@@ -974,11 +981,18 @@ func TestSetupSnapshotOnlyAndContacts(t *testing.T) {
 	}
 	t.Setenv("V_LOCAL_CLI_ACCOUNT_DIR", account)
 	t.Setenv("V_LOCAL_CLI_HOME", testHome(t))
-	code, output, errors := runForTest("setup", "--keys", keyFile, "--storage", "snapshot-only")
+	code, _, errorOutput := runForTest("setup", "--keys", keyFile, "--storage", "snapshot-only")
+	if code == 0 || errorOutput["error"].(map[string]any)["type"] != "media_key_unverified" {
+		t.Fatalf("setup 默认应要求完整图片密钥：code=%d error=%v", code, errorOutput)
+	}
+	code, output, errors := runForTest("setup", "--keys", keyFile, "--storage", "snapshot-only", "--database-only")
 	if code != 0 {
 		t.Fatalf("setup 退出码=%d output=%v error=%v", code, output, errors)
 	}
 	setupData := output["data"].(map[string]any)
+	if setupData["status"] != "ready" || setupData["database_only"] != true || setupData["database_keys_persisted"] != false || setupData["image_keys_persisted"] != false {
+		t.Fatalf("database-only setup 状态不明确：%v", setupData)
+	}
 	accountData := setupData["account"].(map[string]any)
 	if accountData["version"].(float64) != 2 || accountData["updated_at"] == "" || accountData["generation_id"] == "" || accountData["snapshot_manifest_sha256"] == "" {
 		t.Fatalf("setup 状态元数据未同步：%v", accountData)
