@@ -288,7 +288,7 @@ func voiceTranscriptFromWeChat(message store.Message, indexed store.WeChatIndexe
 	}
 }
 
-func attachExistingVoiceTranscripts(value state.AccountState, messages []store.Message) error {
+func attachExistingVoiceTranscripts(value state.AccountState, messages []store.Message, includePrivateCache bool) error {
 	evidenceIDs := map[string]bool{}
 	for _, message := range messages {
 		if message.Kind == "voice" {
@@ -302,13 +302,16 @@ func attachExistingVoiceTranscripts(value state.AccountState, messages []store.M
 	if err != nil {
 		return err
 	}
-	cachePath, err := state.VoiceTranscriptPath(value.AccountID)
-	if err != nil {
-		return err
-	}
-	cached, err := store.LoadVoiceTranscripts(cachePath, evidenceIDs)
-	if err != nil {
-		return err
+	cached := map[string]store.VoiceTranscript{}
+	if includePrivateCache {
+		cachePath, err := state.VoiceTranscriptPath(value.AccountID)
+		if err != nil {
+			return err
+		}
+		cached, err = store.LoadVoiceTranscripts(cachePath, evidenceIDs)
+		if err != nil {
+			return err
+		}
 	}
 	for index := range messages {
 		if messages[index].Kind != "voice" {

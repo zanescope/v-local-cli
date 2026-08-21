@@ -90,6 +90,14 @@ jobs:
           ./scripts/build-windows-release.ps1 -Arch '${{ matrix.arch }}' -CertificateThumbprint '${{ steps.certificate.outputs.thumbprint }}'
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item 'build/windows-${{ matrix.arch }}/v-local-cli.exe' 'dist/v-local-cli-windows-${{ matrix.arch }}.exe'
+          if ('${{ matrix.arch }}' -eq 'amd64') {
+            & 'dist/v-local-cli-windows-amd64.exe' --version
+            if ($LASTEXITCODE -ne 0) { throw '签名 Windows 二进制 version 烟测失败' }
+            & 'dist/v-local-cli-windows-amd64.exe' schema sessions | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw '签名 Windows 二进制 schema 烟测失败' }
+            & 'dist/v-local-cli-windows-amd64.exe' --output yaml schema sessions | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw '签名 Windows 二进制 YAML 烟测失败' }
+          }
       - name: 移除临时证书
         if: always() && steps.certificate.outputs.thumbprint != ''
         shell: pwsh
@@ -164,9 +172,21 @@ jobs:
           test -n "${APPLE_ID}"
           archive="${RUNNER_TEMP}/v-local-cli-${{ matrix.name }}.zip"
           ditto -c -k --sequesterRsrc --keepParent 'dist/v-local-cli-darwin-${{ matrix.arch }}' "${archive}"
-          xcrun notarytool submit "${archive}" --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" --password "${APPLE_APP_PASSWORD}" --wait
+          submission="$(xcrun notarytool submit "${archive}" --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" --password "${APPLE_APP_PASSWORD}" --wait --output-format json)"
+          submission_id="$(printf '%s' "${submission}" | plutil -extract id raw -o - -)"
+          submission_status="$(printf '%s' "${submission}" | plutil -extract status raw -o - -)"
+          test -n "${submission_id}"
+          test "${submission_status}" = 'Accepted'
+          notary_log="${RUNNER_TEMP}/notary-${{ matrix.name }}.json"
+          xcrun notarytool log "${submission_id}" --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" --password "${APPLE_APP_PASSWORD}" "${notary_log}"
+          python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); bad=[i for i in d.get("issues", []) if str(i.get("severity", "")).lower() in {"warning", "error"}]; print(json.dumps(bad, ensure_ascii=False, indent=2)) if bad else None; sys.exit(1 if bad else 0)' "${notary_log}"
           codesign --verify --strict --verbose=2 'dist/v-local-cli-darwin-${{ matrix.arch }}'
           spctl --assess --type execute --verbose=4 'dist/v-local-cli-darwin-${{ matrix.arch }}'
+          'dist/v-local-cli-darwin-${{ matrix.arch }}' --version
+          'dist/v-local-cli-darwin-${{ matrix.arch }}' schema sessions >/dev/null
+          'dist/v-local-cli-darwin-${{ matrix.arch }}' --output yaml schema sessions >/dev/null
+          file 'dist/v-local-cli-darwin-${{ matrix.arch }}'
+          cp "${notary_log}" 'dist/notary-log-${{ matrix.name }}.json'
       - name: 保存签名资产
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

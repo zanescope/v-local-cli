@@ -19,3 +19,11 @@ Windows 原生 OCR 只从系统 Known Folder API 返回的 Program Files 根发�
 ## 隐私边界
 
 CLI 不上传遥测。普通查询和刷新不联网。只有用户对具体朋友圈媒体显式传入 `--allow-network` 时，才会把该记录自带的临时令牌发给它绑定的受限腾讯 CDN；只有用户对具体公众号文章显式传入 `--allow-network` 时，才会把从本地卡片重新验证并清理后的公开文章标识发送给 `mp.weixin.qq.com`。这两类请求都不使用浏览器 Cookie、不跟随重定向，也不会复用彼此的网络授权。
+
+## 派生索引、增量游标与查询 daemon
+
+generation 消息索引与 consumer 游标属于账号私有派生状态，采用与快照相同的当前用户专属目录权限和重解析点拒绝规则。索引 manifest 绑定账号、generation、snapshot manifest 摘要、schema 和 parser 版本；绑定不符时拒绝查询。结构化全文文本会排除名称含 token、secret、key 等敏感语义的字段，但索引本身仍包含聊天正文和完整结构化消息，因此必须按快照同等级保护。
+
+增量 poll 在返回前原子持久化 pending batch，只有正确 `batch_id` 被 ack 后才推进；这保证 at-least-once，不保证 exactly-once。调用方需要按 `evidence_id` 幂等处理，不能在处理失败时自动 ack。`gc` 不删除仍被有效 consumer 引用的派生 generation。
+
+查询 daemon 通过操作系统锁保持前台单实例，只绑定 IPv4 loopback 随机端口，使用当前用户私有状态中的随机 bearer token，并限制请求/响应大小、并发数和 deadline。白名单只允许 immutable generation 查询，明确拒绝刷新、Provider、账号源媒体解析、可变私有 ASR cache、联网、导出、索引构建和游标写入。它不构成跨用户安全服务：与 CLI 同一桌面用户权限运行的恶意进程通常也能读取该用户文件和进程资源；高保证环境仍应使用独立低权限账号或操作系统沙箱。不要把 endpoint 改为局域网或公网地址。

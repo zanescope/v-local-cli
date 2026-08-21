@@ -58,34 +58,9 @@ func loadGroupNicknames(root, chat string) map[string]string {
 
 func parseChatRoomMembers(payload []byte) map[string]string {
 	result := map[string]string{}
-	for offset := 0; offset < len(payload); {
-		field, wire, value, next, ok := nextProtoField(payload, offset)
-		if !ok {
-			break
-		}
-		offset = next
-		if field != 1 || wire != 2 {
-			continue
-		}
-		username, displayName := "", ""
-		for memberOffset := 0; memberOffset < len(value); {
-			memberField, memberWire, memberValue, memberNext, memberOK := nextProtoField(value, memberOffset)
-			if !memberOK {
-				break
-			}
-			memberOffset = memberNext
-			if memberWire != 2 || !validProtoText(memberValue) {
-				continue
-			}
-			switch memberField {
-			case 1:
-				username = strings.TrimSpace(string(memberValue))
-			case 2:
-				displayName = strings.TrimSpace(string(memberValue))
-			}
-		}
-		if username != "" && displayName != "" {
-			result[username] = displayName
+	for _, member := range parseChatRoomMemberList(payload) {
+		if member.Display != "" {
+			result[member.Username] = member.Display
 		}
 	}
 	return result

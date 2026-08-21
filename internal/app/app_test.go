@@ -200,7 +200,7 @@ func TestSchemaOnlyListsImplementedCommands(t *testing.T) {
 		commands["ocr-search"].(map[string]any)["source"] != "wechat_index_probe+v-local-cli_private_cache" {
 		t.Fatal("schema 缺少 OCR 私有缓存或原生 OCR 授权边界")
 	}
-	if len(commands) != 33 {
+	if len(commands) != 41 {
 		t.Fatalf("schema 命令数量异常：%d", len(commands))
 	}
 }

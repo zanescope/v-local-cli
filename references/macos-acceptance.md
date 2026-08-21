@@ -33,7 +33,7 @@ GitHub runner 的架构与临时虚拟机边界以 [GitHub-hosted runners refere
 2. 确认 `runtime.os=darwin`、架构正确，且在 Apple Silicon 上 `data_layout_validation.darwin_arm64=build_only`。
 3. 运行 `accounts`、`status`、`doctor` 和 `provider status`。默认输出不得包含绝对路径；只有本地排错副本可以临时增加 `--show-paths`，且不得上传。若沙箱或桌面宿主禁止 `/bin/ps`，Provider 会回退到 `launchctl print gui/<uid>` 查询微信应用服务；只有两者都不可用时才报告 `key_provider_process_list_unavailable`，这不等同于微信未运行。
 4. 确认 `provider.darwin_arm64_setup_source=user_supplied_candidate_file`、`darwin_arm64_automatic_helper=experimental_build_only`，原生 OCR 支持目标只有 `windows/amd64`。
-5. 在源码检出目录运行完整 Go/npm 测试；macOS 定向测试必须覆盖账号路径、`0700` 权限、符号链接拒绝、账号锁、状态中断恢复、并发发布和硬链接隔离。
+5. 在源码检出目录运行完整 Go/npm 测试；macOS 定向测试必须覆盖账号路径、`0700` 权限、符号链接拒绝、账号锁、状态与增量游标中断恢复、generation 索引绑定、daemon loopback/token、并发发布和硬链接隔离。
 
 通过条件：命令可启动、JSON 契约稳定、默认输出无路径泄露，且任何未验证能力仍明确标为 `build_only` 或不可用。
 
@@ -43,8 +43,11 @@ GitHub runner 的架构与临时虚拟机边界以 [GitHub-hosted runners refere
 2. 自动发现失败时，只在本地用 `V_LOCAL_CLI_ACCOUNT_DIR` 指向已核对的账号目录。记录「自动发现失败」，不能把显式路径成功算作自动发现通过。
 3. 使用候选文件执行 `setup --dry-run --account <账号> --keys <本地候选文件> --storage snapshot-only --database-only`。这一步明确只验收数据库快照，不保存密钥，也不是完整媒体流程。
 4. 核对计划后执行相同 setup，确认源数据库没有被修改，已发布快照具有 manifest、版本标识和数据库摘要。
-5. 对联系人、私聊、群聊和结构化卡片分别运行受限 `contacts`、`history`、`search` 与 `stats`，再用人工已知样本核对时间、发送方、类型和条数。
-6. 运行一次 JSON/JSONL 导出，验证默认拒绝覆盖、显式 `--force`、符号链接拒绝以及失败后无临时输出残留。
+5. 对联系人、会话、快照未读、群成员、收藏、私聊、群聊和结构化卡片分别运行受限 `contacts`、`resolve-contact`、`sessions`、`unread`、`members`、`favorites`、`history`、`search` 与 `stats`，再用人工已知样本核对时间、发送方、类型和条数。至少制造一次同名联系人，确认模糊名称返回 `ambiguous_contact` 而不是自动取第一项。
+6. 运行 `index status` 和 `index build`，确认 manifest 的账号、generation 和 snapshot 摘要与本次快照一致，document count 与 SQLite 行数一致；结构化搜索命中提及、引用和卡片文字，token/key 字段不会成为全文命中来源。破坏测试副本中的任一绑定后必须拒绝复用。
+7. 分别运行默认 JSON、命令前全局 `--output yaml` 和 `--output table`；JSON 契约保持不变，YAML 可解析，table 明确只供人工阅读且不泄露默认隐藏路径。
+8. 启动 `daemon serve`，确认只监听 `127.0.0.1`、无 token 请求被拒绝、白名单查询绑定当前 generation；`refresh`、`--fresh`、`index build`、`new-messages` 和联网/导出命令必须被拒绝。停止后 endpoint 文件删除。
+9. 运行一次 JSON/JSONL 导出，验证默认拒绝覆盖、显式 `--force`、符号链接拒绝以及失败后无临时输出残留。
 
 通过条件：发现范围、解密报告和查询结果与人工样本一致；任何缺失分片、未知消息类型或时间差异都有明确覆盖说明。
 
@@ -55,8 +58,9 @@ GitHub runner 的架构与临时虚拟机边界以 [GitHub-hosted runners refere
 1. 用包含数据库和图片两类候选的相同候选重新 setup：`setup --account <账号> --keys <本地候选文件> --storage keychain`。默认流程会强制媒体验证；确认输出同时满足 `status=ready`、`media.status=verified`、`database_keys_persisted=true` 和 `image_keys_persisted=true`；任一字段不满足都不能算完整密钥流程通过。
 2. 新增一条已知测试消息后执行 `refresh --require-media`，确认 `credential_source=saved_keychain`、`process_access_performed=false`、`secrets_persisted=false`，并再次确认 `media.status=verified`。
 3. 验证刷新生成新不可变版本；制造覆盖减少的测试副本时必须返回 `snapshot_coverage_regression` 并保留当前版本。
-4. 退出终端并在同一桌面用户的新会话中再次刷新，验证凭据可读；其他用户身份不得获得这些候选。
-5. 运行 `forget --dry-run` 核对范围。只有可丢弃测试数据才执行 `forget --yes`，并确认状态、快照、临时文件和 Keychain 项全部删除。
+4. 在刷新前用 `new-messages --consumer arm64-acceptance --start now` 建立 consumer；新增三条已知消息并刷新后，以小于消息数的 `--limit` poll。确认未 ack 重试原样返回相同 `batch_id`，逐批 ack 后三条均只按 `evidence_id` 幂等处理且尾部不丢失。制造 poll 后进程中断，确认 `.old` 游标恢复；`gc` 不删除仍被该 consumer 引用的派生索引。
+5. 退出终端并在同一桌面用户的新会话中再次刷新，验证凭据、generation 索引和 consumer 进度可读；其他用户身份不得获得候选、索引、游标或 daemon token。
+6. 运行 `forget --dry-run` 核对范围。只有可丢弃测试数据才执行 `forget --yes`，并确认状态、快照、派生索引、consumer、临时文件和 Keychain 项全部删除。
 
 通过条件：保存、跨进程读取、刷新和删除均成功；失败时不得声称已刷新或已完全删除。
 
@@ -83,6 +87,7 @@ SIP，并在 SIP 已关闭时请求管理员授权重试。该路径只能作为
 - `spctl --assess --type execute --verbose=4 <binary>` 对最终下载件成功；
 - 审阅 notarization 日志，不忽略警告；使用 PKG/DMG 时同时验证附加票据；
 - 从干净目录经 npm 安装，重新校验下载摘要并运行 `version`、`capabilities` 和一次只读查询；
+- 对 npm 安装后的同一签名二进制再次运行 `schema`、YAML/table 烟测、generation 索引、增量重放和 daemon 白名单测试，不能用源码构建件替代；
 - 确认一次 npm 安装同时落地主程序与 helper，`provider status` 返回 `helper_available=true`，用户无需直接运行 helper；
 - 分别测试直接下载和带 quarantine 属性的首次启动体验。
 
@@ -101,6 +106,7 @@ SIP，并在 SIP 已关闭时请求管理员授权重试。该路径只能作为
 | database | discovered/decrypted/skipped/failed 汇总 |
 | coverage | 测试的命令、时间范围和已知样本类型 |
 | security | 路径脱敏、Keychain、清理、签名和 notarization 结果 |
+| generation_features | 索引绑定与完整性、增量 replay/ack/GC、daemon loopback/token、JSON/YAML/table |
 | gaps | 未覆盖分片、索引、媒体或架构 |
 
 状态升级按架构分别判断，不得由一种架构的结果推导另一种。某个架构只有在真机完成第二至第五阶段后，才能标成「真实设备验证的候选文件导入模式」；只有该架构的自动密钥来源、至少一次独立复验以及真实数据测试也通过后，才可对它使用不带限定的 `real_device_verified`。

@@ -73,6 +73,18 @@
 | `moment_media_verify_failed_container`、`moment_media_verify_failed_payload_size`、`moment_media_local_unavailable` | 本地或远端媒体未通过大小、解密或容器验证；刷新快照后重试，不要打开失败负载。 |
 | `moment_media_export_failed` | 没有生成可信输出；运行 `doctor` 后重试，不要改用通用下载器绕过证据和目标限制。 |
 | `skill_bundle_unavailable`、`skill_install_failed` | 使用官方 npm 包重新执行安装，并检查当前用户对 Skill 目录的写入权限；不要从未知目录复制 Skill。 |
+| `ambiguous_contact` | 展示 `details.candidates` 中最少必要的显示名、类型和稳定 username，让用户明确选择；不要自动取第一项。 |
+| `contact_not_found` | 运行 `v-local-cli contacts` 或 `v-local-cli resolve-contact` 检查名称、备注、昵称、别名和稳定 username。 |
+| `not_group_chat` | 当前解析结果不是 `@chatroom`；重新选择群聊，不要把普通联系人当作群成员源。 |
+| `index_build_failed` | 当前 generation 的派生索引未成功发布；运行 `v-local-cli index status` 检查绑定与 coverage，再重试 `index build`。快照本身仍保持不可变。 |
+| `index_required` | `new-messages` 需要 base/target generation 的完整消息索引；先修复索引覆盖问题，不要用不完整扫描推进游标。 |
+| `cursor_not_found` | 指定 consumer 尚未创建；去掉 `--status` 进行首次 poll，并明确选择 `--start now` 或 `--start beginning`。 |
+| `cursor_create_failed`、`cursor_poll_failed` | 检查账号私有目录权限、索引状态和同账号操作锁；不要删除或手改游标 JSON。 |
+| `cursor_ack_failed` | 只确认当前 pending 响应中的完整 `batch_id`；重新 poll 会重放同一批，不要猜测或跳过批次。 |
+| `cursor_delete_failed` | 先检查 consumer 名称和私有目录权限；只有用户确认重置进度时才重试 `--delete --yes`。 |
+| `daemon_unavailable` | 在同一桌面用户的独立终端运行 `v-local-cli daemon serve`，再检查 `daemon status`；不要连接非 loopback endpoint。 |
+| `daemon_request_failed` | 请求未通过 token、协议、大小、deadline 或 immutable 查询白名单；先直接运行同一只读查询定位参数，不要放宽 daemon 权限。 |
+| `daemon_serve_failed` | 检查当前用户私有状态目录与 loopback 监听能力；不要改为公网或局域网地址。 |
 | `internal_error` | 停止扩大操作范围，生成脱敏诊断包交给维护者；不要自动归因于数据库损坏。 |
 
 系统凭据按桌面用户身份隔离。若 CLI 在不同用户、服务或沙箱身份下运行，`refresh` 可能看不到原身份保存的凭据；不要把密钥复制到项目文件来绕过隔离，应切回同一桌面用户身份，或重新 setup。
