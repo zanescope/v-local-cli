@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/zanescope/v-local-cli/internal/cryptoutil"
+	"github.com/zanescope/v-local-cli/internal/inbox"
+	"github.com/zanescope/v-local-cli/internal/messageindex"
 	localplatform "github.com/zanescope/v-local-cli/internal/platform"
 	"github.com/zanescope/v-local-cli/internal/provider"
 	"github.com/zanescope/v-local-cli/internal/snapshot"
@@ -82,9 +84,27 @@ type commandError struct {
 func (err *commandError) Error() string { return err.message }
 
 func Main(args []string, stdout, stderr io.Writer) int {
+	return mainWithPolicy(args, stdout, stderr, false)
+}
+
+func mainWithPolicy(args []string, stdout, stderr io.Writer, immutableOnly bool) int {
 	if len(args) == 0 {
 		writeError(stderr, &commandError{typeName: "missing_command", message: "缺少命令", hint: "运行 v-local-cli --help 查看可用命令。", code: 2})
 		return 2
+	}
+	var mode outputMode
+	var outputErr error
+	args, mode, outputErr = parseOutputMode(args)
+	if outputErr != nil {
+		writeError(stderr, invalidArguments("全局用法：v-local-cli [--output json|yaml|table] <command> [参数]"))
+		return 2
+	}
+	if len(args) == 0 {
+		writeErrorMode(stderr, &commandError{typeName: "missing_command", message: "缺少命令", hint: "运行 v-local-cli --help 查看可用命令。", code: 2}, mode)
+		return 2
+	}
+	if args[0] == "--daemon" {
+		return runDaemonClient(args[1:], stdout, stderr, mode)
 	}
 	if args[0] == "--version" || args[0] == "version" {
 		fmt.Fprintln(stdout, Version)
@@ -102,7 +122,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		if !errors.As(freshErr, &commandErr) {
 			commandErr = &commandError{typeName: "fresh_failed", message: "刷新快照失败", hint: freshErr.Error(), code: 5}
 		}
-		writeError(stderr, commandErr)
+		writeErrorMode(stderr, commandErr, mode)
 		return commandErr.code
 	}
 	var data any
@@ -132,10 +152,26 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		data, err = runSchema(args[1:])
 	case "contacts":
 		data, err = runContacts(args[1:])
+	case "resolve-contact":
+		data, err = runResolveContact(args[1:])
+	case "sessions":
+		data, err = runSessions(args[1:], false)
+	case "unread":
+		data, err = runSessions(args[1:], true)
+	case "members":
+		data, err = runMembers(args[1:])
+	case "favorites":
+		data, err = runFavorites(args[1:])
+	case "new-messages":
+		data, err = runNewMessages(args[1:])
+	case "index":
+		data, err = runIndex(args[1:])
+	case "daemon":
+		data, err = runDaemon(args[1:])
 	case "history":
-		data, err = runHistory(args[1:])
+		data, err = runHistory(args[1:], immutableOnly)
 	case "search":
-		data, err = runSearch(args[1:])
+		data, err = runSearch(args[1:], immutableOnly)
 	case "voice-status":
 		data, err = runVoiceStatus(args[1:])
 	case "voice-transcribe":
@@ -185,7 +221,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 				hint: "运行 v-local-cli doctor 获取脱敏诊断信息后重试。", code: 1,
 			}
 		}
-		writeError(stderr, commandErr)
+		writeErrorMode(stderr, commandErr, mode)
 		return commandErr.code
 	}
 	meta := map[string]any{"version": Version, "runtime": "go"}
@@ -205,7 +241,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	if _, found := meta["snapshot_age_seconds"]; !found {
 		meta["snapshot_age_seconds"] = nil
 	}
-	writeJSON(stdout, envelope{SchemaVersion: responseSchemaVersion, OK: true, Data: data, Meta: meta})
+	writeEnvelope(stdout, envelope{SchemaVersion: responseSchemaVersion, OK: true, Data: data, Meta: meta}, mode)
 	return 0
 }
 
@@ -229,7 +265,8 @@ func prepareFreshQuery(args []string) ([]string, bool, error) {
 		return filtered, false, nil
 	}
 	supported := map[string]bool{
-		"contacts": true, "history": true, "search": true, "stats": true,
+		"contacts": true, "resolve-contact": true, "sessions": true, "unread": true, "members": true,
+		"favorites": true, "new-messages": true, "history": true, "search": true, "stats": true,
 		"moments-contacts": true, "moments": true, "moments-search": true,
 		"official-accounts": true, "official-history": true, "official-search": true, "official-article": true,
 		"voice-status": true, "voice-transcribe": true, "voice-search": true,
@@ -238,6 +275,15 @@ func prepareFreshQuery(args []string) ([]string, bool, error) {
 	}
 	if !supported[args[0]] {
 		return filtered, false, invalidArguments("--fresh 只用于读取微信快照的查询、识别和导出命令")
+	}
+	if args[0] == "new-messages" {
+		for _, argument := range filtered[1:] {
+			if argument == "--status" || argument == "-status" || strings.HasPrefix(argument, "--status=") || strings.HasPrefix(argument, "-status=") ||
+				argument == "--delete" || argument == "-delete" || strings.HasPrefix(argument, "--delete=") || strings.HasPrefix(argument, "-delete=") ||
+				argument == "--ack" || argument == "-ack" || strings.HasPrefix(argument, "--ack=") || strings.HasPrefix(argument, "-ack=") {
+				return filtered, false, invalidArguments("new-messages 的 --fresh 只用于 poll，不能与 --ack、--status 或 --delete 合用")
+			}
+		}
 	}
 	selector := ""
 	for index := 1; index < len(filtered); index++ {
@@ -600,13 +646,17 @@ func runCapabilities(args []string) (any, error) {
 		"storage": map[string]any{
 			"immutable_generations": true, "manifest_schema_version": 1, "retained_rollback_generations": 1,
 			"query_snapshot_timestamps": true, "fresh_query_refresh": true,
+			"generation_message_index": true, "atomic_inbox_cursors": true,
 		},
 		"query": map[string]any{
-			"contacts": true, "history": true, "search": true, "stats": true, "moments": true, "official_cards": true,
+			"contacts": true, "sessions": true, "snapshot_unread": true, "members": true, "favorites": true,
+			"new_messages": true, "history": true, "search": true, "stats": true, "moments": true, "official_cards": true,
 			"voice_transcripts": true, "wechat_existing_voice_text": true, "wechat_existing_ocr_text": true, "official_article_body": true,
 			"structured_cards":      []string{"contact_card", "mini_program", "channels", "red_packet", "forward", "quote"},
 			"group_identity_fields": true, "emoji_normalization": "wechat_known_brackets_to_unicode",
 			"all_without_limit": "unbounded", "unbounded_export": "disk_spooled_stream",
+			"output_formats": []string{"json", "yaml", "table"}, "ambiguous_contact_policy": "error_with_candidates",
+			"immutable_query_daemon": true, "daemon_transport": "authenticated_loopback",
 		},
 		"media": map[string]any{
 			"local_images": true, "remote_images": []string{"jpeg", "png", "gif"},
@@ -725,6 +775,7 @@ type snapshotPublishOptions struct {
 	PreventCoverageRegression bool
 	ProcessAccessPerformed    bool
 	CredentialSource          string
+	BuildIndex                bool
 }
 
 func publishAccountSnapshot(account localplatform.Account, bundle provider.CandidateBundle, options snapshotPublishOptions) (any, error) {
@@ -810,6 +861,20 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 		SnapshotCreatedAt: generation.CreatedAt,
 		Storage:           effectiveStorage, Database: report.Summary, Media: media,
 	}
+	var indexReport any = map[string]any{"status": "skipped"}
+	if options.BuildIndex {
+		built, indexErr := messageindex.Build(accountState, false)
+		if indexErr != nil {
+			warnings = append(warnings, "generation 消息索引构建失败；基础查询仍可用，可稍后运行 v-local-cli index build")
+			indexReport = map[string]any{"status": "failed", "reason": privateStateError(indexErr)}
+		} else {
+			built.Path = ""
+			indexReport = built
+			if !built.Manifest.Coverage.Complete {
+				warnings = append(warnings, "generation 消息索引覆盖不完整；普通查询可回退扫描，但 new-messages 不会推进游标")
+			}
+		}
+	}
 	if err := state.Save(&accountState); err != nil {
 		if secretsChanged {
 			if previousSecretsExist {
@@ -817,6 +882,9 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 			} else {
 				_ = state.DeleteSecrets(accountID)
 			}
+		}
+		if derived, derivedErr := messageindex.GenerationDir(accountID, generation.ID); derivedErr == nil {
+			_ = os.RemoveAll(derived)
 		}
 		_ = os.RemoveAll(generation.Path)
 		return nil, &commandError{
@@ -832,13 +900,20 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 	if cleanupErr := snapshot.CleanupGenerations(generationsRoot, generation.Path, previousSnapshot); cleanupErr != nil {
 		warnings = append(warnings, "旧快照代际暂未清理；可稍后运行 v-local-cli gc")
 	}
+	if pinned, pinnedErr := inbox.PinnedGenerations(accountID); pinnedErr == nil {
+		if _, derivedErr := messageindex.GarbageCollect(accountID, generation.ID, 1, pinned, false); derivedErr != nil {
+			warnings = append(warnings, "旧 generation 派生索引暂未清理；可稍后运行 v-local-cli gc")
+		}
+	} else {
+		warnings = append(warnings, "增量 consumer 引用暂无法检查；未自动清理旧派生索引")
+	}
 	status := "ready"
 	if report.Summary.Failed > 0 || report.Summary.Skipped > 0 || (!options.DatabaseOnly && media.Status != "verified") || len(warnings) > 0 {
 		status = "partial"
 	}
 	return map[string]any{
 		"status": status, "account": publicAccountState(accountState, false), "database": report,
-		"media": media, "storage": effectiveStorage, "warnings": warnings,
+		"media": media, "index": indexReport, "storage": effectiveStorage, "warnings": warnings,
 		"database_only":            options.DatabaseOnly,
 		"credential_source":        options.CredentialSource,
 		"process_access_performed": options.ProcessAccessPerformed,
@@ -1041,7 +1116,7 @@ func runSetup(args []string) (any, error) {
 	return publishAccountSnapshot(account, bundle, snapshotPublishOptions{
 		Storage: *storage, RequireMedia: !*databaseOnly, DatabaseOnly: *databaseOnly, PersistSecrets: true,
 		PreventCoverageRegression: !*allowCoverageRegression,
-		ProcessAccessPerformed:    *allowKeyAccess, CredentialSource: credentialSource,
+		ProcessAccessPerformed:    *allowKeyAccess, CredentialSource: credentialSource, BuildIndex: true,
 	})
 }
 
@@ -1102,7 +1177,7 @@ func runRefreshWithSecrets(args []string, loadSecrets storedSecretsLoader) (any,
 	return publishAccountSnapshot(account, bundle, snapshotPublishOptions{
 		Storage: "keychain", RequireMedia: *requireMedia,
 		PreventCoverageRegression: true,
-		CredentialSource:          "saved_keychain", ProcessAccessPerformed: false,
+		CredentialSource:          "saved_keychain", ProcessAccessPerformed: false, BuildIndex: true,
 	})
 }
 
@@ -1186,10 +1261,18 @@ func runGC(args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	pinned, err := inbox.PinnedGenerations(value.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	derived, err := messageindex.GarbageCollect(value.AccountID, value.GenerationID, 1, pinned, *dryRun)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"account":                     map[string]any{"account_id": value.AccountID, "account_name": value.AccountName},
 		"retained_current_generation": value.GenerationID, "retained_previous_generations": 1,
-		"result": report,
+		"result": report, "derived_index_result": derived,
 	}, nil
 }
 
@@ -1238,7 +1321,7 @@ func runContacts(args []string) (any, error) {
 	return outputWithGeneration(map[string]any{"account": value.AccountName, "items": items, "count": len(items), "query": keyword}, value), nil
 }
 
-func runHistory(args []string) (any, error) {
+func runHistory(args []string, immutableOnly bool) (any, error) {
 	limitExplicit := flagProvided(args, "limit")
 	set := flag.NewFlagSet("history", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
@@ -1250,24 +1333,29 @@ func runHistory(args []string) (any, error) {
 	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 1 || *limit > 5000 {
 		return nil, invalidArguments("用法：v-local-cli history [--account NAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <username>")
 	}
-	window, err := resolveTimeWindow(set.Args()[0], *start, *end, *all, time.Now())
-	if err != nil {
-		return nil, err
-	}
-	effectiveLimit := effectiveResultLimit(*all, limitExplicit, *limit)
 	value, err := resolveInitializedAccount(*account)
 	if err != nil {
 		return nil, err
 	}
-	items, err := store.HistoryWindow(value.SnapshotPath, set.Args()[0], window.StartTimestamp, window.EndTimestamp, effectiveLimit)
-	if err == nil {
-		err = attachExistingVoiceTranscripts(value, items)
+	match, err := resolvedContact(value.SnapshotPath, set.Args()[0])
+	if err != nil {
+		return nil, err
 	}
-	data := map[string]any{"account": value.AccountName, "chat": set.Args()[0], "items": items, "count": len(items)}
+	chat := match.Contact.Username
+	window, err := resolveTimeWindow(chat, *start, *end, *all, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	effectiveLimit := effectiveResultLimit(*all, limitExplicit, *limit)
+	items, err := store.HistoryWindow(value.SnapshotPath, chat, window.StartTimestamp, window.EndTimestamp, effectiveLimit)
+	if err == nil {
+		err = attachExistingVoiceTranscripts(value, items, !immutableOnly)
+	}
+	data := map[string]any{"account": value.AccountName, "chat": chat, "input": set.Args()[0], "items": items, "count": len(items)}
 	return withGeneration(outputWithQueryMetadata(data, window, true, effectiveLimit, limitExplicit), value), err
 }
 
-func runSearch(args []string) (any, error) {
+func runSearch(args []string, immutableOnly bool) (any, error) {
 	limitExplicit := flagProvided(args, "limit")
 	set := flag.NewFlagSet("search", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
@@ -1280,23 +1368,42 @@ func runSearch(args []string) (any, error) {
 	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 1 || *limit > 1000 {
 		return nil, invalidArguments("用法：v-local-cli search [--chat USERNAME] [--account NAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <关键词>")
 	}
-	window, err := resolveTimeWindow(*chat, *start, *end, *all, time.Now())
-	if err != nil {
-		return nil, err
-	}
-	effectiveLimit := effectiveResultLimit(*all, limitExplicit, *limit)
 	value, err := resolveInitializedAccount(*account)
 	if err != nil {
 		return nil, err
 	}
-	items, err := store.SearchWindow(value.SnapshotPath, set.Args()[0], *chat, window.StartTimestamp, window.EndTimestamp, effectiveLimit)
+	resolvedChat := *chat
+	if resolvedChat != "" {
+		match, resolveErr := resolvedContact(value.SnapshotPath, resolvedChat)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		resolvedChat = match.Contact.Username
+	}
+	window, err := resolveTimeWindow(resolvedChat, *start, *end, *all, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	effectiveLimit := effectiveResultLimit(*all, limitExplicit, *limit)
+	indexed, indexErr := messageindex.Search(value, set.Args()[0], resolvedChat, window.StartTimestamp, window.EndTimestamp, effectiveLimit)
+	if indexErr != nil {
+		return nil, indexErr
+	}
+	items := indexed.Items
+	coverage := indexed.Coverage
+	if available, _ := coverage["available"].(bool); !available {
+		items, err = store.SearchWindow(value.SnapshotPath, set.Args()[0], resolvedChat, window.StartTimestamp, window.EndTimestamp, effectiveLimit)
+		coverage = map[string]any{
+			"source": "local_plaintext_snapshot", "backend": "decoded_scan", "complete": false,
+			"generation_index": indexed.Coverage,
+		}
+	}
 	if err == nil {
-		err = attachExistingVoiceTranscripts(value, items)
+		err = attachExistingVoiceTranscripts(value, items, !immutableOnly)
 	}
 	data := map[string]any{
-		"account": value.AccountName, "query": set.Args()[0], "chat": *chat,
-		"items": items, "count": len(items),
-		"coverage": map[string]any{"source": "local_plaintext_snapshot", "backend": "decoded_scan", "complete": false},
+		"account": value.AccountName, "query": set.Args()[0], "chat": resolvedChat,
+		"items": items, "count": len(items), "coverage": coverage,
 	}
 	return withGeneration(outputWithQueryMetadata(data, window, true, effectiveLimit, limitExplicit), value), err
 }
@@ -1312,12 +1419,16 @@ func runStats(args []string) (any, error) {
 	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *top < 0 || *top > 5000 {
 		return nil, invalidArguments("用法：v-local-cli stats [--account NAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--top N] <username>")
 	}
-	chat := set.Args()[0]
-	window, err := resolveTimeWindow(chat, *start, *end, *all, time.Now())
+	value, err := resolveInitializedAccount(*account)
 	if err != nil {
 		return nil, err
 	}
-	value, err := resolveInitializedAccount(*account)
+	match, err := resolvedContact(value.SnapshotPath, set.Args()[0])
+	if err != nil {
+		return nil, err
+	}
+	chat := match.Contact.Username
+	window, err := resolveTimeWindow(chat, *start, *end, *all, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -1967,6 +2078,14 @@ func commandSchemas() map[string]any {
 		"forget":            map[string]any{"usage": "v-local-cli forget --account NAME [--dry-run | --yes]", "destructive": true, "requires_confirmation": true},
 		"gc":                map[string]any{"usage": "v-local-cli gc [--account NAME] [--dry-run]", "retains_current_and_previous_generation": true},
 		"contacts":          map[string]any{"usage": "v-local-cli contacts [--account NAME] [--fresh] [--limit N] [关键词]", "read_only": true, "fresh_snapshot": true},
+		"resolve-contact":   map[string]any{"usage": "v-local-cli resolve-contact [--account NAME] [--fresh] <名称或username>", "read_only": true, "fresh_snapshot": true, "ambiguity_policy": "error_with_candidates"},
+		"sessions":          map[string]any{"usage": "v-local-cli sessions [--account NAME] [--fresh] [--kind person|group|official] [--limit N]", "read_only": true, "fresh_snapshot": true, "unread_semantics": "snapshot_only"},
+		"unread":            map[string]any{"usage": "v-local-cli unread [--account NAME] [--fresh] [--kind person|group|official] [--limit N]", "read_only": true, "fresh_snapshot": true, "unread_semantics": "snapshot_only"},
+		"members":           map[string]any{"usage": "v-local-cli members [--account NAME] [--fresh] <群username或名称>", "read_only": true, "fresh_snapshot": true, "coverage_methods": []string{"chatroom_member_table", "chat_room_ext_buffer", "observed_message_senders"}},
+		"favorites":         map[string]any{"usage": "v-local-cli favorites [--account NAME] [--fresh] [--kind text|image|voice|video|article|location|mini_program|chat_record|contact_card|other] [--limit N] [关键词]", "read_only": true, "fresh_snapshot": true, "scope": "locally_retained_only"},
+		"new-messages":      map[string]any{"usage": "v-local-cli new-messages [--account NAME] [--fresh] [--consumer NAME] [--start now|beginning] [--limit N] [--ack BATCH_ID | --status | --delete --yes]", "fresh_snapshot": true, "fresh_scope": "poll_only", "delivery_semantics": "at_least_once", "cursor_binding": "account+base_generation+base_manifest_sha256+target_generation+target_manifest_sha256", "ack_required": true},
+		"index":             map[string]any{"usage": "v-local-cli index [--account NAME] [--force] [--show-paths] <status|build>", "writes_private_derived_index_on_build": true, "immutable_generation_binding": true, "force_scope": "replace_invalid_or_version_mismatched_only", "paths_default": "redacted"},
+		"daemon":            map[string]any{"usage": "v-local-cli daemon [--show-paths] <serve|status|stop>", "serve_mode": "foreground_single_instance", "loopback_only": true, "authenticated_same_user_endpoint": true, "query_usage": "v-local-cli --daemon <只读查询命令> [参数]", "serves_immutable_generations_only": true, "paths_default": "redacted"},
 		"history":           map[string]any{"usage": "v-local-cli history [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <username>", "read_only": true, "fresh_snapshot": true, "default_time_window": "contact_month_or_group_day", "all_without_limit": "unbounded", "structured_non_text": true, "fields": "base_type,sub_type,type_label,details,reply_to,mentions,voice_duration_ms,voice_transcript,sender_username,sender_nickname,sender_group_nickname,sender_identity,is_from_me,media_md5", "red_packet_fields": "receive_status,receive_status_label,receive_status_code,packet_status,message_timestamp,message_time,message_date,receive_timestamp,receive_time,receive_date,receive_time_status,amount,amount_minor_units,amount_currency,amount_status,amount_source,amount_kind"},
 		"search":            map[string]any{"usage": "v-local-cli search [--chat USERNAME] [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <关键词>", "read_only": true, "fresh_snapshot": true, "default_time_window": "selected_chat_or_cross_chat_day", "all_without_limit": "unbounded", "searches_structured_non_text": true},
 		"voice-status":      map[string]any{"usage": "v-local-cli voice-status [--account NAME] [--fresh] [--engine FILE | --asr-provider FILE] [--model PATH] [--show-paths]", "read_only": true, "fresh_snapshot": true, "preferred_source": "wechat_existing_index", "optional_dependencies": []string{"whisper.cpp", "SenseVoice via v-local-cli-asr/1 provider"}, "automatic_download": false},
@@ -2019,7 +2138,14 @@ func runSchema(args []string) (any, error) {
 		}
 		return map[string]any{"contract_version": responseSchemaVersion, "command": args[0], "schema": value}, nil
 	}
-	return map[string]any{"contract_version": responseSchemaVersion, "commands": commands}, nil
+	return map[string]any{
+		"contract_version": responseSchemaVersion,
+		"global_options": map[string]any{
+			"output": map[string]any{"usage": "v-local-cli [--output json|yaml|table] <command> [参数]", "default": "json", "position": "before_command"},
+			"daemon": map[string]any{"usage": "v-local-cli [--output json|yaml|table] --daemon <只读查询命令> [参数]", "immutable_only": true},
+		},
+		"commands": commands,
+	}, nil
 }
 
 func invalidArguments(hint string) *commandError {
@@ -2029,9 +2155,13 @@ func invalidArguments(hint string) *commandError {
 func writeHelp(writer io.Writer) {
 	fmt.Fprintln(writer, "v-local-cli：纯 Go 的本地微信只读查询工具")
 	fmt.Fprintln(writer, "")
+	fmt.Fprintln(writer, "  v-local-cli [--output json|yaml|table] <command> [参数]")
+	fmt.Fprintln(writer, "  v-local-cli [--output json|yaml|table] --daemon <只读查询命令> [参数]")
 	order := []string{
 		"accounts", "status", "provider", "install", "doctor", "capabilities", "setup", "refresh", "forget", "gc",
-		"contacts", "history", "search", "voice-status", "voice-transcribe", "voice-search", "ocr-status", "ocr-file",
+		"contacts", "resolve-contact", "sessions", "unread", "members", "favorites", "new-messages", "index",
+		"daemon",
+		"history", "search", "voice-status", "voice-transcribe", "voice-search", "ocr-status", "ocr-file",
 		"ocr-recognize", "ocr-read", "ocr-search", "stats", "moments-contacts", "moments", "moments-search",
 		"official-accounts", "official-history", "official-search", "official-article", "export", "export-media",
 		"export-moment-media", "schema",
@@ -2051,7 +2181,5 @@ func writeJSON(writer io.Writer, value envelope) {
 }
 
 func writeError(writer io.Writer, err *commandError) {
-	writeJSON(writer, envelope{SchemaVersion: responseSchemaVersion, OK: false, Error: &errorValue{Type: err.typeName, Message: err.message, Hint: err.hint, Details: err.details}, Meta: map[string]any{
-		"version": Version, "runtime": "go", "snapshot_created_at": nil, "snapshot_age_seconds": nil,
-	}})
+	writeErrorMode(writer, err, outputJSON)
 }

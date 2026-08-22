@@ -23,12 +23,13 @@ import (
 var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
 
 type Contact struct {
-	Username string `json:"username"`
-	Alias    string `json:"alias,omitempty"`
-	Remark   string `json:"remark,omitempty"`
-	Nickname string `json:"nickname,omitempty"`
-	Display  string `json:"display"`
-	Kind     string `json:"kind"`
+	Username   string `json:"username"`
+	Alias      string `json:"alias,omitempty"`
+	Remark     string `json:"remark,omitempty"`
+	Nickname   string `json:"nickname,omitempty"`
+	Display    string `json:"display"`
+	Kind       string `json:"kind"`
+	VerifyFlag int64  `json:"verify_flag,omitempty"`
 }
 
 type Message struct {
@@ -139,10 +140,15 @@ func columns(database *sql.DB, table string) map[string]bool {
 }
 
 func contactKind(username string) string {
+	return contactKindWithVerify(username, 0)
+}
+
+func contactKindWithVerify(username string, verifyFlag int64) string {
 	switch {
 	case strings.HasSuffix(username, "@chatroom"):
 		return "group"
-	case strings.HasPrefix(username, "gh_"):
+	case verifyFlag != 0, strings.HasPrefix(username, "gh_"), strings.HasPrefix(username, "biz_"),
+		strings.HasPrefix(username, "@"), username == "brandsessionholder":
 		return "official"
 	default:
 		return "person"
@@ -170,7 +176,7 @@ func Contacts(root, keyword string, limit int) ([]Contact, error) {
 			continue
 		}
 		available := columns(database, "contact")
-		wanted := []string{"username", "alias", "remark", "nick_name"}
+		wanted := []string{"username", "alias", "remark", "nick_name", "verify_flag"}
 		selected := make([]string, 0, len(wanted))
 		for _, name := range wanted {
 			if available[name] {
@@ -209,9 +215,10 @@ func Contacts(root, keyword string, limit int) ([]Contact, error) {
 				continue
 			}
 			seen[username] = true
+			verifyFlag := asInt64(fields["verify_flag"])
 			result = append(result, Contact{
 				Username: username, Alias: fields["alias"], Remark: fields["remark"],
-				Nickname: fields["nick_name"], Display: display, Kind: contactKind(username),
+				Nickname: fields["nick_name"], Display: display, Kind: contactKindWithVerify(username, verifyFlag), VerifyFlag: verifyFlag,
 			})
 		}
 		_ = rows.Close()
@@ -235,6 +242,34 @@ func messageDatabase(path string) bool {
 	name := strings.ToLower(filepath.Base(path))
 	return (strings.HasPrefix(name, "message_") || strings.HasPrefix(name, "biz_message_")) &&
 		!strings.Contains(name, "fts") && !strings.Contains(name, "resource")
+}
+
+// ChatExists 只检查当前 immutable generation 是否包含对应消息表，用于在联系人
+// 数据缺失时保留稳定 username 的兼容查询路径。
+func ChatExists(root, chat string) bool {
+	if strings.TrimSpace(chat) == "" {
+		return false
+	}
+	files, err := sqliteFiles(root)
+	if err != nil {
+		return false
+	}
+	table := messageTable(chat)
+	for _, path := range files {
+		if !messageDatabase(path) {
+			continue
+		}
+		database, openErr := openReadOnly(path)
+		if openErr != nil {
+			continue
+		}
+		found := tableExists(database, table)
+		_ = database.Close()
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 func name2ID(database *sql.DB) map[int64]string {

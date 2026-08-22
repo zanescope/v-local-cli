@@ -138,6 +138,68 @@ func OCRTextPath(accountID string) (string, error) {
 	return privateCachePath(accountID, "ocr-texts.db")
 }
 
+// DerivedRoot 保存绑定不可变 generation 的派生索引。目录继承账号私有 ACL，
+// 但不属于快照本身；索引失败不会修改已经发布的 generation。
+func DerivedRoot(accountID string) (string, error) {
+	directory, err := AccountDir(accountID)
+	if err != nil {
+		return "", err
+	}
+	if err := securePrivateDirectory(directory); err != nil {
+		return "", err
+	}
+	derived := filepath.Join(directory, "derived")
+	if err := securePrivateDirectory(derived); err != nil {
+		return "", err
+	}
+	return derived, nil
+}
+
+// InboxRoot 保存各 consumer 的原子增量游标；其中不保存消息正文。
+func InboxRoot(accountID string) (string, error) {
+	directory, err := AccountDir(accountID)
+	if err != nil {
+		return "", err
+	}
+	if err := securePrivateDirectory(directory); err != nil {
+		return "", err
+	}
+	inbox := filepath.Join(directory, "inbox")
+	if err := securePrivateDirectory(inbox); err != nil {
+		return "", err
+	}
+	return inbox, nil
+}
+
+// DaemonRoot 保存当前用户查询 daemon 的认证端点信息。daemon 只监听回环地址，
+// 随机令牌文件依赖此目录的当前用户专属权限。
+func DaemonRoot() (string, error) {
+	root, err := Home()
+	if err != nil {
+		return "", err
+	}
+	if err := securePrivateDirectory(root); err != nil {
+		return "", err
+	}
+	directory := filepath.Join(root, "daemon")
+	if err := securePrivateDirectory(directory); err != nil {
+		return "", err
+	}
+	return directory, nil
+}
+
+// ValidatePrivateTarget 拒绝私有目录层级或最终目标中的符号链接、junction、
+// 重解析点和特殊文件。目标尚不存在时只验证其父目录，供原子发布前使用。
+func ValidatePrivateTarget(path string, allowDirectory bool) error {
+	if err := validatePrivateHierarchy(filepath.Dir(path)); err != nil {
+		return err
+	}
+	if err := validatePrivatePath(path, allowDirectory); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func privateCachePath(accountID, name string) (string, error) {
 	directory, err := AccountDir(accountID)
 	if err != nil {
