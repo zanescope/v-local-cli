@@ -232,7 +232,7 @@ func writeRowsTable(writer io.Writer, rows []map[string]any) {
 }
 
 func writeTable(writer io.Writer, value envelope) {
-	if !value.OK {
+	if value.CommandStatus != "succeeded" {
 		table := tabwriter.NewWriter(writer, 0, 4, 2, ' ', 0)
 		_, _ = io.WriteString(table, "TYPE\tMESSAGE\tHINT\n")
 		if value.Error != nil {
@@ -298,7 +298,7 @@ func writeEnvelope(writer io.Writer, value envelope, mode outputMode) {
 }
 
 func writeErrorMode(writer io.Writer, err *commandError, mode outputMode) {
-	writeEnvelope(writer, envelope{SchemaVersion: responseSchemaVersion, OK: false, Error: &errorValue{
+	writeEnvelope(writer, envelope{SchemaVersion: responseSchemaVersion, CommandStatus: "failed", Error: &errorValue{
 		Type: err.typeName, Message: err.message, Hint: err.hint, Details: err.details,
 	}, Meta: map[string]any{
 		"version": Version, "runtime": "go", "snapshot_created_at": nil, "snapshot_age_seconds": nil,

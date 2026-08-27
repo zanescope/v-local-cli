@@ -68,19 +68,19 @@ Windows 实验 OCR 只从 Known Folder API 返回的 Program Files 根发现安�
 
 公众号卡片查询只扫描独立 `biz_message` 分片，解析本机留存的 `mmreader/category/item` 多图文卡片。它不打开卡片 URL，也不把卡片元数据声明为文章正文或完整发布历史。独立正文命令必须用同一快照证据重新定位文章，并经过逐篇网络授权、目标解析、响应限制和正文节点验证。
 
-结构化搜索优先使用当前 generation 的派生消息索引。索引逐表探测所有可识别消息表，保存稳定证据标识、内容摘要、发送者、提及、引用、语音转写和文本型详情；token、secret、key 一类字段排除在全文文本之外。FTS tokenizer 不可用时按 manifest 明确降级。索引缺失或绑定无效时，普通 `search` 可回退到原有已发现联系人扫描，并在 `coverage` 说明其不完整范围；绝不把旧 generation 索引冒充当前结果。
+结构化搜索优先使用当前 generation 的派生消息索引。索引逐表探测所有可识别消息表，保存稳定证据标识、内容摘要、发送者、提及、引用、语音转写和文本型详情；token、secret、key 一类字段排除在全文文本之外。FTS tokenizer 不可用时按 manifest 明确降级。索引缺失或绑定无效时，普通 `search` 可回退到原有已发现联系人扫描，并在 `search_backend_status` 说明其不完整范围；绝不把旧 generation 索引冒充当前结果。
 
 `new-messages` 通过稳定排序键比较两个不可变 generation，返回新增或内容摘要变化的证据。每个 consumer 固定 base/target generation 及对应 snapshot manifest 摘要，poll 先原子持久化 pending batch 再输出，只有相同 `batch_id` 被 ack 后才推进位置，因此是 at-least-once，不是实时监听。批次上限只切分结果，不会跳过尾部；绑定不符或覆盖不完整的 generation 不允许推进。
 
 可选查询 daemon 与 CLI 使用同一二进制，只绑定 IPv4 loopback，并用当前用户私有随机令牌认证。它只接受不刷新、不联网、不导出、不解析账号源媒体、不读取可变私有 ASR cache、不改变游标或索引的 immutable generation 查询。成功响应的有界缓存键包含账号、generation、snapshot manifest 摘要、派生索引身份、参数、本地日期和二进制版本；状态或索引可用性切换后旧缓存不会命中。客户端 YAML/table 只改变展示，daemon 协议仍为 JSON。
 
-`--all` 且没有显式 `--limit` 时不设置结果条数上限；结果仍只代表当前 generation 和命令回显的 coverage。全量 `export` 通过账号私有临时 SQLite 完成跨分片排序，再流式写最终 JSON/JSONL，避免把全部消息装入内存，结束后立即删除暂存库。
+`--all` 且没有显式 `--limit` 时不设置结果条数上限；结果仍只代表当前 generation、`meta.database_coverage_status` 和命令回显的领域限定状态。全量 `export` 通过账号私有临时 SQLite 完成跨分片排序，再流式写最终 JSON/JSONL，避免把全部消息装入内存，结束后立即删除暂存库。
 
 用户可见输出默认采用仅在目标不存在时发布的语义；`export`、`export-media`、`export-moment-media` 和诊断包只有显式 `--force` 才覆盖。输出目标是符号链接、Windows 重解析点或特殊文件时始终拒绝；硬链接覆盖通过发布新的普通文件打断链接关系，不修改其他名字指向的内容。写入与覆盖备份都使用目标目录内随机独占的兄弟临时文件，避免固定 PID、`.tmp` 或 `.old` 名称造成抢占和误删。
 
 ## 平台验证
 
-构建成功、GitHub runner 测试和微信真实数据验证是三个不同层级，而且按架构分别判断。Windows amd64 与 macOS amd64 已有主要真实数据证据：Intel 真机上 helper 成功读取正式微信进程，自动账号发现、数据库布局、Keychain 刷新和查询结果均已核对。macOS arm64 当前仍是 `build_only`——Apple Silicon runner 只验证普通执行、Unix 权限、锁、路径和发布语义；该架构可构建自动 Provider 及同包 companion helper，也可以从用户提供的候选文件进入只读快照流程，但升级能力声明仍需按[macOS 真机验收清单](macos-acceptance.md)逐项取得证据。动态 Hook 在 arm64 与 x86_64 上读取的寄存器不同，Intel 的结论不能外推。微信原生 OCR 不属于 macOS 支持范围，微信已有语音/OCR 文字索引也仍只有 `windows/amd64` 布局证据。
+构建成功、CI 测试和真实设备验证是三个不同层级，而且按架构、微信版本和候选件摘要分别判断。仓库内的历史说明不具备发布签名，也不能作为当前构建的 live evidence；普通 `capabilities` 因此统一返回 `validation_evidence.status=not_embedded`，不自报任何 `real_device_verified` 结论。macOS arm64 的 CI 只验证普通执行、Unix 权限、锁、路径和发布语义；候选文件仍可进入独立验证的只读快照流程。任何架构的自动 Provider、索引布局或 OCR 声明都必须由与当前二进制摘要绑定的签名发布证据升级，流程见[macOS 真机验收清单](macos-acceptance.md)。动态 Hook 在 arm64 与 x86_64 上读取的寄存器不同，结论不能跨架构外推。
 
 ## 安装层
 

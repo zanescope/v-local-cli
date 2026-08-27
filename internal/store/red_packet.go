@@ -76,9 +76,8 @@ func scanRetainedInteger(value any, columnPresent bool) retainedInt64 {
 	return retainedInt64{Value: asInt64(value), Present: true}
 }
 
-// loadRedPacketIndex reads the optional general.db redEnvelopeTable. The
-// adapter detects columns because WeChat versions retain different subsets.
-// Failure to open an optional table never makes ordinary chat history fail.
+// loadRedPacketIndex 读取可选的 general.db/redEnvelopeTable。不同微信版本保留的列
+// 子集并不一致，因此适配器会动态探测列。可选表打开失败不会影响普通聊天记录查询。
 func loadRedPacketIndex(root string) redPacketIndex {
 	index := newRedPacketIndex()
 	files, err := sqliteFiles(root)

@@ -26,6 +26,12 @@ func TestVerifiedKeysExpandsGlobalCandidate(t *testing.T) {
 	}
 }
 
+func TestPlatformPathKeyNormalizesUnicode(t *testing.T) {
+	if platformPathKey("cafe\u0301.db") != platformPathKey("caf\u00e9.db") {
+		t.Fatal("snapshot path key did not normalize canonically equivalent Unicode")
+	}
+}
+
 func TestStableCopyTreatsEmptyOptionalWALAsAbsent(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "database.db-wal")
@@ -35,6 +41,22 @@ func TestStableCopyTreatsEmptyOptionalWALAsAbsent(t *testing.T) {
 	_, _, present, err := stableCopy(source, filepath.Join(root, "copy.wal"), true, maxStableWALBytes)
 	if err != nil || present {
 		t.Fatalf("空 WAL 应当作为无已提交帧：present=%v err=%v", present, err)
+	}
+}
+
+func TestBuildRejectsDatabaseSymlink(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside.db")
+	createPlainDatabase(t, outside, "outside")
+	if err := os.Symlink(outside, filepath.Join(source, "linked.db")); err != nil {
+		t.Skipf("当前平台不能创建测试 symlink：%v", err)
+	}
+	if _, _, err := BuildGeneration(source, filepath.Join(root, "generations"), nil, BuildOptions{}); err == nil {
+		t.Fatal("database symlink should be rejected")
 	}
 }
 
@@ -53,6 +75,50 @@ func createPlainDatabase(t *testing.T, path, value string) {
 	}
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func catalogEntryForFile(t *testing.T, root, path string) CatalogEntry {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := sourceFileIdentity(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := firstPageSHA256(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return CatalogEntry{
+		DatabaseID: strings.Repeat("a", 64), RelativePath: relative, CanonicalFileID: identity,
+		Size: info.Size(), MTimeNS: info.ModTime().UnixNano(), FirstPageSHA256: digest,
+		Classification: "plaintext",
+	}
+}
+
+func TestBuildRejectsCatalogFileReplacement(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	path := filepath.Join(source, "message.db")
+	createPlainDatabase(t, path, "before")
+	entry := catalogEntryForFile(t, source, path)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	createPlainDatabase(t, path, "after")
+	_, _, err := BuildGeneration(source, filepath.Join(root, "generations"), nil, BuildOptions{
+		CatalogID: "catalog-before", CatalogEntries: []CatalogEntry{entry},
+	})
+	var drift *CatalogDriftError
+	if !errors.As(err, &drift) {
+		t.Fatalf("database replacement should return catalog drift, got %v", err)
 	}
 }
 
@@ -110,7 +176,12 @@ func TestBuildGenerationPublishesManifestAndGarbageCollectsSafely(t *testing.T) 
 	source := filepath.Join(root, "source")
 	generations := filepath.Join(root, "generations")
 	createPlainDatabase(t, filepath.Join(source, "contact", "contact.db"), "contact")
-	report, first, err := BuildGeneration(source, generations, map[string]string{"*": key}, BuildOptions{CreatorVersion: "test"})
+	contactPath := filepath.Join(source, "contact", "contact.db")
+	report, first, err := BuildGeneration(source, generations, map[string]string{"*": key}, BuildOptions{
+		CreatorVersion: "test", CatalogID: "catalog-test",
+		CatalogEntries:   []CatalogEntry{catalogEntryForFile(t, source, contactPath)},
+		DatabaseProfiles: map[string]string{"*": "wcdb-v4-sha512-256000-r80"},
+	})
 	if err != nil || report.Summary.Decrypted != 1 || first.ID == "" || first.ManifestSHA256 == "" {
 		t.Fatalf("首个代际发布失败：report=%+v generation=%+v err=%v", report, first, err)
 	}
@@ -123,7 +194,7 @@ func TestBuildGenerationPublishesManifestAndGarbageCollectsSafely(t *testing.T) 
 		t.Fatal("manifest 摘要未绑定发布内容")
 	}
 	var manifest Manifest
-	if err := json.Unmarshal(payload, &manifest); err != nil || manifest.GenerationID != first.ID || manifest.CreatorVersion != "test" || len(manifest.Databases) != 1 || manifest.Databases[0].PlainSHA256 == "" {
+	if err := json.Unmarshal(payload, &manifest); err != nil || manifest.GenerationID != first.ID || manifest.CreatorVersion != "test" || manifest.CatalogID != "catalog-test" || len(manifest.Databases) != 1 || manifest.Databases[0].PlainSHA256 == "" || manifest.Databases[0].SourceFirstPageSHA256 == "" || manifest.Databases[0].SourceCanonicalFileID == "" || manifest.Databases[0].DatabaseID == "" || manifest.Databases[0].ProfileID == "" {
 		t.Fatalf("manifest 内容异常：%+v err=%v", manifest, err)
 	}
 	createPlainDatabase(t, filepath.Join(source, "message", "message.db"), "message")

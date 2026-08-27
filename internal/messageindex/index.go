@@ -34,7 +34,7 @@ type Manifest struct {
 	CreatedAt              string                    `json:"created_at"`
 	DocumentCount          int                       `json:"document_count"`
 	FTSMode                string                    `json:"fts_mode"`
-	Coverage               store.MessageScanCoverage `json:"coverage"`
+	Coverage               store.MessageScanCoverage `json:"message_coverage"`
 }
 
 type BuildReport struct {
@@ -44,7 +44,7 @@ type BuildReport struct {
 }
 
 type Status struct {
-	Available bool      `json:"available"`
+	Available bool      `json:"index_present"`
 	Valid     bool      `json:"valid"`
 	Reason    string    `json:"reason,omitempty"`
 	Manifest  *Manifest `json:"manifest,omitempty"`
@@ -52,7 +52,7 @@ type Status struct {
 
 type SearchReport struct {
 	Items    []store.Message `json:"items"`
-	Coverage map[string]any  `json:"coverage"`
+	Coverage map[string]any  `json:"search_backend_status"`
 }
 
 type Position struct {
@@ -487,7 +487,7 @@ func Search(account state.AccountState, keyword, chat string, start, end *int64,
 		return SearchReport{}, err
 	}
 	if !status.Valid || status.Manifest == nil {
-		return SearchReport{Coverage: map[string]any{"backend": "generation_index", "complete": false, "available": false, "reason": status.Reason}}, nil
+		return SearchReport{Coverage: map[string]any{"backend": "generation_index", "index_present": status.Available, "index_valid": false, "message_coverage_status": "unknown", "reason": status.Reason}}, nil
 	}
 	path, _ := DatabasePath(account.AccountID, account.GenerationID)
 	database, err := openReadOnly(path)
@@ -538,8 +538,12 @@ func Search(account state.AccountState, keyword, chat string, start, end *int64,
 	if useFTS {
 		searchBackend = "fts5_trigram"
 	}
+	messageCoverageStatus := "partial"
+	if status.Manifest.Coverage.Complete {
+		messageCoverageStatus = "complete"
+	}
 	report := SearchReport{Coverage: map[string]any{
-		"backend": "generation_index", "available": true, "complete": status.Manifest.Coverage.Complete,
+		"backend": "generation_index", "index_present": true, "index_valid": true, "message_coverage_status": messageCoverageStatus,
 		"fts_mode": status.Manifest.FTSMode, "search_backend": searchBackend, "document_count": status.Manifest.DocumentCount,
 	}}
 	for rows.Next() {

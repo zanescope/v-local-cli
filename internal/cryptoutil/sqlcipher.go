@@ -3,23 +3,27 @@ package cryptoutil
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/pbkdf2"
 	"crypto/sha512"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 )
 
 const (
-	SQLCipherPageSize = 4096
-	SQLCipherReserve  = 80
-	SQLCipherKDFRuns  = 256000
+	SQLCipherDefaultProfileID = "wcdb-v4-sha512-256000-r80"
+	SQLCipherPageSize         = 4096
+	SQLCipherReserve          = 80
+	SQLCipherKDFRuns          = 256000
 )
 
 var sqliteHeader = []byte("SQLite format 3\x00")
-var reserveCandidates = []int{80, 48, 64}
+var reserveCandidates = []int{SQLCipherReserve}
 var validPageSizes = map[uint16]bool{
 	512: true, 1024: true, 2048: true, 4096: true, 8192: true,
 	16384: true, 32768: true, 65535: true,
@@ -85,12 +89,51 @@ func headerOK(plain []byte, reserve int) bool {
 	if len(plain) < 8 {
 		return false
 	}
-	pageSize := binary.BigEndian.Uint16(plain[:2])
+	pageSize := int(binary.BigEndian.Uint16(plain[:2]))
 	if pageSize == 1 {
-		pageSize = 65535
+		pageSize = 65536
 	}
-	return validPageSizes[pageSize] && int(plain[4]) == reserve &&
+	return pageSize == SQLCipherPageSize && int(plain[4]) == reserve &&
 		plain[5] == 64 && plain[6] == 32 && plain[7] == 32
+}
+
+func deriveHMACKey(key, fileSalt []byte) ([]byte, error) {
+	if len(key) != 32 || len(fileSalt) != 16 {
+		return nil, errors.New("SQLCipher HMAC key material invalid")
+	}
+	hmacSalt := make([]byte, len(fileSalt))
+	for index := range fileSalt {
+		hmacSalt[index] = fileSalt[index] ^ 0x3a
+	}
+	return pbkdf2.Key(sha512.New, string(key), hmacSalt, 2, 32)
+}
+
+func pageHMAC(page, key, fileSalt []byte, pageNumber uint32) ([]byte, error) {
+	if len(page) != SQLCipherPageSize || len(key) != 32 || len(fileSalt) != 16 {
+		return nil, errors.New("SQLCipher HMAC page input invalid")
+	}
+	macKey, err := deriveHMACKey(key, fileSalt)
+	if err != nil {
+		return nil, err
+	}
+	mac := hmac.New(sha512.New, macKey)
+	start := 0
+	if pageNumber == 1 {
+		start = 16
+	}
+	_, _ = mac.Write(page[start : SQLCipherPageSize-sha512.Size])
+	pageNumberBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(pageNumberBytes, pageNumber)
+	_, _ = mac.Write(pageNumberBytes)
+	return mac.Sum(nil), nil
+}
+
+func firstPageHMACOK(data, key []byte) bool {
+	if len(data) < SQLCipherPageSize {
+		return false
+	}
+	want, err := pageHMAC(data[:SQLCipherPageSize], key, data[:16], 1)
+	return err == nil && hmac.Equal(want, data[SQLCipherPageSize-sha512.Size:SQLCipherPageSize])
 }
 
 func solveKey(data, passphrase []byte) (*solvedKey, error) {
@@ -123,11 +166,48 @@ func solveKey(data, passphrase []byte) (*solvedKey, error) {
 func trySQLCipherPageKey(data, key []byte) *solvedKey {
 	for _, reserve := range reserveCandidates {
 		plain, err := pageOnePlain(data[:SQLCipherPageSize], key, reserve)
-		if err == nil && headerOK(plain, reserve) {
+		if err == nil && headerOK(plain, reserve) && firstPageHMACOK(data, key) {
 			return &solvedKey{key: append([]byte(nil), key...), reserve: reserve}
 		}
 	}
 	return nil
+}
+
+// ResolveCredentialFile 把一份结构化凭据中的秘密转换为指定数据库的实际原始密钥，
+// 并在返回前验证完整的首页 HMAC。
+func ResolveCredentialFile(path, secretHex, kind, profileID string) (string, error) {
+	if profileID != "" && profileID != SQLCipherDefaultProfileID {
+		return "", errors.New("数据库 profile 不受支持")
+	}
+	secret, err := normalizeHexKey(secretHex)
+	if err != nil {
+		return "", err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	page := make([]byte, SQLCipherPageSize)
+	if _, err := io.ReadFull(file, page); err != nil {
+		return "", errors.New("数据库首页不足 4096 字节")
+	}
+	var effective []byte
+	switch kind {
+	case "raw_enc_key":
+		effective = secret
+	case "global_passphrase":
+		effective, err = pbkdf2.Key(sha512.New, string(secret), page[:16], SQLCipherKDFRuns, 32)
+		if err != nil {
+			return "", err
+		}
+	default:
+		return "", errors.New("数据库 credential kind 不受支持")
+	}
+	if trySQLCipherPageKey(page, effective) == nil {
+		return "", errors.New("credential 未通过数据库首页 HMAC")
+	}
+	return hex.EncodeToString(effective), nil
 }
 
 func decryptPage(page, key []byte, reserve int, pageNumber uint32) ([]byte, error) {

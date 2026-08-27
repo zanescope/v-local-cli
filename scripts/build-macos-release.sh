@@ -15,9 +15,9 @@ output="$root/build/darwin-$arch/v-local-cli"
 mkdir -p "$(dirname "$output")"
 (
   cd "$root"
-  CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags '-s -w' -o "$output" ./cmd/v-local-cli
+  CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags '-s -w -X github.com/zanescope/v-local-cli/internal/provider.buildMode=release' -o "$output" ./cmd/v-local-cli
 )
 chmod 700 "$output"
-codesign --force --options runtime --timestamp --sign "$identity" "$output"
+codesign --force --identifier com.zanescope.v-local-cli --options runtime --timestamp --sign "$identity" "$output"
 codesign --verify --strict --verbose=2 "$output"
 printf '%s\n' "$output"

@@ -3,8 +3,10 @@ package app
 import (
 	"bytes"
 	"crypto/aes"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -17,10 +19,33 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func writeProviderFixture(t *testing.T, aesKey string, xorKey int) string {
+func writeProviderFixture(t *testing.T, aesKey string, xorKey int, databasePath string) string {
 	t.Helper()
 	t.Setenv("V_LOCAL_TEST_AES", aesKey)
 	t.Setenv("V_LOCAL_TEST_XOR", strconv.Itoa(xorKey))
+	info, err := os.Stat(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := testCatalogFileIdentity(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := make([]byte, 4096)
+	read, readErr := file.Read(page)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || read < 16 {
+		t.Fatalf("cannot build catalog proof: read=%d readErr=%v closeErr=%v", read, readErr, closeErr)
+	}
+	digest := sha256.Sum256(page[:read])
+	t.Setenv("V_LOCAL_TEST_FILE_ID", identity)
+	t.Setenv("V_LOCAL_TEST_FILE_SIZE", strconv.FormatInt(info.Size(), 10))
+	t.Setenv("V_LOCAL_TEST_FILE_MTIME", strconv.FormatInt(info.ModTime().UnixNano(), 10))
+	t.Setenv("V_LOCAL_TEST_FIRST_PAGE", fmt.Sprintf("%x", digest[:]))
 	directory := t.TempDir()
 	if runtime.GOOS == "windows" {
 		providerPath := filepath.Join(directory, "mock-provider.cmd")
@@ -28,10 +53,25 @@ func writeProviderFixture(t *testing.T, aesKey string, xorKey int) string {
 		const powerShell = `$ErrorActionPreference = 'Stop'
 $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $response = [ordered]@{
-  protocol = 'v-local-key-provider/v2'
+  protocol = 'v-local-key-provider/v1'
   request_id = $request.request_id
-  database_keys = [ordered]@{'*' = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}
+  catalog_id = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+  catalog_entries = @([ordered]@{database_id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';relative_path='contact/contact.db';canonical_file_id=$env:V_LOCAL_TEST_FILE_ID;size=[int64]$env:V_LOCAL_TEST_FILE_SIZE;mtime_ns=[int64]$env:V_LOCAL_TEST_FILE_MTIME;first_page_sha256=$env:V_LOCAL_TEST_FIRST_PAGE;classification='plaintext';required_for_key_coverage=$false})
+  database_keys = [ordered]@{}
   image_keys = [ordered]@{aes = $env:V_LOCAL_TEST_AES; xor = [int]$env:V_LOCAL_TEST_XOR}
+  diagnostics = [ordered]@{
+    result_code='complete';workflow_status='terminal';requested_scopes=@('database','media')
+    database_target_status='present';database_coverage_status='complete';media_coverage_status='complete'
+    security_posture_status='not_applicable';shadow_route_status='not_applicable';route_priority=@();routes_attempted=@()
+    next_action='none';target_binding_status='unknown';session_account_status='unknown';candidate_mode='none';candidate_sources=@();blocking_reasons=@()
+    platform='windows';binary_fingerprint_status='unavailable';binary_signing_status='unavailable'
+    process_architecture='unknown';process_architecture_status='unavailable';process_translation_status='not_applicable'
+    compatibility_registry_status='not_evaluated';config_cipher_route_status='not_evaluated';windows_route_evidence=@()
+    process_count=0;selected_process_count=0;target_bound_process_count=0;other_account_process_count=0;unknown_account_process_count=0
+    opened_process_count=0;access_denied_count=0;per_process_collector_count=0
+    config_cipher_structure_count=0;config_cipher_invalid_structure_count=0;config_cipher_candidate_count=0;config_cipher_verified_candidate_count=0
+    static_scan_fallback=$false;fallback_candidate_count=0;fallback_stage_counts=[ordered]@{}
+  }
 }
 [Console]::Out.WriteLine(($response | ConvertTo-Json -Compress -Depth 4))
 `
@@ -47,7 +87,7 @@ $response = [ordered]@{
 	providerPath := filepath.Join(directory, "mock-provider")
 	const script = "#!/bin/sh\n" +
 		"request_id=$(sed -n 's/.*\"request_id\":\"\\([0-9a-f]*\\)\".*/\\1/p')\n" +
-		"printf '{\"protocol\":\"v-local-key-provider/v2\",\"request_id\":\"%s\",\"database_keys\":{\"*\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"image_keys\":{\"aes\":\"%s\",\"xor\":%s}}\\n' \"$request_id\" \"$V_LOCAL_TEST_AES\" \"$V_LOCAL_TEST_XOR\"\n"
+		"printf '{\"protocol\":\"v-local-key-provider/v1\",\"request_id\":\"%s\",\"catalog_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"catalog_entries\":[{\"database_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"relative_path\":\"contact/contact.db\",\"canonical_file_id\":\"%s\",\"size\":%s,\"mtime_ns\":%s,\"first_page_sha256\":\"%s\",\"classification\":\"plaintext\",\"required_for_key_coverage\":false}],\"database_keys\":{},\"image_keys\":{\"aes\":\"%s\",\"xor\":%s},\"diagnostics\":{\"result_code\":\"complete\",\"workflow_status\":\"terminal\",\"requested_scopes\":[\"database\",\"media\"],\"database_target_status\":\"present\",\"database_coverage_status\":\"complete\",\"media_coverage_status\":\"complete\",\"security_posture_status\":\"not_applicable\",\"shadow_route_status\":\"not_applicable\",\"route_priority\":[],\"routes_attempted\":[],\"next_action\":\"none\",\"target_binding_status\":\"unknown\",\"session_account_status\":\"unknown\",\"candidate_mode\":\"none\",\"candidate_sources\":[],\"blocking_reasons\":[],\"platform\":\"windows\",\"binary_fingerprint_status\":\"unavailable\",\"binary_signing_status\":\"unavailable\",\"process_architecture\":\"unknown\",\"process_architecture_status\":\"unavailable\",\"process_translation_status\":\"not_applicable\",\"compatibility_registry_status\":\"not_evaluated\",\"config_cipher_route_status\":\"not_evaluated\",\"windows_route_evidence\":[],\"process_count\":0,\"selected_process_count\":0,\"target_bound_process_count\":0,\"other_account_process_count\":0,\"unknown_account_process_count\":0,\"opened_process_count\":0,\"access_denied_count\":0,\"per_process_collector_count\":0,\"config_cipher_structure_count\":0,\"config_cipher_invalid_structure_count\":0,\"config_cipher_candidate_count\":0,\"config_cipher_verified_candidate_count\":0,\"static_scan_fallback\":false,\"fallback_candidate_count\":0,\"fallback_stage_counts\":{}}}\\n' \"$request_id\" \"$V_LOCAL_TEST_FILE_ID\" \"$V_LOCAL_TEST_FILE_SIZE\" \"$V_LOCAL_TEST_FILE_MTIME\" \"$V_LOCAL_TEST_FIRST_PAGE\" \"$V_LOCAL_TEST_AES\" \"$V_LOCAL_TEST_XOR\"\n"
 	if err := os.WriteFile(providerPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +163,7 @@ func TestSetupProviderKeychainRefreshAndExportMedia(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeSyntheticV2DAT(t, datPath, plain, aesKey, xorKey)
-	providerPath := writeProviderFixture(t, aesKey, int(xorKey))
+	providerPath := writeProviderFixture(t, aesKey, int(xorKey), filepath.Join(databaseDirectory, "contact.db"))
 
 	t.Setenv("V_LOCAL_CLI_ACCOUNT_DIR", account)
 	t.Setenv("V_LOCAL_CLI_HOME", testHome(t))
@@ -133,7 +173,7 @@ func TestSetupProviderKeychainRefreshAndExportMedia(t *testing.T) {
 	}
 	setupData := output["data"].(map[string]any)
 	media := setupData["media"].(map[string]any)
-	if setupData["status"] != "ready" || media["status"] != "verified" || setupData["secrets_persisted"] != true || setupData["database_keys_persisted"] != true || setupData["image_keys_persisted"] != true {
+	if setupData["status"] != "ready" || media["status"] != "verified" || setupData["secrets_persisted"] != true || setupData["database_keys_persisted"] != false || setupData["image_keys_persisted"] != true {
 		t.Fatalf("provider setup did not persist verified media secrets: %v", setupData)
 	}
 

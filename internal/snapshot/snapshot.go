@@ -20,14 +20,19 @@ import (
 )
 
 type DatabaseResult struct {
-	Database      string             `json:"database"`
-	Status        string             `json:"status"`
-	Reason        string             `json:"reason,omitempty"`
-	WAL           cryptoutil.WALInfo `json:"wal"`
-	SourceSize    int64              `json:"source_size,omitempty"`
-	SourceModTime int64              `json:"source_mtime_ns,omitempty"`
-	PlainSize     int64              `json:"plain_size,omitempty"`
-	PlainSHA256   string             `json:"plain_sha256,omitempty"`
+	Database              string             `json:"database"`
+	DatabaseID            string             `json:"database_id,omitempty"`
+	Status                string             `json:"status"`
+	Reason                string             `json:"reason,omitempty"`
+	WAL                   cryptoutil.WALInfo `json:"wal"`
+	SourceSize            int64              `json:"source_size,omitempty"`
+	SourceModTime         int64              `json:"source_mtime_ns,omitempty"`
+	PlainSize             int64              `json:"plain_size,omitempty"`
+	PlainSHA256           string             `json:"plain_sha256,omitempty"`
+	SourceFirstPageSHA256 string             `json:"source_first_page_sha256,omitempty"`
+	SourceCanonicalFileID string             `json:"source_canonical_file_id,omitempty"`
+	SourceClassification  string             `json:"source_classification,omitempty"`
+	ProfileID             string             `json:"profile_id,omitempty"`
 }
 
 type Report struct {
@@ -40,6 +45,21 @@ type BuildOptions struct {
 	PreventCoverageRegression bool
 	PreviousSnapshot          string
 	CreatorVersion            string
+	CatalogID                 string
+	CatalogEntries            []CatalogEntry
+	DatabaseProfiles          map[string]string
+}
+
+type CatalogEntry struct {
+	DatabaseID             string
+	RelativePath           string
+	CanonicalFileID        string
+	Size                   int64
+	MTimeNS                int64
+	FirstPageSHA256        string
+	Classification         string
+	RequiredForKeyCoverage bool
+	ProfileID              string
 }
 
 type Manifest struct {
@@ -49,6 +69,7 @@ type Manifest struct {
 	CreatorVersion string                `json:"creator_version"`
 	Summary        state.DatabaseSummary `json:"summary"`
 	Databases      []DatabaseResult      `json:"databases"`
+	CatalogID      string                `json:"catalog_id,omitempty"`
 }
 
 type Generation struct {
@@ -59,8 +80,9 @@ type Generation struct {
 }
 
 const (
-	maxStableDatabaseBytes = int64(16 * 1024 * 1024 * 1024)
-	maxStableWALBytes      = int64(8 * 1024 * 1024 * 1024)
+	maxSnapshotDatabaseFiles = 4096
+	maxStableDatabaseBytes   = int64(16 * 1024 * 1024 * 1024)
+	maxStableWALBytes        = int64(8 * 1024 * 1024 * 1024)
 )
 
 type CoverageComparison struct {
@@ -72,6 +94,14 @@ type CoverageComparison struct {
 
 type CoverageRegressionError struct {
 	Comparison CoverageComparison
+}
+
+type CatalogDriftError struct {
+	Reason string
+}
+
+func (err *CatalogDriftError) Error() string {
+	return "数据库已偏离 Provider catalog：" + err.Reason
 }
 
 func (err *CoverageRegressionError) Error() string {
@@ -93,15 +123,49 @@ func VerifiedKeys(keys map[string]string, report Report) map[string]string {
 }
 
 func databaseFiles(root string) ([]string, error) {
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	rootInfo, err := os.Lstat(absoluteRoot)
+	unsafeRoot := false
+	if err == nil {
+		unsafeRoot, err = snapshotPathIsLinkOrReparse(absoluteRoot, rootInfo.Mode())
+	}
+	if err != nil || !rootInfo.IsDir() || unsafeRoot {
+		return nil, errors.New("数据库目录不是可信的普通目录")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(absoluteRoot)
+	if err != nil || platformPathKey(resolvedRoot) != platformPathKey(absoluteRoot) {
+		return nil, errors.New("数据库目录包含不允许的链接或 reparse point")
+	}
+	root = absoluteRoot
 	var values []string
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	seenPaths := map[string]string{}
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		unsafeEntry, safetyErr := snapshotPathIsLinkOrReparse(path, entry.Type())
+		if safetyErr != nil || unsafeEntry {
+			return errors.New("数据库目录包含不允许的链接或 reparse point")
 		}
 		if entry.IsDir() {
 			return nil
 		}
 		if strings.EqualFold(filepath.Ext(entry.Name()), ".db") {
+			if len(values) >= maxSnapshotDatabaseFiles {
+				return errors.New("数据库数量超过安全上限")
+			}
+			relative, relativeErr := filepath.Rel(root, path)
+			if relativeErr != nil {
+				return relativeErr
+			}
+			pathKey := platformPathKey(relative)
+			if previous, duplicate := seenPaths[pathKey]; duplicate && previous != relative {
+				return errors.New("数据库路径存在大小写或 Unicode 归一化碰撞")
+			}
+			seenPaths[pathKey] = relative
 			values = append(values, path)
 		}
 		return nil
@@ -124,30 +188,49 @@ func keyFor(relative string, keys map[string]string) string {
 		}
 	}
 	for name, value := range keys {
-		if strings.EqualFold(filepath.ToSlash(name), filepath.ToSlash(relative)) || strings.EqualFold(name, filepath.Base(relative)) {
+		if platformPathKey(name) == platformPathKey(relative) || platformPathKey(name) == platformPathKey(filepath.Base(relative)) {
 			return value
 		}
 	}
 	return ""
 }
 
-func fileSignature(path string) (int64, int64, error) {
-	info, err := os.Stat(path)
+func plaintextSQLite(path string) bool {
+	file, err := os.Open(path)
 	if err != nil {
-		return 0, 0, err
+		return false
 	}
-	return info.Size(), info.ModTime().UnixNano(), nil
+	defer file.Close()
+	header := make([]byte, 16)
+	_, err = io.ReadFull(file, header)
+	return err == nil && string(header) == "SQLite format 3\x00"
+}
+
+func regularFileInfo(path string, optional bool) (fs.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	unsafePath, safetyErr := snapshotPathIsLinkOrReparse(path, info.Mode())
+	if safetyErr != nil || unsafePath || !info.Mode().IsRegular() {
+		if optional {
+			return nil, errors.New("可选数据库伴随文件不是普通文件")
+		}
+		return nil, errors.New("数据库文件不是普通文件")
+	}
+	return info, nil
 }
 
 func stableCopy(path, destination string, optional bool, maxBytes int64) (int64, int64, bool, error) {
 	for attempt := 0; attempt < 3; attempt++ {
-		sizeBefore, timeBefore, err := fileSignature(path)
+		before, err := regularFileInfo(path, optional)
 		if optional && os.IsNotExist(err) {
 			return 0, 0, false, nil
 		}
 		if err != nil {
 			return 0, 0, false, err
 		}
+		sizeBefore, timeBefore := before.Size(), before.ModTime().UnixNano()
 		if optional && sizeBefore == 0 {
 			return 0, timeBefore, false, nil
 		}
@@ -157,6 +240,11 @@ func stableCopy(path, destination string, optional bool, maxBytes int64) (int64,
 		input, err := os.Open(path)
 		if err != nil {
 			return 0, 0, false, err
+		}
+		opened, err := input.Stat()
+		if err != nil || !os.SameFile(before, opened) {
+			_ = input.Close()
+			return 0, 0, false, errors.New("数据库文件身份在打开时发生变化")
 		}
 		_ = os.Remove(destination)
 		output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -175,14 +263,89 @@ func stableCopy(path, destination string, optional bool, maxBytes int64) (int64,
 			}
 			return 0, 0, false, errors.New("无法稳定复制数据库或 WAL")
 		}
-		sizeAfter, timeAfter, err := fileSignature(path)
-		if err == nil && sizeBefore == sizeAfter && timeBefore == timeAfter && written == sizeAfter {
-			return sizeAfter, timeAfter, true, nil
+		after, statErr := regularFileInfo(path, optional)
+		if statErr == nil && os.SameFile(opened, after) && sizeBefore == after.Size() && timeBefore == after.ModTime().UnixNano() && written == after.Size() {
+			return after.Size(), after.ModTime().UnixNano(), true, nil
 		}
 		_ = os.Remove(destination)
 		time.Sleep(20 * time.Millisecond)
 	}
 	return 0, 0, false, errors.New("数据库或 WAL 在读取期间持续变化")
+}
+
+func catalogEntriesByPath(entries []CatalogEntry) (map[string]CatalogEntry, error) {
+	result := make(map[string]CatalogEntry, len(entries))
+	for _, entry := range entries {
+		clean := filepath.Clean(entry.RelativePath)
+		if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return nil, errors.New("catalog 文件证明包含越界路径")
+		}
+		key := platformPathKey(clean)
+		if _, duplicate := result[key]; duplicate {
+			return nil, errors.New("catalog 文件证明包含重复路径")
+		}
+		result[key] = entry
+	}
+	return result, nil
+}
+
+func validateCatalogProofNow(path string, entry CatalogEntry) error {
+	before, err := regularFileInfo(path, false)
+	if err != nil || before.Size() != entry.Size || before.ModTime().UnixNano() != entry.MTimeNS {
+		return &CatalogDriftError{Reason: "size_or_mtime_changed"}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return &CatalogDriftError{Reason: "database_open_failed"}
+	}
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) {
+		_ = file.Close()
+		return &CatalogDriftError{Reason: "canonical_file_identity_changed"}
+	}
+	identity, err := sourceOpenFileIdentity(file)
+	if err != nil || identity != entry.CanonicalFileID {
+		_ = file.Close()
+		return &CatalogDriftError{Reason: "canonical_file_identity_changed"}
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, io.LimitReader(file, cryptoutil.SQLCipherPageSize)); err != nil {
+		_ = file.Close()
+		return &CatalogDriftError{Reason: "first_page_read_failed"}
+	}
+	after, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil || closeErr != nil || !os.SameFile(opened, after) ||
+		opened.Size() != after.Size() || opened.ModTime() != after.ModTime() {
+		return &CatalogDriftError{Reason: "changed_during_catalog_recheck"}
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != entry.FirstPageSHA256 {
+		return &CatalogDriftError{Reason: "first_page_changed"}
+	}
+	return nil
+}
+
+func validateCatalogSource(path, copiedPath, relative string, size, mtime int64, entries map[string]CatalogEntry) error {
+	entry, found := entries[platformPathKey(relative)]
+	if !found {
+		return &CatalogDriftError{Reason: "database_not_in_catalog"}
+	}
+	if entry.Size != size || entry.MTimeNS != mtime {
+		return &CatalogDriftError{Reason: "size_or_mtime_changed"}
+	}
+	current, err := regularFileInfo(path, false)
+	if err != nil || current.Size() != size || current.ModTime().UnixNano() != mtime {
+		return &CatalogDriftError{Reason: "changed_during_stable_copy"}
+	}
+	identity, err := sourceFileIdentity(path)
+	if err != nil || identity != entry.CanonicalFileID {
+		return &CatalogDriftError{Reason: "canonical_file_identity_changed"}
+	}
+	digest, err := firstPageSHA256(copiedPath)
+	if err != nil || digest != entry.FirstPageSHA256 {
+		return &CatalogDriftError{Reason: "first_page_changed"}
+	}
+	return nil
 }
 
 func sha256File(path string) (string, error) {
@@ -198,18 +361,34 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
+func firstPageSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	written, err := io.Copy(hash, io.LimitReader(file, cryptoutil.SQLCipherPageSize))
+	if err != nil {
+		return "", err
+	}
+	if written < 16 {
+		return "", errors.New("数据库首页不足 16 字节")
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
 func pathsOverlap(left, right string) bool {
 	leftAbs, _ := filepath.Abs(left)
 	rightAbs, _ := filepath.Abs(right)
-	leftAbs = filepath.Clean(leftAbs)
-	rightAbs = filepath.Clean(rightAbs)
-	if strings.EqualFold(leftAbs, rightAbs) {
+	leftAbs = platformPathKey(leftAbs)
+	rightAbs = platformPathKey(rightAbs)
+	if leftAbs == rightAbs {
 		return true
 	}
-	leftPrefix := strings.ToLower(leftAbs + string(os.PathSeparator))
-	rightPrefix := strings.ToLower(rightAbs + string(os.PathSeparator))
-	return strings.HasPrefix(strings.ToLower(rightAbs)+string(os.PathSeparator), leftPrefix) ||
-		strings.HasPrefix(strings.ToLower(leftAbs)+string(os.PathSeparator), rightPrefix)
+	leftPrefix := leftAbs + "/"
+	rightPrefix := rightAbs + "/"
+	return strings.HasPrefix(rightAbs+"/", leftPrefix) || strings.HasPrefix(leftAbs+"/", rightPrefix)
 }
 
 func normalizedDatabaseSet(root string) (map[string]bool, error) {
@@ -226,7 +405,7 @@ func normalizedDatabaseSet(root string) (map[string]bool, error) {
 		if relativeErr != nil {
 			return nil, relativeErr
 		}
-		result[strings.ToLower(filepath.ToSlash(relative))] = true
+		result[platformPathKey(relative)] = true
 	}
 	return result, nil
 }
@@ -239,7 +418,7 @@ func comparePublishedCoverage(destination string, report Report) (CoverageCompar
 	candidate := make(map[string]bool)
 	for _, result := range report.Results {
 		if result.Status == "decrypted" {
-			candidate[strings.ToLower(filepath.ToSlash(result.Database))] = true
+			candidate[platformPathKey(result.Database)] = true
 		}
 	}
 	comparison := CoverageComparison{PreviousDatabases: len(previous), CandidateDatabases: len(candidate)}
@@ -261,6 +440,34 @@ func buildStage(source, stage string, keys map[string]string, options BuildOptio
 	if err != nil {
 		return Report{}, err
 	}
+	var catalogEntries map[string]CatalogEntry
+	if options.CatalogID != "" {
+		if len(options.CatalogEntries) == 0 {
+			return Report{}, errors.New("Provider catalog 缺少逐文件证明")
+		}
+		catalogEntries, err = catalogEntriesByPath(options.CatalogEntries)
+		if err != nil {
+			return Report{}, err
+		}
+		if len(catalogEntries) != len(databases) {
+			return Report{}, &CatalogDriftError{Reason: "database_set_changed"}
+		}
+		for _, database := range databases {
+			relative, relativeErr := filepath.Rel(source, database)
+			if relativeErr != nil {
+				return Report{}, relativeErr
+			}
+			entry, found := catalogEntries[platformPathKey(relative)]
+			if !found {
+				return Report{}, &CatalogDriftError{Reason: "database_set_changed"}
+			}
+			if entry.CanonicalFileID != "" && entry.FirstPageSHA256 != "" {
+				if proofErr := validateCatalogProofNow(database, entry); proofErr != nil {
+					return Report{}, proofErr
+				}
+			}
+		}
+	}
 	report := Report{}
 	report.Summary.Discovered = len(databases)
 	inputs, err := os.MkdirTemp(filepath.Dir(stage), ".snapshot-input-*.tmp")
@@ -272,7 +479,13 @@ func buildStage(source, stage string, keys map[string]string, options BuildOptio
 		relative, _ := filepath.Rel(source, database)
 		key := keyFor(relative, keys)
 		result := DatabaseResult{Database: filepath.ToSlash(relative), Status: "skipped", Reason: "no_key"}
-		if key == "" {
+		if options.CatalogID != "" {
+			entry := catalogEntries[platformPathKey(relative)]
+			result.DatabaseID = entry.DatabaseID
+			result.SourceCanonicalFileID = entry.CanonicalFileID
+			result.SourceClassification = entry.Classification
+		}
+		if key == "" && !plaintextSQLite(database) {
 			report.Summary.Skipped++
 			report.Results = append(report.Results, result)
 			continue
@@ -286,6 +499,11 @@ func buildStage(source, stage string, keys map[string]string, options BuildOptio
 			report.Results = append(report.Results, result)
 			continue
 		}
+		if options.CatalogID != "" {
+			if proofErr := validateCatalogSource(database, databaseCopy, relative, sourceSize, sourceModTime, catalogEntries); proofErr != nil {
+				return report, proofErr
+			}
+		}
 		_, _, walPresent, readErr := stableCopy(database+"-wal", walCopy, true, maxStableWALBytes)
 		if readErr != nil {
 			result.Status, result.Reason = "failed", "stable_copy_wal_failed"
@@ -296,11 +514,17 @@ func buildStage(source, stage string, keys map[string]string, options BuildOptio
 		if !walPresent {
 			walCopy = ""
 		}
+		if options.CatalogID != "" {
+			if proofErr := validateCatalogSource(database, databaseCopy, relative, sourceSize, sourceModTime, catalogEntries); proofErr != nil {
+				return report, proofErr
+			}
+		}
 		target := filepath.Join(stage, relative)
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			return report, err
 		}
-		walInfo, plainSize, decryptErr := cryptoutil.DecryptSQLCipherSnapshotFiles(databaseCopy, walCopy, target, key)
+		profileID := keyFor(relative, options.DatabaseProfiles)
+		walInfo, plainSize, decryptErr := cryptoutil.DecryptSQLCipherSnapshotFilesWithProfile(databaseCopy, walCopy, target, key, profileID)
 		result.WAL = walInfo
 		if decryptErr != nil {
 			result.Status, result.Reason = "failed", "decrypt_or_wal_validation_failed"
@@ -315,6 +539,10 @@ func buildStage(source, stage string, keys map[string]string, options BuildOptio
 		result.Status, result.Reason = "decrypted", ""
 		result.SourceSize, result.SourceModTime = sourceSize, sourceModTime
 		result.PlainSize, result.PlainSHA256 = plainSize, digest
+		if sourceDigest, digestErr := firstPageSHA256(databaseCopy); digestErr == nil {
+			result.SourceFirstPageSHA256 = sourceDigest
+		}
+		result.ProfileID = profileID
 		report.Summary.Decrypted++
 		if walInfo.Present {
 			report.Summary.WALFiles++
@@ -397,6 +625,7 @@ func BuildGeneration(source, generationsRoot string, keys map[string]string, opt
 	manifest := Manifest{
 		SchemaVersion: 1, GenerationID: id, CreatedAt: createdAt,
 		CreatorVersion: options.CreatorVersion, Summary: report.Summary, Databases: report.Results,
+		CatalogID: options.CatalogID,
 	}
 	payload, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {

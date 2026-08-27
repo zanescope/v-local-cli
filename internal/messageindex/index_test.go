@@ -91,7 +91,8 @@ func TestBuildSearchAndGenerationDiff(t *testing.T) {
 		t.Fatalf("build base 异常：report=%+v err=%v", report, err)
 	}
 	search, err := Search(base, "旧消息", "alice", nil, nil, 20)
-	if err != nil || len(search.Items) != 1 || search.Coverage["backend"] != "generation_index" {
+	if err != nil || len(search.Items) != 1 || search.Coverage["backend"] != "generation_index" ||
+		search.Coverage["message_coverage_status"] != "complete" {
 		t.Fatalf("index search 异常：report=%+v err=%v", search, err)
 	}
 	current := indexedAccount(t, home, "generation-two", "更新消息", 11)

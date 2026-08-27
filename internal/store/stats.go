@@ -56,7 +56,7 @@ type ChatStats struct {
 	UnknownSenderMessages int               `json:"unknown_sender_messages,omitempty"`
 	Members               []MemberStats     `json:"members,omitempty"`
 	Direction             *DirectionStats   `json:"direction,omitempty"`
-	Coverage              map[string]string `json:"coverage"`
+	Coverage              map[string]string `json:"statistic_basis"`
 }
 
 type memberAccumulator struct {

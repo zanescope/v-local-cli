@@ -58,6 +58,7 @@ type asrResult struct {
 	Transcript string
 	Engine     string
 	Model      string
+	Language   string
 	Source     string
 }
 
@@ -170,18 +171,18 @@ func resolveVoiceDependency(engineValue, modelValue, providerValue string) voice
 func voiceDependencyData(dependency voiceDependency, showPaths bool) map[string]any {
 	available := dependency.Model != "" && ((dependency.Backend == "external_provider" && dependency.Provider != "") || (dependency.Backend == "whisper_cpp" && dependency.Engine != ""))
 	data := map[string]any{
-		"available":          available,
-		"backend":            dependency.Backend,
-		"engine_found":       dependency.Engine != "",
-		"provider_found":     dependency.Provider != "",
-		"model_found":        dependency.Model != "",
-		"engine_source":      dependency.EngineSource,
-		"provider_source":    dependency.ProviderSource,
-		"model_source":       dependency.ModelSource,
-		"dependency":         map[string]any{"default": "whisper.cpp", "optional_provider_protocol": "v-local-cli-asr/1", "sensevoice_supported_via_provider": true},
-		"local_processing":   true,
-		"automatic_download": false,
-		"provider_invoked":   false,
+		"transcription_backend_ready": available,
+		"backend":                     dependency.Backend,
+		"engine_found":                dependency.Engine != "",
+		"provider_found":              dependency.Provider != "",
+		"model_found":                 dependency.Model != "",
+		"engine_source":               dependency.EngineSource,
+		"provider_source":             dependency.ProviderSource,
+		"model_source":                dependency.ModelSource,
+		"dependency":                  map[string]any{"default": "whisper.cpp", "optional_provider_protocol": "v-local-cli-asr/1", "sensevoice_supported_via_provider": true},
+		"local_processing":            true,
+		"automatic_download":          false,
+		"provider_invoked":            false,
 		"cached_search_available_without_dependency": true,
 		"install_consent_required":                   !available,
 		"configuration": map[string]string{
@@ -234,6 +235,32 @@ func voiceModelLanguageMismatch(dependency voiceDependency, language string) err
 	}
 }
 
+func validASRLanguage(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "auto", "zh", "yue", "en", "ja", "ko", "unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func validRequestedASRLanguage(value string) bool {
+	return validASRLanguage(value) && !strings.EqualFold(strings.TrimSpace(value), "unknown")
+}
+
+func validASRMetadata(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 256 {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func runVoiceStatus(args []string) (any, error) {
 	set := flag.NewFlagSet("voice-status", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
@@ -252,7 +279,7 @@ func runVoiceStatus(args []string) (any, error) {
 	data["preferred_source"] = "wechat_index_probe+v-local-cli_private_cache"
 	data["private_cache_rows"] = 0
 	data["wechat_existing_index"] = map[string]any{
-		"available": false, "initialized_account_required": true, "read_only": true,
+		"index_has_transcripts": false, "initialized_account_required": true, "read_only": true,
 		"engine_invoked": false, "private_ipc_invoked": false, "network_performed": false,
 	}
 	if value, err := resolveInitializedAccount(*account); err == nil {
@@ -261,7 +288,7 @@ func runVoiceStatus(args []string) (any, error) {
 			return nil, statusErr
 		}
 		data["wechat_existing_index"] = map[string]any{
-			"available": status.VoiceIndexedRows > 0, "indexed_voice_rows": status.VoiceIndexedRows,
+			"index_has_transcripts": status.VoiceIndexedRows > 0, "indexed_voice_rows": status.VoiceIndexedRows,
 			"index_tables": status.VoiceIndexTables, "read_only": true, "initialized_account_required": false,
 			"engine_invoked": false, "private_ipc_invoked": false, "network_performed": false,
 		}
@@ -481,14 +508,12 @@ func runLocalASRProvider(ctx context.Context, dependency voiceDependency, langua
 		return asrResult{}, errors.New("本地 ASR 适配器报告使用了网络，结果已拒绝")
 	}
 	engine := strings.TrimSpace(response.Engine)
-	if engine == "" {
-		engine = filepath.Base(dependency.Provider)
-	}
 	model := strings.TrimSpace(response.Model)
-	if model == "" {
-		model = filepath.Base(dependency.Model)
+	detectedLanguage := strings.ToLower(strings.TrimSpace(response.Language))
+	if !validASRMetadata(engine) || !validASRMetadata(model) || !validASRLanguage(detectedLanguage) {
+		return asrResult{}, errors.New("本地 ASR 适配器缺少可信的 engine/model/language 元数据")
 	}
-	return asrResult{Transcript: transcript, Engine: engine, Model: model, Source: "local_asr_provider"}, nil
+	return asrResult{Transcript: transcript, Engine: engine, Model: model, Language: detectedLanguage, Source: "local_asr_provider"}, nil
 }
 
 func runLocalASR(ctx context.Context, dependency voiceDependency, language string, wav []byte, sourceDigest, temporaryDirectory string) (asrResult, error) {
@@ -501,7 +526,7 @@ func runLocalASR(ctx context.Context, dependency voiceDependency, language strin
 	}
 	return asrResult{
 		Transcript: text, Engine: filepath.Base(dependency.Engine),
-		Model: filepath.Base(dependency.Model), Source: "local_whisper_cpp",
+		Model: filepath.Base(dependency.Model), Language: strings.ToLower(strings.TrimSpace(language)), Source: "local_whisper_cpp",
 	}, nil
 }
 
@@ -528,7 +553,7 @@ func transcribeVoiceMessage(value state.AccountState, cachePath string, message 
 		EvidenceID: message.EvidenceID, Chat: message.Chat, ServerID: message.ServerID,
 		Timestamp: message.Timestamp, SortKey: message.SortKey, Sender: message.Sender,
 		Transcript: result.Transcript, AudioSHA256: digest, Engine: result.Engine,
-		Model: result.Model, Language: language, Source: result.Source,
+		Model: result.Model, Language: result.Language, Source: result.Source,
 	}
 	if err := store.SaveVoiceTranscript(cachePath, transcript); err != nil {
 		return store.VoiceTranscript{}, err
@@ -545,7 +570,7 @@ func runVoiceTranscribe(args []string) (any, error) {
 	model := set.String("model", "", "本地 ASR 模型文件或目录")
 	language := set.String("language", "zh", "转写语言")
 	force := set.Bool("force", false, "忽略已有暂存并重新转写")
-	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || strings.TrimSpace(*language) == "" {
+	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || !validRequestedASRLanguage(*language) {
 		return nil, invalidArguments("用法：v-local-cli voice-transcribe [--account NAME] [--engine FILE | --asr-provider FILE] [--model PATH] [--language zh] [--force] <voice_evidence_id>")
 	}
 	if strings.TrimSpace(*engine) != "" && strings.TrimSpace(*provider) != "" {
@@ -612,7 +637,7 @@ func runVoiceSearch(args []string) (any, error) {
 	provider := set.String("asr-provider", "", "v-local-cli-asr/1 本地适配器路径")
 	model := set.String("model", "", "本地 ASR 模型文件或目录")
 	language := set.String("language", "zh", "转写语言")
-	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 1 || *limit > 5000 || strings.TrimSpace(set.Args()[0]) == "" || strings.TrimSpace(*language) == "" {
+	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 1 || *limit > 5000 || strings.TrimSpace(set.Args()[0]) == "" || !validRequestedASRLanguage(*language) {
 		return nil, invalidArguments("用法：v-local-cli voice-search [--account NAME] [--chat USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--cached-only] [--engine FILE | --asr-provider FILE] [--model PATH] [--language zh] <关键词>")
 	}
 	if strings.TrimSpace(*engine) != "" && strings.TrimSpace(*provider) != "" {
@@ -712,7 +737,7 @@ func runVoiceSearch(args []string) (any, error) {
 	}
 	data := map[string]any{
 		"account": value.AccountName, "query": set.Args()[0], "chat": *chat,
-		"items": items, "count": len(items), "coverage": coverage,
+		"items": items, "count": len(items), "transcript_source_coverage": coverage,
 	}
 	return withGeneration(outputWithQueryMetadata(data, window, true, effectiveLimit, limitExplicit), value), nil
 }

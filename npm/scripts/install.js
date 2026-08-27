@@ -37,7 +37,12 @@ function parseChecksums(text) {
     if (!line || line.startsWith('#')) continue;
     const match = line.match(/^([0-9a-fA-F]{64})\s+\*?([^\s]+)$/);
     if (!match) throw new Error(`无效的校验和记录：${line}`);
-    values.set(match[2], match[1].toLowerCase());
+    const name = match[2];
+    if (path.basename(name) !== name || name.includes('/') || name.includes('\\') || name === '.' || name === '..') {
+      throw new Error(`校验和文件名不能包含路径：${name}`);
+    }
+    if (values.has(name)) throw new Error(`校验和包含重复资产：${name}`);
+    values.set(name, match[1].toLowerCase());
   }
   return values;
 }
@@ -106,15 +111,15 @@ function reserveSibling(destination, suffix, mode) {
   return reservation.path;
 }
 
-function download(value, destination, redirects = 0, descriptor = undefined) {
+function download(value, destination, redirects = 0, descriptor = undefined, requester = https.get) {
   if (redirects > 5) return Promise.reject(new Error('下载重定向次数过多'));
   const url = assertDownloadUrl(value);
   return new Promise((resolve, reject) => {
-    const request = https.get(url, {headers: {'user-agent': '@zanescope/v-local-cli'}}, response => {
+    const request = requester(url, {headers: {'user-agent': '@zanescope/v-local-cli'}}, response => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         response.resume();
         const next = new URL(response.headers.location, url).toString();
-        download(next, destination, redirects + 1, descriptor).then(resolve, reject);
+        download(next, destination, redirects + 1, descriptor, requester).then(resolve, reject);
         return;
       }
       if (response.statusCode !== 200) {
@@ -159,6 +164,29 @@ function expectedChecksum(selected = target()) {
   return expected;
 }
 
+function allowUnverifiedLocalBinary(environment = process.env) {
+  return Boolean(String(environment.V_LOCAL_CLI_BINARY_PATH || '').trim()) &&
+    environment.V_LOCAL_CLI_DEVELOPMENT === '1' &&
+    environment.V_LOCAL_CLI_ALLOW_UNVERIFIED_LOCAL_BINARY === '1';
+}
+
+function preparePackageInstallDirectory(root, selected = target(), filesystem = fs) {
+  let current = path.resolve(root);
+  for (const segment of ['bin', `${selected.platform}-${selected.arch}`]) {
+    current = path.join(current, segment);
+    try {
+      filesystem.mkdirSync(current, {mode: 0o700});
+    } catch (error) {
+      if (!error || error.code !== 'EEXIST') throw error;
+    }
+    const info = filesystem.lstatSync(current);
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new Error(`npm 安装目录不能是符号链接或目录联接：${current}`);
+    }
+  }
+  return current;
+}
+
 function replaceFile(temporary, destination) {
   let backup = '';
   let movedOld = false;
@@ -182,14 +210,13 @@ function replaceFile(temporary, destination) {
 async function install() {
   if (process.env.V_LOCAL_CLI_SKIP_BINARY_INSTALL === '1') return;
   const selected = target();
-  const destinationDir = path.join(packageRoot, 'bin', `${selected.platform}-${selected.arch}`);
+  const destinationDir = preparePackageInstallDirectory(packageRoot, selected);
   const destination = path.join(destinationDir, selected.binary);
-  fs.mkdirSync(destinationDir, {recursive: true});
 
   const localBinary = process.env.V_LOCAL_CLI_BINARY_PATH;
   if (localBinary) {
-    if (process.env.V_LOCAL_CLI_ALLOW_UNVERIFIED_LOCAL_BINARY !== '1') {
-      throw new Error('V_LOCAL_CLI_BINARY_PATH 仅允许在同时设置 V_LOCAL_CLI_ALLOW_UNVERIFIED_LOCAL_BINARY=1 的开发环境使用');
+    if (!allowUnverifiedLocalBinary()) {
+      throw new Error('V_LOCAL_CLI_BINARY_PATH 仅允许在同时设置 V_LOCAL_CLI_DEVELOPMENT=1 和 V_LOCAL_CLI_ALLOW_UNVERIFIED_LOCAL_BINARY=1 的隔离开发环境使用');
     }
     const temporary = reserveSibling(destination, 'tmp', 0o700);
     try {
@@ -236,4 +263,7 @@ if (require.main === module) {
   });
 }
 
-module.exports = {assertDownloadUrl, expectedChecksum, install, parseChecksums, releaseTag, releaseUrl, replaceFile, reserveSibling, target, verifyHash};
+module.exports = {
+  allowUnverifiedLocalBinary, assertDownloadUrl, download, expectedChecksum, install, parseChecksums,
+  preparePackageInstallDirectory, releaseTag, releaseUrl, replaceFile, reserveSibling, target, verifyHash,
+};

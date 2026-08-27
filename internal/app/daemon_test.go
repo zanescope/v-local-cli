@@ -68,8 +68,15 @@ func TestOutputModesKeepJSONDefaultAndRenderYAMLTable(t *testing.T) {
 		t.Fatalf("默认 JSON schema 失败：code=%d stderr=%s", code, stderr.String())
 	}
 	var defaultEnvelope envelope
-	if err := json.Unmarshal(stdout.Bytes(), &defaultEnvelope); err != nil || !defaultEnvelope.OK {
+	if err := json.Unmarshal(stdout.Bytes(), &defaultEnvelope); err != nil || defaultEnvelope.CommandStatus != "succeeded" {
 		t.Fatalf("默认输出不再是 JSON envelope：output=%s err=%v", stdout.String(), err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil || raw["schema_version"] != float64(2) || raw["command_status"] != "succeeded" {
+		t.Fatalf("response schema v2 envelope 无效：output=%s err=%v", stdout.String(), err)
+	}
+	if _, found := raw["ok"]; found {
+		t.Fatalf("response schema v2 仍暴露有歧义的顶层 ok：%v", raw)
 	}
 	if _, found := defaultEnvelope.Meta["output_format"]; found {
 		t.Fatalf("默认 JSON 不应增加 output_format：%v", defaultEnvelope.Meta)
@@ -79,7 +86,7 @@ func TestOutputModesKeepJSONDefaultAndRenderYAMLTable(t *testing.T) {
 	if code := Main([]string{"--output", "yaml", "schema", "sessions"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("yaml schema 失败：code=%d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `"schema_version": 1`) || !strings.Contains(stdout.String(), `"output_format": "yaml"`) {
+	if !strings.Contains(stdout.String(), `"schema_version": 2`) || !strings.Contains(stdout.String(), `"output_format": "yaml"`) {
 		t.Fatalf("YAML 输出异常：%s", stdout.String())
 	}
 	stdout.Reset()
@@ -94,6 +101,18 @@ func TestOutputModesKeepJSONDefaultAndRenderYAMLTable(t *testing.T) {
 	stderr.Reset()
 	if code := Main([]string{"--output", "table", "members"}, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "TYPE") || !strings.Contains(stderr.String(), "invalid_arguments") {
 		t.Fatalf("table 错误输出异常：code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Main([]string{"unknown-command"}, &stdout, &stderr); code == 0 {
+		t.Fatal("unknown command unexpectedly succeeded")
+	}
+	raw = map[string]any{}
+	if err := json.Unmarshal(stderr.Bytes(), &raw); err != nil || raw["command_status"] != "failed" {
+		t.Fatalf("failure envelope 缺少明确 command_status：output=%s err=%v", stderr.String(), err)
+	}
+	if _, found := raw["ok"]; found {
+		t.Fatalf("failure envelope 仍暴露有歧义的顶层 ok：%v", raw)
 	}
 }
 

@@ -24,7 +24,7 @@ type Favorite struct {
 
 type FavoriteReport struct {
 	Items    []Favorite     `json:"items"`
-	Coverage map[string]any `json:"coverage"`
+	Coverage map[string]any `json:"favorite_source_coverage"`
 }
 
 func favoriteKind(value int64) string {
@@ -86,7 +86,7 @@ func parseFavoriteContent(content string) (title, text, target string) {
 }
 
 func Favorites(root, keyword, kind string, limit int) (FavoriteReport, error) {
-	report := FavoriteReport{Coverage: map[string]any{"available": false, "complete": false, "source": "favorite.db/fav_db_item"}}
+	report := FavoriteReport{Coverage: map[string]any{"source_present": false, "status": "none", "source": "favorite.db/fav_db_item"}}
 	files, err := sqliteFiles(root)
 	if err != nil {
 		return report, err
@@ -153,14 +153,20 @@ func Favorites(root, keyword, kind string, limit int) (FavoriteReport, error) {
 		}
 		_ = rows.Close()
 		_ = database.Close()
-		report.Coverage["available"] = true
+		report.Coverage["source_present"] = true
 	}
 	report.Coverage["databases_found"] = databasesFound
 	report.Coverage["databases_scanned"] = databasesScanned
 	if len(failed) > 0 {
 		report.Coverage["failed_sources"] = failed
 	}
-	report.Coverage["complete"] = report.Coverage["available"] == true && len(failed) == 0
+	report.Coverage["status"] = "none"
+	if report.Coverage["source_present"] == true {
+		report.Coverage["status"] = "complete"
+		if len(failed) > 0 {
+			report.Coverage["status"] = "partial"
+		}
+	}
 	sort.Slice(report.Items, func(left, right int) bool {
 		if report.Items[left].Timestamp == report.Items[right].Timestamp {
 			return report.Items[left].EvidenceID > report.Items[right].EvidenceID
@@ -173,7 +179,7 @@ func Favorites(root, keyword, kind string, limit int) (FavoriteReport, error) {
 	} else {
 		report.Coverage["result_limit_applied"] = false
 	}
-	if report.Coverage["available"] != true {
+	if report.Coverage["source_present"] != true {
 		report.Coverage["reason"] = "favorite_database_or_table_missing"
 	}
 	return report, nil

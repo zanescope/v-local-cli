@@ -8,6 +8,20 @@
 
 v1/v2 头部包含小端序 AES 区长度和 XOR 尾长度。AES 区使用 AES-128-ECB，随后拼接原始区和 XOR 尾。输出必须再次匹配 JPEG、PNG、GIF、WebP 或 wxgf 容器魔数，否则视为失败。
 
+## 聊天消息图片
+
+从 `history` 返回的 `kind=image` 项取得 `evidence_id` 后，优先使用：
+
+```text
+v-local-cli export-chat-image --account <account> --output <file> <image_evidence_id>
+```
+
+CLI 会从当前不可变 generation 重新定位消息，以 `message_resource.db` 中的资源 stem 与 `hardlink.db` 映射共同证明候选归属，再对明文或 DAT 解密结果做完整容器解码。成功结果返回像素宽高、明文 SHA-256、字节数和 `verified_by=message_resource_stem+hardlink_map+full_decode`；不返回微信源路径且不联网。不同强候选产生不同明文时拒绝导出，不能按时间或邻近目录猜测“原图”。验收“高清图”必须为已知夹具设置最低宽高，并核对返回尺寸，不能把缩略图仅凭文件名当作原图。
+
+## 独立 DAT 图片
+
+`export-media` 仅用于用户已经明确提供的独立 DAT 路径；它不能单独证明文件属于某条历史消息：
+
 ```text
 v-local-cli export-media --account <account> [--force] --output <file> <input.dat>
 ```

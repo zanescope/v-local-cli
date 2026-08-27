@@ -12,7 +12,9 @@
 
 ## 本地子进程边界
 
-密钥 Provider、whisper.cpp、ASR 适配器以及实验性微信 OCR 都是当前桌面用户权限下的本地执行边界，不是沙箱。Provider/ASR/whisper 可执行文件必须由用户选择并从可信来源验证；协议的输出限制和 `network_used=false` 声明不能阻止恶意本地程序读取同一用户可访问的文件或自行联网。高保证环境应使用操作系统沙箱、防火墙或专用低权限账号。
+密钥 Provider、whisper.cpp、ASR 适配器以及实验性微信 OCR 都是当前桌面用户权限下的本地执行边界，不是沙箱。发行版 Provider 只能来自其当前用户固定安装目录：CLI 在调用和 daemon 复用前验证 canonical file identity、平台签名及实际 PID image；Windows 固定 Authenticode 叶证书 SHA-256，macOS 固定 identifier 并要求 CLI/Provider/helper 同一 Developer ID Team。`--provider`、`V_LOCAL_CLI_KEY_PROVIDER`、PATH 替代和 helper 路径 override 在发行构建中 fail closed。开发构建允许显式测试组件，但协议的输出限制仍不能约束恶意同用户程序；高保证环境应使用操作系统沙箱、防火墙或专用低权限账号。ASR/whisper 等其他可选程序仍必须由用户选择并从可信来源验证。
+
+密钥流程不把候选写入 endpoint、resume 或普通临时文件。Unix 进程要求 core dump hard limit 为零；Windows 要求 WER 禁止堆采集，并把敏感 byte buffer登记为 excluded memory block。若启动时无法启用这些 crash artifact 门禁，CLI/Provider 会拒绝密钥处理。Go 字符串和第三方操作系统组件仍不提供形式化内存清零保证，因此不要为这些进程启用外部全内存转储；真机发布验收必须检查组织级 crash dump 策略。
 
 Windows 原生 OCR 只从系统 Known Folder API 返回的 Program Files 根发现已安装微信，不信任 `ProgramFiles*` 环境变量，并校验组件 ZIP 的路径、大小和 CRC。该实验后端为兼容微信私有 Mojo 协议，会向微信 OCR 子进程传入供应商协议所需的 `no-sandbox` 开关；因此每张图片都必须单独取得 `--allow-private-ipc` 授权，不能把它视为受 CLI 沙箱隔离的解析器。
 

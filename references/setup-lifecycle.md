@@ -4,7 +4,7 @@
 
 ### 1. 预检账号与环境
 
-依次运行：
+每次首次初始化、Agent 重启后的恢复或重新 setup 都依次运行：
 
 ```text
 v-local-cli status
@@ -14,6 +14,7 @@ v-local-cli doctor
 根据结果处理：
 
 - `data.no_accounts=true`：提醒「请重新登录微信/打开新消息后重试」，然后停止。
+- `data.external_key_workflows` 非空：只把它当作无权限跨重启阶段提示；`prior_requested_action` 只记录重启前请求过什么，不表示还要执行。检查 `revalidation_stage`、`session_resumable=false`、`authorization_carried_forward=false` 和 `machine_revalidation_required=true`，不得恢复旧 daemon session、重复历史动作或复用旧授权。
 - 只有一个账号：后续仍可显式传 `--account <name>`，使证据范围清晰。
 - 多个账号：运行 `v-local-cli accounts`，向用户展示必要的可识别信息并让其选择；不要泄露完整本机路径。
 - 自动候选获取不可用：运行 `v-local-cli provider status` 确认原因。不要静默安装 Provider；让用户安装独立 Provider，或改用其合法持有的候选文件。
@@ -28,7 +29,7 @@ v-local-cli setup --dry-run --account <account>
 
 - `data.status` 应为 `planned`。
 - `data.process_access_performed` 和 `data.secrets_persisted` 应为 `false`。
-- `data.key_provider.available` 只表示可执行文件已找到，不表示候选一定正确。
+- `data.key_provider.executable_present` 只表示可执行普通文件已解析，不表示协议兼容、签名可信或候选一定正确；同时查看 `integrity`。
 - `setup --dry-run` 不启动 Provider，也不生成快照。
 - `data.prevents_coverage_regression=true` 表示重新 setup 也不会静默缩小已有数据库范围。
 
@@ -59,7 +60,7 @@ v-local-cli setup --account <account> --keys <keys.json> --storage keychain
 
 - `data.database.summary` 中已发现、已解密、跳过和失败的数量；
 - `data.media.status`、`aes_verified`、`xor_verified`；
-- 完整密钥流程还必须看到 `data.database_keys_persisted=true` 和 `data.image_keys_persisted=true`；
+- 完整密钥流程必须看到 `data.database_credential_status=persisted|not_required_plaintext_only` 和 `data.image_keys_persisted=true`；`database_keys_persisted` 只表示是否保存了逐库 key，不能表示 plaintext-only 或结构化根凭据失败；
 - `snapshot-only` 是明确的不保存密钥模式，不应把其中的 `*_keys_persisted=false` 解释为媒体验证失败；
 - `data.storage` 是否因系统凭据库失败降级为 `snapshot-only`；
 - `data.warnings` 是否影响当前任务。
@@ -67,8 +68,9 @@ v-local-cli setup --account <account> --keys <keys.json> --storage keychain
 处理规则：
 
 - `ready`：数据库快照可读，所需检查均已通过。
-- 完整媒体 setup 的成功判据是同时满足 `status=ready`、`media.status=verified`、`database_keys_persisted=true` 和 `image_keys_persisted=true`。任一字段不满足都不要宣称已取得完整密钥。
-- database-only 例外的成功判据是 `status=ready`、`database_only=true`、`database_keys_persisted=true` 和 `image_keys_persisted=false`；它不具备图片能力。
+- 完整媒体 setup 的成功判据是同时满足 `status=ready`、`media.status=verified`、`database_credential_status=persisted|not_required_plaintext_only` 和 `image_keys_persisted=true`。plaintext-only Catalog 合法地没有数据库秘密。
+- database-only 的成功判据是 `status=ready`、`database_only=true`、`database_credential_status=persisted|not_required_plaintext_only` 和 `image_keys_persisted=false`；它不具备图片能力。
+- `status=security_restoration_required` 表示验真 credential/generation 可以已经发布，但 macOS SIP 工作流尚未完成；先恢复 SIP 并重启，再用不带旧确认参数的新 setup 取得 `sip_enabled_verified`。该值只证明 SIP 已开启，不代表整机总体安全。
 - `partial`：只在当前任务不依赖失败部分时继续，并向用户说明具体缺口。文本任务要求至少有可读数据库快照；媒体任务要求图片状态为 `verified`。
 - setup 失败：不要直接读取原数据库，不要尝试猜测候选，按错误类型恢复。
 - 只有源数据库确已删除、用户理解历史范围会缩小并明确同意时，才使用 `--allow-coverage-regression`；不要用它绕过临时读取失败。
@@ -79,6 +81,12 @@ v-local-cli setup --account <account> --keys <keys.json> --storage keychain
 |---|---|---|
 | `setup --allow-key-access` | 只读访问本机微信进程 | 必须先单独说明该影响，取得用户对本次操作的明确同意。不要把一般的「看看记录」推定为进程访问授权。 |
 | `setup --keys FILE` | 读取用户指定的敏感候选文件，不访问微信进程 | 只使用用户明确提供或授权的文件，不展示其内容。 |
+
+### 跨重启 Shadow/SIP 交接
+
+`approve_shadow_mode`、`disable_sip`、`reenable_sip` 会结束旧 acquisition session。CLI 的私有 checkpoint 只提示阶段，不携带授权：`status`/`setup --dry-run` 会显示 `prior_requested_action`、`revalidation_stage`、`session_resumable=false`、`authorization_carried_forward=false` 和 `machine_revalidation_required=true`。其中 `prior_requested_action` 不能当成新的操作指令。完成外部动作或重启后，重新取得本次 `--allow-key-access` 授权并以 checkpoint 原 scopes 启动新 setup；不同 scope 会 fail closed，绝不覆盖旧 checkpoint，也不复用旧 `--confirm-key-action`。恢复阶段由一次独立、只读、无 credential 且不依赖账号目录仍存在的 `revalidate_security_posture` 请求收口；若用户未执行 `disable_sip`，后来一次普通 setup 在 SIP 开启状态下完整成功也会清理失效 checkpoint。若普通 acquisition 在产生姿态诊断前失败，CLI 仅补做这次只读姿态检查，并且只有确认 SIP 已关闭时才转入恢复阶段。checkpoint 损坏或过期时按 `external_workflow_state_invalid` 停止，不根据用户口述跳过验证。
+
+损坏记录通常用 `setup --cancel-acquisition --account <account>` 精确清理。若账号已不存在或记录无法归属，只有用户明确同意丢弃全部跨重启阶段提示后才运行 `setup --cancel-all-external-workflows`；该入口只删除 `external-*.checkpoint.json[.old]`，保留 daemon resume、快照、索引与系统凭据。
 
 ## 刷新快照
 

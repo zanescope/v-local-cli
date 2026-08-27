@@ -122,7 +122,7 @@ func load(accountID, consumer string) (Cursor, error) {
 	if currentErr == nil {
 		return cursor, nil
 	}
-	// Windows 不能用 rename 原子替换已有文件。与 account state 相同，若进程
+	// Windows 不能通过重命名原子替换已有文件。与账号状态相同，若进程
 	// 在旧文件改名后中断，就从同版本 .old 只读恢复，绝不创建一个新游标跳过进度。
 	cursor, backupErr := decodeCursor(path+".old", accountID, consumer)
 	if backupErr == nil {

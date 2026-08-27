@@ -24,6 +24,8 @@ type ChatImage struct {
 	SortKey    int64  `json:"sort_key,omitempty"`
 	Format     string `json:"format"`
 	Bytes      int64  `json:"bytes"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
 	SHA256     string `json:"sha256"`
 	VerifiedBy string `json:"verified_by"`
 	Data       []byte `json:"-"`
@@ -303,7 +305,8 @@ func ResolveChatImage(root, accountPath, evidenceID, aesKey string, xorKey int) 
 		verified = append(verified, ChatImage{
 			EvidenceID: message.EvidenceID, Chat: message.Chat, LocalID: message.LocalID, ServerID: message.ServerID,
 			Timestamp: message.Timestamp, SortKey: message.SortKey, Format: format, Bytes: int64(len(plain)),
-			SHA256: hex.EncodeToString(digest[:]), VerifiedBy: "message_resource_stem+hardlink_map+full_decode", Data: plain,
+			Width: validation.Width, Height: validation.Height, SHA256: hex.EncodeToString(digest[:]),
+			VerifiedBy: "message_resource_stem+hardlink_map+full_decode", Data: plain,
 		})
 	}
 	if len(verified) == 0 {

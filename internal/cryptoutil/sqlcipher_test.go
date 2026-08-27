@@ -25,7 +25,21 @@ func encryptTestPage(plain, key, salt []byte, pageNumber int) []byte {
 		page[start:SQLCipherPageSize-reserve],
 		plain[start:SQLCipherPageSize-reserve],
 	)
+	mac, err := pageHMAC(page, key, salt, uint32(pageNumber))
+	if err != nil {
+		panic(err)
+	}
+	copy(page[SQLCipherPageSize-len(mac):], mac)
 	return page
+}
+
+func TestEncryptedHeaderMustMatchSelectedProfilePageSize(t *testing.T) {
+	header := make([]byte, 8)
+	header[0], header[1] = 0x20, 0x00
+	header[4], header[5], header[6], header[7] = SQLCipherReserve, 64, 32, 32
+	if headerOK(header, SQLCipherReserve) {
+		t.Fatal("8 KiB encrypted header was accepted by the 4 KiB profile")
+	}
 }
 
 func TestDecryptSQLCipherSnapshotMainDatabase(t *testing.T) {

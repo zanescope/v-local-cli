@@ -36,7 +36,7 @@
 - 评论同时保留 `comment_id` 与 `comment_64id`；缺失时才使用内容摘要派生本地稳定标识。
 - 非零 `ref_comment_id/ref_comment_64id` 形成 `reply_to`。引用目标也在当前可见评论中时返回目标 `evidence_id` 和 `resolved=true`；否则只保留引用 ID 并返回 `resolved=false`。
 - `content_type_code`、`comment_flag`、`source_code` 和 `viewer_like_flag` 是源 XML 的确定性代码值；CLI 不把未知代码扩写成未经验证的业务含义。
-- 评论图片从该评论自己的 `imagelist/imageinfo` 解析，`expected_media` 来自源计数，`media` 是实际解析到的逻辑资源。`coverage.comment_media_metadata_incomplete` 记录源计数大于已解析资源数的评论。
+- 评论图片从该评论自己的 `imagelist/imageinfo` 解析，`expected_media` 来自源计数，`media` 是实际解析到的逻辑资源。`moment_source_coverage.comment_media_metadata_incomplete` 记录源计数大于已解析资源数的评论。
 - `expected_emojis` 只保留源计数；当前版本不展开表情负载，不能把数量字段描述为已导出的表情内容。
 
 `interactions.scope=locally_retained_visible_only`、`complete_interaction_history=false`：微信可见性、缓存淘汰、删除状态和快照时间都会使本地互动少于曾经发生或远端仍存在的互动。零点赞/零评论只表示当前 XML 没有可见留存项。

@@ -35,6 +35,9 @@ func TestASRProviderHelper(t *testing.T) {
 	if os.Getenv("V_LOCAL_CLI_TEST_ASR_NETWORK") != "" {
 		response.NetworkUsed = boolPointer(true)
 	}
+	if detected := os.Getenv("V_LOCAL_CLI_TEST_ASR_LANGUAGE"); detected != "" {
+		response.Language = detected
+	}
 	if err := json.NewEncoder(os.Stdout).Encode(response); err != nil {
 		os.Exit(5)
 	}
@@ -75,7 +78,7 @@ func TestRunLocalASRProviderContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Transcript != "本地识别结果" || result.Engine != "sensevoice" || result.Source != "local_asr_provider" {
+	if result.Transcript != "本地识别结果" || result.Engine != "sensevoice" || result.Language != "zh" || result.Source != "local_asr_provider" {
 		t.Fatalf("适配器结果错误：%+v", result)
 	}
 	entries, err := os.ReadDir(temporary)
@@ -84,6 +87,26 @@ func TestRunLocalASRProviderContract(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("临时音频没有清理：%v", entries)
+	}
+}
+
+func TestRunLocalASRProviderPreservesDetectedLanguage(t *testing.T) {
+	previous := newASRProviderCommand
+	defer func() { newASRProviderCommand = previous }()
+	newASRProviderCommand = func(ctx context.Context, _ string) *exec.Cmd {
+		command := exec.CommandContext(ctx, os.Args[0], "-test.run=TestASRProviderHelper")
+		command.Env = append(os.Environ(), "V_LOCAL_CLI_TEST_ASR_HELPER=1", "V_LOCAL_CLI_TEST_ASR_LANGUAGE=yue")
+		return command
+	}
+	model := filepath.Join(t.TempDir(), "sensevoice-model")
+	if err := os.Mkdir(model, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	result, err := runLocalASRProvider(context.Background(), voiceDependency{
+		Backend: "external_provider", Provider: os.Args[0], Model: model,
+	}, "zh", []byte("RIFF-test"), "0123456789abcdef", t.TempDir())
+	if err != nil || result.Language != "yue" {
+		t.Fatalf("detected language was replaced by requested language: result=%+v err=%v", result, err)
 	}
 }
 

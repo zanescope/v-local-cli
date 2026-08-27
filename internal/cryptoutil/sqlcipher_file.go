@@ -130,10 +130,6 @@ func plainSQLitePageSize(header []byte) (int64, error) {
 }
 
 func decryptMainFile(source, destination, keyHex string) (*solvedKey, int64, int64, error) {
-	passphrase, err := normalizeHexKey(keyHex)
-	if err != nil {
-		return nil, 0, 0, err
-	}
 	input, err := os.Open(source)
 	if err != nil {
 		return nil, 0, 0, err
@@ -163,6 +159,10 @@ func decryptMainFile(source, destination, keyHex string) (*solvedKey, int64, int
 			return nil, 0, 0, errors.New("明文 SQLite 主库页边界无效")
 		}
 	} else {
+		passphrase, normalizeErr := normalizeHexKey(keyHex)
+		if normalizeErr != nil {
+			return nil, 0, 0, normalizeErr
+		}
 		if stat.Size() < SQLCipherPageSize || stat.Size()%SQLCipherPageSize != 0 {
 			return nil, 0, 0, fmt.Errorf("数据库长度不是 %d 的整数倍", SQLCipherPageSize)
 		}
@@ -249,6 +249,16 @@ func applyWALFile(path string, output *os.File, frames []walFrameLocation, info 
 
 // DecryptSQLCipherSnapshotFiles 逐页解密稳定副本，并流式回放最后一个校验通过的 WAL 提交。
 func DecryptSQLCipherSnapshotFiles(databasePath, walPath, destination, keyHex string) (WALInfo, int64, error) {
+	return DecryptSQLCipherSnapshotFilesWithProfile(databasePath, walPath, destination, keyHex, SQLCipherDefaultProfileID)
+}
+
+// DecryptSQLCipherSnapshotFilesWithProfile 把 profile 作为解密兼容性的原子门禁。
+// 当前版本只登记已经通过验证的 WCDB v4 profile；未知 profile 必须显式失败，
+// 不能静默套用默认参数。
+func DecryptSQLCipherSnapshotFilesWithProfile(databasePath, walPath, destination, keyHex, profileID string) (WALInfo, int64, error) {
+	if profileID != "" && profileID != SQLCipherDefaultProfileID {
+		return WALInfo{}, 0, errors.New("数据库 profile 不受支持")
+	}
 	solved, pageSize, mainSize, err := decryptMainFile(databasePath, destination, keyHex)
 	if err != nil {
 		return WALInfo{}, 0, err

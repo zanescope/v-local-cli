@@ -14,9 +14,9 @@
 - 索引 schema 版本和消息 parser 版本；
 - 消息扫描覆盖率。
 
-构建先写随机 staging 目录，再原子发布到 `derived/<generation_id>`。查询发现任一绑定不匹配时拒绝复用。有效索引发布后不可重写；`--force` 只替换绑定或版本已经无效的旧索引。FTS 优先使用 trigram tokenizer；不能保证子串语义时使用大小写不敏感 LIKE，manifest 和 coverage 明确说明实际后端。
+构建先写随机 staging 目录，再原子发布到 `derived/<generation_id>`。查询发现任一绑定不匹配时拒绝复用。有效索引发布后不可重写；`--force` 只替换绑定或版本已经无效的旧索引。FTS 优先使用 trigram tokenizer；不能保证子串语义时使用大小写不敏感 LIKE，manifest 的 `message_coverage` 与查询的 `search_backend_status` 明确说明实际后端。
 
-`setup` 和 `refresh` 在提交新 state 指针前尝试构建该 generation 的索引。索引失败不会把不完整索引伪装成 ready；`new-messages` 要求目标 generation 覆盖完整，否则返回 `index_required`。普通 `search` 可在索引不可用时回退到原有只读扫描，并在 coverage 中说明原因。
+`setup` 和 `refresh` 在提交新 state 指针前尝试构建该 generation 的索引。索引失败不会把不完整索引伪装成 ready；`new-messages` 要求目标 generation 的 `message_coverage.complete=true`，否则返回 `index_required`。普通 `search` 可在索引不可用时回退到原有只读扫描，并在 `search_backend_status` 中说明原因。
 
 ## 原子增量 consumer
 
@@ -43,4 +43,4 @@ daemon 白名单只包含不刷新、不联网、不导出、不改变派生状�
 
 ## 输出与证据
 
-默认 JSON 是 Agent 和 daemon 的稳定协议。`--output yaml` 与 `--output table` 只用于人工阅读；table 会压缩长字段，不能当无损导出。所有查询仍应保留 `meta.generation_id`、snapshot manifest 摘要、coverage 与消息 `evidence_id`，跨 generation 比较时不得只按显示时间或正文猜测同一性。
+默认 JSON 是 Agent 和 daemon 的稳定协议。`--output yaml` 与 `--output table` 只用于人工阅读；table 会压缩长字段，不能当无损导出。所有查询仍应保留 `meta.generation_id`、snapshot manifest 摘要、`meta.database_coverage_status`、对应领域的限定 coverage/status 字段与消息 `evidence_id`，跨 generation 比较时不得只按显示时间或正文猜测同一性。

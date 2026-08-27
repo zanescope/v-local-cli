@@ -401,9 +401,9 @@ func TestMacOSAcceptanceBoundaryMatchesCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	capabilities := result.(map[string]any)
-	validation := capabilities["data_layout_validation"].(map[string]any)
-	if validation["darwin_arm64"] != "build_only" {
-		t.Fatalf("darwin/arm64 能力边界在真机验收前被扩大：%v", validation)
+	validation := capabilities["validation_evidence"].(map[string]any)
+	if validation["status"] != "not_embedded" || validation["release_manifest_required_for_real_device_claims"] != true {
+		t.Fatalf("capabilities emitted an unbound live validation claim: %v", validation)
 	}
 	root := repositoryRoot(t)
 	acceptancePath := filepath.Join(root, "references", "macos-acceptance.md")
@@ -413,7 +413,7 @@ func TestMacOSAcceptanceBoundaryMatchesCapabilities(t *testing.T) {
 	}
 	documentation := string(acceptance)
 	for _, expected := range []string{
-		"`darwin/amd64` 为 `real_device_verified`", "user_supplied_candidate_file", "macOS 不支持微信原生 OCR", "darwin/arm64` 必须继续保持 `build_only`",
+		"unverified_legacy_record", "validation_evidence.status=not_embedded", "macOS 不支持微信原生 OCR", "darwin/arm64` 必须继续保持 `build_only`",
 	} {
 		if !strings.Contains(documentation, expected) {
 			t.Errorf("macOS 验收文档缺少边界：%s", expected)

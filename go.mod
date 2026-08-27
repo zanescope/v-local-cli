@@ -8,6 +8,7 @@ require (
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/net v0.57.0
 	golang.org/x/sys v0.47.0
+	golang.org/x/text v0.40.0
 	modernc.org/sqlite v1.56.0
 )
 

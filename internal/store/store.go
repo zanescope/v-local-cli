@@ -244,7 +244,7 @@ func messageDatabase(path string) bool {
 		!strings.Contains(name, "fts") && !strings.Contains(name, "resource")
 }
 
-// ChatExists 只检查当前 immutable generation 是否包含对应消息表，用于在联系人
+// ChatExists 只检查当前不可变代际是否包含对应消息表，用于在联系人
 // 数据缺失时保留稳定 username 的兼容查询路径。
 func ChatExists(root, chat string) bool {
 	if strings.TrimSpace(chat) == "" {

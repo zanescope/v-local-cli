@@ -27,7 +27,7 @@ type OfficialAccount struct {
 
 type OfficialAccountReport struct {
 	Items                     []OfficialAccount `json:"items"`
-	Available                 bool              `json:"available"`
+	Available                 bool              `json:"source_present"`
 	Matched                   int               `json:"matched"`
 	Returned                  int               `json:"returned"`
 	Truncated                 bool              `json:"truncated"`
@@ -64,7 +64,7 @@ type OfficialPublication struct {
 
 type OfficialReport struct {
 	Items    []OfficialPublication `json:"items"`
-	Coverage map[string]any        `json:"coverage"`
+	Coverage map[string]any        `json:"official_source_coverage"`
 }
 
 type officialMessageRow struct {
@@ -397,7 +397,7 @@ func OfficialHistory(root, publisher string, start, end *int64, limit int) (Offi
 		return OfficialReport{}, err
 	}
 	coverage := map[string]any{
-		"available": false, "account_username": publisher, "account_known": false,
+		"source_present": false, "account_username": publisher, "account_known": false,
 		"message_history_available": false, "matched_message_tables": 0,
 		"rows_inspected": 0, "article_messages": 0, "non_article_messages": 0,
 		"parse_errors": 0, "unsafe_urls_rejected": 0, "articles": 0,
@@ -413,7 +413,7 @@ func OfficialHistory(root, publisher string, start, end *int64, limit int) (Offi
 		if !bizMessageDatabase(path) {
 			continue
 		}
-		coverage["available"] = true
+		coverage["source_present"] = true
 		database, openErr := openReadOnly(path)
 		if openErr != nil {
 			continue
@@ -552,7 +552,7 @@ func SearchOfficial(root, keyword, publisher string, start, end *int64, limit in
 	}
 	items := []OfficialPublication{}
 	coverage := map[string]any{
-		"available": false, "publishers_inspected": 0, "rows_inspected": 0,
+		"source_present": false, "publishers_inspected": 0, "rows_inspected": 0,
 		"scope": "locally_received_and_retained_only", "content_level": "card_metadata",
 		"article_body_available": false, "complete_publication_history": false,
 		"remote_fetch_attempted": false, "matched_fields_available": true,
@@ -562,8 +562,8 @@ func SearchOfficial(root, keyword, publisher string, start, end *int64, limit in
 		if err != nil {
 			return OfficialReport{}, err
 		}
-		if available, _ := report.Coverage["available"].(bool); available {
-			coverage["available"] = true
+		if present, _ := report.Coverage["source_present"].(bool); present {
+			coverage["source_present"] = true
 		}
 		coverage["publishers_inspected"] = coverage["publishers_inspected"].(int) + 1
 		if inspected, ok := report.Coverage["rows_inspected"].(int); ok {

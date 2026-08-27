@@ -188,6 +188,23 @@ func DaemonRoot() (string, error) {
 	return directory, nil
 }
 
+// AcquisitionRoot 保存密钥获取 daemon 的认证端点、不含秘密的 session resume 元数据，
+// 以及只用于生成 opaque catalog 标识的机器随机密钥。目录使用与凭据状态相同的当前用户专属 ACL。
+func AcquisitionRoot() (string, error) {
+	root, err := Home()
+	if err != nil {
+		return "", err
+	}
+	if err := securePrivateDirectory(root); err != nil {
+		return "", err
+	}
+	directory := filepath.Join(root, "acquisition")
+	if err := securePrivateDirectory(directory); err != nil {
+		return "", err
+	}
+	return directory, nil
+}
+
 // ValidatePrivateTarget 拒绝私有目录层级或最终目标中的符号链接、junction、
 // 重解析点和特殊文件。目标尚不存在时只验证其父目录，供原子发布前使用。
 func ValidatePrivateTarget(path string, allowDirectory bool) error {
@@ -409,8 +426,12 @@ func Select(selector string) (AccountState, error) {
 
 func SaveSecrets(accountID string, bundle provider.CandidateBundle) error {
 	minimal := provider.CandidateBundle{
-		DatabaseKeys: bundle.DatabaseKeys,
-		ImageKeys:    bundle.ImageKeys,
+		CatalogID:          bundle.CatalogID,
+		DatabaseKeys:       bundle.DatabaseKeys,
+		DatabaseProfiles:   bundle.DatabaseProfiles,
+		DatabaseCredential: bundle.DatabaseCredential,
+		ImageKeys:          bundle.ImageKeys,
+		Profiles:           bundle.Profiles,
 	}
 	payload, err := json.Marshal(minimal)
 	if err != nil {
@@ -468,6 +489,9 @@ func LoadSecrets(accountID string) (provider.CandidateBundle, error) {
 	// ValidateBundle 会就地归一化候选，校验不过时不返回半归一化的结果。
 	if err := provider.ValidateBundle(&bundle); err != nil {
 		return provider.CandidateBundle{}, err
+	}
+	if bundle.DatabaseCredential != nil && bundle.DatabaseCredential.StorageAccountID != accountID {
+		return provider.CandidateBundle{}, errors.New("系统凭据库中的凭据账号绑定不匹配")
 	}
 	return bundle, nil
 }

@@ -101,7 +101,7 @@ func runSessions(args []string, unreadOnly bool) (any, error) {
 	}
 	data := map[string]any{
 		"account": value.AccountName, "items": report.Items, "count": len(report.Items),
-		"coverage": report.Coverage, "unread_only": unreadOnly,
+		"session_source_coverage": report.Coverage, "unread_only": unreadOnly,
 	}
 	return withGeneration(commandOutput{data: data, meta: map[string]any{"untrusted": true}}, value), nil
 }
@@ -130,7 +130,7 @@ func runMembers(args []string) (any, error) {
 	}
 	data := map[string]any{
 		"account": value.AccountName, "chat": match.Contact.Username, "display": match.Contact.Display,
-		"items": report.Items, "count": len(report.Items), "coverage": report.Coverage,
+		"items": report.Items, "count": len(report.Items), "member_source_coverage": report.Coverage,
 	}
 	return withGeneration(commandOutput{data: data, meta: map[string]any{"untrusted": true}}, value), nil
 }
@@ -162,7 +162,7 @@ func runFavorites(args []string) (any, error) {
 	}
 	data := map[string]any{
 		"account": value.AccountName, "query": keyword, "kind": *kind,
-		"items": report.Items, "count": len(report.Items), "coverage": report.Coverage,
+		"items": report.Items, "count": len(report.Items), "favorite_source_coverage": report.Coverage,
 	}
 	return withGeneration(commandOutput{data: data, meta: map[string]any{"untrusted": true}}, value), nil
 }

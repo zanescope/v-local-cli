@@ -11,16 +11,32 @@
 | `conflicting_time_window` | `--all` 与 `--start/--end` 不能同时使用。 |
 | `missing_command`、`unknown_command`、`invalid_arguments` | 运行 `v-local-cli --help` 或 `v-local-cli schema <command>`，按机器契约修正命令和选项顺序。 |
 | `key_access_not_authorized` | 只有用户明确同意后才能加 `--allow-key-access`。 |
+| `private_state_unavailable` | 检查当前用户缓存目录的所有者、ACL 与剩余空间；不要把 acquisition endpoint 或 resume 文件移到共享目录。 |
+| `crash_protection_unavailable` | 停止密钥获取；确认当前进程允许把 Unix `RLIMIT_CORE` 降为 0，或检查 Windows crash reporting/应用控制策略。不得在 crash artifact 防护失败时继续接收 Provider secret。 |
+| `external_workflow_state_invalid` | 跨重启 checkpoint 已损坏、过期或包含协议不允许的字段。它不是授权凭据；停止自动继续。账号仍可选时用 `setup --cancel-acquisition --account NAME` 精确清理；账号已不可选或记录无法识别时，取得用户对“仅清理全部跨重启 checkpoint”的明确确认后运行 `setup --cancel-all-external-workflows`。该命令保留 daemon resume、快照和凭据。`doctor` 同样会 fail-closed，不能修复该记录。 |
+| `external_workflow_cleanup_failed` | 全局 checkpoint 清理没有完成；不要手工递归删除私有状态目录。检查当前用户对私有 acquisition 目录的权限与剩余空间后重试；快照、凭据和 daemon resume 均不在该命令删除范围内。 |
 | `key_provider_failed` | 运行 `v-local-cli provider status`；确认 Provider 是单独安装的正确平台版本。重新登录微信或打开新消息后再试。 |
+| `key_acquisition_component_untrusted` | 重新运行官方 `@zanescope/v-local-key-provider` 安装器并检查 `provider status` 的 `integrity`。发行构建只接受当前用户固定安装目录中的签名 Provider/helper，不接受 `--provider`、`V_LOCAL_CLI_KEY_PROVIDER`、PATH 同名替代或重签文件；需要自备候选时改用 `setup --keys FILE`。 |
+| `key_provider_cancel_failed` | 检查当前用户私有状态目录后重试 `setup --cancel-acquisition --account NAME`；取消只清理 session，不删除已发布 generation。 |
 | `key_provider_helper_missing` | 运行一次 `npx @zanescope/v-local-key-provider@latest install`；macOS 安装器会同时配置 helper，无需手工运行或传路径。 |
 | `key_provider_helper_failed` | 重新运行同一个 Provider 安装命令以恢复主程序与 helper 的匹配版本，再重试 setup。 |
 | `key_provider_process_list_unavailable` | 当前环境无法枚举 macOS 进程；请在普通 macOS Terminal 中重试，或确认环境允许读取进程列表。这不等同于微信未运行。 |
 | `key_provider_permission_denied` | 已安装 helper，但 macOS 仍拒绝读取微信进程。保持微信登录并重试；Provider 会自动尝试管理员授权，不要手工运行 helper、改签微信或注入进程。 |
-| `key_provider_sip_required` | SIP 仍开启。无 Developer ID 的兼容模式只有在用户明确接受风险后，才能在恢复模式临时关闭 SIP；不希望更改系统安全设置时，改用 `--keys FILE` 导入已取得的候选。 |
-| `key_provider_hook_trigger_required` | 当前数据库已经打开，普通切换会话不一定重新创建加密上下文。先完全退出微信并启动下一次 setup；保持终端窗口运行，看到命令尚未返回提示符时从“应用程序”重新打开微信并完成账号登录；不需要手工运行 helper 或 lldb。 |
-| `key_provider_hook_restart_required` | 当前微信数据库已在进程启动阶段打开。先完全退出微信并启动下一次 setup；保持终端窗口运行，看到命令尚未返回提示符时从“应用程序”重新打开微信并完成账号登录。连续两次仍失败时停止自动重试并报告诊断。 |
+| `key_provider_shadow_approval_required` | Shadow 不属于同一 daemon session 的动作。阅读风险并由用户手工完成准备；之后不带旧 `--confirm-key-action` 重新运行 `setup --allow-key-access`，让新 session 复验二进制、进程、账号和 Catalog。 |
+| `key_provider_unsupported` 且 `process_access_error=sip_enabled` | SIP 未经系统证据验证，或 Shadow 仍为 `not_evaluated/available/awaiting_approval`；停止并报告，不得自行升级。 |
+| `key_provider_sip_required` | 仅在 Provider 明确返回 `next_action=disable_sip`，且 Shadow 为 `unavailable_in_build`、`unsupported_for_target` 或 `attempted_failed` 并带匹配原因时处理。它是可拒绝的低优先级 fallback，不是当前 daemon 的可恢复动作；结束旧 session，确认无权限 checkpoint 已持久化，完成系统操作和重启后，从新的 `setup --allow-key-access` session 开始，不传旧 `--confirm-key-action`。 |
+| `key_provider_sip_restoration_required` | 本次流程曾在 SIP-disabled 状态运行，整体工作流尚未完成。立即在恢复环境开启 SIP 并重启；随后运行 `status`，再用不带旧确认参数的新 `setup --allow-key-access` 让 Provider 以系统证据确认恢复。 |
+| `key_provider_hook_trigger_required` | 按 `next_action` 完成只读页面动作，再在原 setup 参数上增加 `--confirm-key-action trigger_database`。普通重跑不会生成回执；拒绝动作但要保留已验真的 partial 时改传 `stop_and_report`。 |
+| `key_provider_hook_restart_required` | 保存前台工作、确认影响并只重启绑定进程，再增加 `--confirm-key-action restart_wechat`。Provider 未观测到新进程实例时会拒绝回执；拒绝动作但要保留已验真的 partial 时改传 `stop_and_report`。 |
+| `key_provider_action_confirmation_mismatch` | 确认参数与当前 `next_action`、session、route 或进程实例不一致；删除旧确认参数，重新读取当前错误详情。不得用该参数确认 Shadow/SIP。 |
+| `key_provider_catalog_drift` | Provider 验证后数据库集合、文件身份或首屏内容发生了变化；本次候选已拒绝发布。保持目标账号不变并重新运行原 setup/refresh，让 Provider 针对新 catalog 重新获取和验证；不要复用旧确认参数或旧候选。 |
 | `wechat_not_running` | 启动并登录微信，然后重新运行同一条 setup 命令。 |
 | `key_provider_timeout`、`key_provider_no_candidates` | 保持微信登录，打开一条新消息后重试；不要把未命中解释为密钥无效。 |
+| `key_provider_account_mismatch` | 当前会话与目标数据账号冲突；切换到目标账号后重试，禁止保存或跨进程合并本次候选。 |
+| `key_provider_relogin_required` | 仅在 Provider 给出登录阶段机器证据时，说明扫码/MFA 影响并由用户确认重新登录；不得作为默认首次动作。拒绝重登但要保留已验真的 partial 时传 `--confirm-key-action stop_and_report`。 |
+| `key_provider_ambiguous` | 停止自动选择和盲目重试，保留版本、route、catalog 与候选计数诊断供复核。 |
+| `key_provider_validator_conflict` | 同一文件/profile 有多个不同 key 通过 HMAC，按验证器或文件漂移故障处理；停止重试和发布，保留脱敏诊断并复核 profile 与首页 HMAC 实现。 |
+| `key_provider_unsupported` | 当前版本/架构/指纹无受支持 route；不要自动降级微信或扩大扫描范围。 |
 | `refresh_credentials_unavailable` | 在最初 setup 的同一桌面用户身份下重试；仍不可用时用 `--storage keychain` 重新 setup。 |
 | `refresh_account_unavailable` | 运行 `v-local-cli accounts` 检查原账号目录；重新登录微信或打开新消息后重试，不要自动改用同名账号。 |
 | `snapshot_busy` | 等待同账号当前 setup/refresh 结束后重试；操作系统会在进程退出时释放锁状态，不要删除锁文件。 |
@@ -30,6 +46,7 @@
 | `confirmation_required` | 先运行对应的 `--dry-run` 查看删除范围，取得用户明确确认后再执行。 |
 | `keychain_delete_failed`、`account_data_delete_failed` | 不要声称已完全删除；保持同一桌面用户身份，运行 `doctor` 后重试。 |
 | `database_key_rejected` | 候选没有通过 SQLCipher 首页或 WAL 验证；重新取得候选，不要手工修改数据库。 |
+| `database_credential_invalid` | 已保存的结构化凭据无法为当前 catalog 派生并通过首页 HMAC；重新运行 `setup --allow-key-access --storage keychain`，不要手工修改凭据库或数据库。 |
 | `invalid_key_bundle` | 不打印文件内容；让用户确认文件来源和协议格式。 |
 | `media_too_large` | 不绕过 64 MiB 上限；让用户提供更小或正确的输入文件。 |
 | `media_decrypt_failed` | 核对账号、输入 DAT 和图片候选是否匹配，再重新 setup。 |
@@ -89,4 +106,4 @@
 
 系统凭据按桌面用户身份隔离。若 CLI 在不同用户、服务或沙箱身份下运行，`refresh` 可能看不到原身份保存的凭据；不要把密钥复制到项目文件来绕过隔离，应切回同一桌面用户身份，或重新 setup。
 
-`setup --dry-run` 永远不会启动 Provider。若它的输出显示 `available=false`，这不是数据库损坏，只表示自动候选获取不可用。
+`setup --dry-run` 永远不会启动 Provider。若它的输出显示 `key_provider.executable_present=false`，这不是数据库损坏，只表示没有解析到 Provider 可执行文件；即使为 `true` 也不能替代 `integrity`、协议和真机 route 验证。
