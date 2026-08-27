@@ -61,17 +61,15 @@ func TestCanonicalExecutableRejectsLinkedAncestor(t *testing.T) {
 	}
 }
 
-func TestNormalizeDarwinSystemAliasKeepsUserControlledSuffixVisible(t *testing.T) {
-	for input, want := range map[string]string{
-		"/private/var/folders/test/provider": "/var/folders/test/provider",
-		"/private/tmp/provider":              "/tmp/provider",
-		"/private/etc/hosts":                 "/etc/hosts",
-		"/private/variable/provider":         "/private/variable/provider",
-		"/var/folders/test/provider":         "/var/folders/test/provider",
-	} {
-		if got := normalizeDarwinSystemAlias(input); got != want {
-			t.Fatalf("normalizeDarwinSystemAlias(%q)=%q, want %q", input, got, want)
-		}
+func TestSameCanonicalPathTextFoldsDarwinSystemAlias(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("系统别名折叠只适用于 macOS")
+	}
+	if !sameCanonicalPathText("/private/var/folders/test/provider", "/var/folders/test/provider") {
+		t.Fatal("同一固定安装路径的两种系统别名写法被判为不同")
+	}
+	if sameCanonicalPathText("/private/variable/provider", "/variable/provider") {
+		t.Fatal("非系统别名前缀被当成别名折叠")
 	}
 }
 

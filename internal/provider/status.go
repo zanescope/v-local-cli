@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	localplatform "github.com/zanescope/v-local-cli/internal/platform"
 )
 
 // Protocol 是首个公开的密钥提供器协议。首次发布前已移除从未发布的 v2 开发常量。
@@ -165,23 +167,7 @@ func sameCanonicalPathText(left, right string) bool {
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(left, right)
 	}
-	if runtime.GOOS == "darwin" {
-		left = normalizeDarwinSystemAlias(left)
-		right = normalizeDarwinSystemAlias(right)
-	}
-	return left == right
-}
-
-// macOS 把 /etc、/tmp 和 /var 暴露为 /private 下不可变的系统别名。即使调用方没有
-// 经过用户可控链接，EvalSymlinks 也会展开这些别名。这里只规范化这些固定前缀，确保
-// 在其下层引入的链接仍会改变规范路径并被拒绝。
-func normalizeDarwinSystemAlias(value string) string {
-	for _, prefix := range []string{"/private/etc", "/private/tmp", "/private/var"} {
-		if value == prefix || strings.HasPrefix(value, prefix+"/") {
-			return strings.TrimPrefix(value, "/private")
-		}
-	}
-	return value
+	return localplatform.CanonicalSystemPath(left) == localplatform.CanonicalSystemPath(right)
 }
 
 func platformName() string {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/zalando/go-keyring"
+	localplatform "github.com/zanescope/v-local-cli/internal/platform"
 	"github.com/zanescope/v-local-cli/internal/provider"
 )
 
@@ -63,9 +64,12 @@ func Home() (string, error) {
 	return filepath.Join(root, "v-local-cli"), nil
 }
 
+// AccountID 必须与 provider 的 acquisition 目录标识使用同一套路径规范化，否则同一个
+// 账号会共用一个 acquisition endpoint，却因为账号标识不同而拿不到同一把账号锁。
 func AccountID(accountPath string) string {
 	absolute, _ := filepath.Abs(accountPath)
-	sum := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(absolute))))
+	canonical := localplatform.CanonicalSystemPath(absolute)
+	sum := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(canonical))))
 	return hex.EncodeToString(sum[:8])
 }
 

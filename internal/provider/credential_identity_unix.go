@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"syscall"
 
 	"golang.org/x/text/unicode/norm"
+
+	localplatform "github.com/zanescope/v-local-cli/internal/platform"
 )
 
 func credentialFileIdentity(file *os.File) (string, error) {
@@ -30,18 +30,6 @@ func credentialFileIdentity(file *os.File) (string, error) {
 }
 
 func credentialPathKey(path string) string {
-	value := filepath.ToSlash(filepath.Clean(path))
-	if runtime.GOOS == "darwin" {
-		value = normalizeDarwinCredentialSystemAlias(value)
-	}
+	value := localplatform.CanonicalSystemPath(filepath.ToSlash(filepath.Clean(path)))
 	return norm.NFC.String(value)
-}
-
-func normalizeDarwinCredentialSystemAlias(value string) string {
-	for _, prefix := range []string{"/private/etc", "/private/tmp", "/private/var"} {
-		if value == prefix || strings.HasPrefix(value, prefix+"/") {
-			return strings.TrimPrefix(value, "/private")
-		}
-	}
-	return value
 }
