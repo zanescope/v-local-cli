@@ -31,3 +31,28 @@ func TestDarwinTrustedDirectoryTreeRejectsWritableAncestor(t *testing.T) {
 		t.Fatal("group-writable component ancestor was accepted")
 	}
 }
+
+// release 构建靠这条路径确认 acquisition daemon 的 PID 确实在运行它自称的镜像。
+// 它一旦返回错误，loadAcquisitionEndpoint 就会失败，整条 macOS daemon 获取路径都
+// 走不通，因此必须对当前进程做一次真实校验，而不只是测试错误分支。
+func TestDarwinProcessImagePathMatchesCurrentExecutable(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := darwinProcessImagePath(os.Getpid())
+	if err != nil {
+		t.Fatalf("当前进程的镜像路径不可用：%v", err)
+	}
+	if !sameFilePath(image, executable) {
+		t.Fatalf("进程镜像路径与当前可执行文件不一致：image=%q executable=%q", image, executable)
+	}
+}
+
+func TestDarwinProcessImagePathRejectsInvalidPID(t *testing.T) {
+	for _, pid := range []int{0, -1} {
+		if image, err := darwinProcessImagePath(pid); err == nil {
+			t.Fatalf("无效 PID %d 返回了镜像路径 %q", pid, image)
+		}
+	}
+}

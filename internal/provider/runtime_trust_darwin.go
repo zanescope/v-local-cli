@@ -212,20 +212,34 @@ func validateProviderHelperTrust(providerPath, helperPath string) (string, error
 	return "developer_id_verified", nil
 }
 
+const (
+	// proc_info(2) 的参数顺序是 (callnum, pid, flavor, arg, buffer, buffersize)。
+	// libproc 的 proc_pidpath 等价于用 PROC_INFO_CALL_PIDINFO 作 callnum、
+	// PROC_PIDPATHINFO 作 flavor 调用它；漏掉 callnum 会让其余参数整体错位，内核
+	// 一律返回 EINVAL。发布件是 CGO_ENABLED=0 构建的，无法直接链接 libproc。
+	darwinProcInfoCallPIDInfo = 2
+	darwinProcPIDPathInfo     = 11
+	// PROC_PIDPATHINFO_MAXSIZE
+	darwinProcPIDPathMaxSize = 4 * 1024
+)
+
 func darwinProcessImagePath(pid int) (string, error) {
-	buffer := make([]byte, 4*1024)
-	result, _, errno := syscall.Syscall6(syscall.SYS_PROC_INFO, uintptr(pid), 11, 0,
-		uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)), 0)
-	if errno != 0 || result == 0 {
+	if pid <= 0 {
+		return "", errors.New("daemon process identifier is invalid")
+	}
+	buffer := make([]byte, darwinProcPIDPathMaxSize)
+	_, _, errno := syscall.Syscall6(syscall.SYS_PROC_INFO,
+		darwinProcInfoCallPIDInfo, uintptr(pid), darwinProcPIDPathInfo, 0,
+		uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
+	if errno != 0 {
 		return "", errors.New("daemon process image is unavailable")
 	}
-	if end := bytes.IndexByte(buffer, 0); end >= 0 {
-		buffer = buffer[:end]
-	}
-	if len(buffer) == 0 {
+	// 返回值不是可依赖的长度：libproc 自己也只用它区分成败，再用 NUL 终止符取长度。
+	end := bytes.IndexByte(buffer, 0)
+	if end <= 0 {
 		return "", errors.New("daemon process image is empty")
 	}
-	return filepath.Clean(string(buffer)), nil
+	return filepath.Clean(string(buffer[:end])), nil
 }
 
 func validateAcquisitionDaemonProcessIdentity(endpoint acquisitionDaemonEndpoint, providerPath string) error {
