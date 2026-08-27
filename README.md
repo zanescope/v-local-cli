@@ -126,8 +126,8 @@ v-local-cli history --fresh --limit 200 <chat_username>
 成功结果写入 stdout；失败写入 stderr，并以非零退出码结束。默认 JSON 是 Agent 与 daemon 的稳定协议，所有 JSON 都带顶层 `schema_version`：
 
 ```json
-{"schema_version":2,"command_status":"succeeded","data":{},"meta":{"version":"0.1.0-dev.1","runtime":"go"}}
-{"schema_version":2,"command_status":"failed","error":{"type":"...","message":"...","hint":"..."}}
+{"schema_version":1,"command_status":"succeeded","data":{},"meta":{"version":"0.1.0-dev.1","runtime":"go"}}
+{"schema_version":1,"command_status":"failed","error":{"type":"...","message":"...","hint":"..."}}
 ```
 
 `command_status` 只表示命令执行，不表示数据完整。快照数据库范围统一读取 `meta.database_coverage_status` 和 `meta.database_coverage`；成员、搜索、朋友圈、公众号、语音与 OCR 使用各自限定的 source/backend coverage 字段，不再输出容易误解的裸 `coverage` 或 `available`。

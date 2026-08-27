@@ -29,10 +29,9 @@ type cryptProviderCertificate struct {
 }
 
 func pointerReturnedByWinTrust(address uintptr) unsafe.Pointer {
-	// LazyProc.Call exposes native pointer return values as uintptr. WinTrust
-	// owns this memory until WTD_STATEACTION_CLOSE, so immediately preserve the
-	// pointer bits in a pointer-typed value instead of performing arithmetic or
-	// retaining the integer beyond that native lifetime.
+	// LazyProc.Call 会把原生指针返回值暴露为 uintptr。该内存在 WTD_STATEACTION_CLOSE
+	// 之前归 WinTrust 所有，因此立即以指针类型保存其位模式，不对其做算术运算，也不让
+	// 整数值超过原生生命周期继续存在。
 	return *(*unsafe.Pointer)(unsafe.Pointer(&address))
 }
 
@@ -88,10 +87,9 @@ func verifyWindowsAuthenticode(path string) error {
 	file := &windows.WinTrustFileInfo{Size: uint32(unsafe.Sizeof(windows.WinTrustFileInfo{})), FilePath: filePath}
 	data := &windows.WinTrustData{
 		Size: uint32(unsafe.Sizeof(windows.WinTrustData{})), UIChoice: windows.WTD_UI_NONE,
-		// Runtime acquisition must never turn signature verification into a network
-		// operation. Release verification performs the online/revocation-sensitive
-		// checks before publication; runtime verifies the embedded Authenticode
-		// signature and cached trust chain without URL retrieval.
+		// 运行时采集绝不能让签名验证变成网络操作。release 验证会在发布前完成依赖联网和
+		// 吊销状态的检查；运行时则在不获取 URL 的情况下验证嵌入的 Authenticode 签名和
+		// 已缓存的信任链。
 		RevocationChecks: windows.WTD_REVOKE_NONE, UnionChoice: windows.WTD_CHOICE_FILE,
 		StateAction:                     windows.WTD_STATEACTION_VERIFY,
 		FileOrCatalogOrBlobOrSgnrOrCert: unsafe.Pointer(file),

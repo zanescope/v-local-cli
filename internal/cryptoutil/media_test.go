@@ -78,6 +78,20 @@ func TestDecryptImageDATV3(t *testing.T) {
 	}
 }
 
+func TestDecryptImageDATV1UsesFixedAESKey(t *testing.T) {
+	plain := syntheticImage(t, "png")
+	data := encryptV2DAT(t, plain, string(v1FixedAESKey), 0x5a, 32)
+	copy(data, v1Magic)
+
+	got, format, err := DecryptImageDAT(data, "账号 AES 参数不应参与 V1 解密", 0x5a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != "png" || !bytes.Equal(got, plain) {
+		t.Fatalf("V1 固定 AES key 往返异常：format=%s got=%d want=%d", format, len(got), len(plain))
+	}
+}
+
 func TestDecryptImageDATRejectsWrongXOR(t *testing.T) {
 	plain := syntheticImage(t, "jpg")
 	data := encryptV2DAT(t, plain, "0123456789abcdef", 0x5a, 2)

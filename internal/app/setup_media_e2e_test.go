@@ -85,10 +85,9 @@ $response = [ordered]@{
 		return providerPath
 	}
 	providerPath := filepath.Join(directory, "mock-provider")
-	// macOS deliberately clears the caller's ambient environment before
-	// crossing the Provider process boundary. Embed the fixture's synthetic,
-	// non-secret evidence in the script so this test exercises that production
-	// isolation instead of depending on V_LOCAL_TEST_* being inherited.
+	// macOS 在跨越 Provider 进程边界前会主动清除调用方的环境变量。把 fixture
+	// 中合成且不含秘密的证据嵌入脚本，让该测试覆盖生产环境的隔离行为，而不依赖
+	// 继承 V_LOCAL_TEST_* 环境变量。
 	script := "#!/bin/sh\n" +
 		"V_LOCAL_TEST_FILE_ID='" + identity + "'\n" +
 		"V_LOCAL_TEST_FILE_SIZE='" + strconv.FormatInt(info.Size(), 10) + "'\n" +

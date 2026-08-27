@@ -1119,7 +1119,7 @@ func TestSetupSnapshotOnlyAndContacts(t *testing.T) {
 		t.Fatalf("database-only setup 状态不明确：%v", setupData)
 	}
 	accountData := setupData["account"].(map[string]any)
-	if accountData["version"].(float64) != 2 || accountData["updated_at"] == "" || accountData["generation_id"] == "" || accountData["snapshot_manifest_sha256"] == "" {
+	if accountData["version"].(float64) != 1 || accountData["updated_at"] == "" || accountData["generation_id"] == "" || accountData["snapshot_manifest_sha256"] == "" {
 		t.Fatalf("setup 状态元数据未同步：%v", accountData)
 	}
 	code, output, errors = runForTest("contacts", "阿丽")

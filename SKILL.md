@@ -404,5 +404,5 @@ v-local-cli export-moment-media --account <account> --output <output-file> <medi
 - 将 Unix `timestamp` 转换为人类时间时明确使用的时区；不能确认时保留原值。
 - 「全部」「没有」「最早」「最新」等绝对表述必须受本地留存、快照时间、解密成功范围和扫描上限约束。
 - setup 或查询只有部分成功时，在最终回答中同时说明可用结果和缺失范围。
-- 快照查询的数据库范围只以 `meta.database_coverage_status/database_coverage` 为准；裸 `coverage`、裸 `available` 和顶层 `ok` 已从 response schema v2 移除。领域限定状态不能替代数据库覆盖，也不能替代进程退出码/`command_status`。
+- 快照查询的数据库范围只以 `meta.database_coverage_status/database_coverage` 为准；response schema v1 不提供裸 `coverage`、裸 `available` 和顶层 `ok`。领域限定状态不能替代数据库覆盖，也不能替代进程退出码/`command_status`。
 - 永远不要在最终回答中包含候选、系统凭据内容或 Provider 原始诊断。

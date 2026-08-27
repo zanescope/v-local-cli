@@ -16,7 +16,7 @@ import (
 	"github.com/zanescope/v-local-cli/internal/provider"
 )
 
-const stateVersion = 2
+const stateVersion = 1
 const keyringService = "v-local-cli"
 
 type DatabaseSummary struct {

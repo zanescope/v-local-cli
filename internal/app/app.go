@@ -28,7 +28,7 @@ import (
 
 var Version = "0.1.0-dev.1"
 
-const responseSchemaVersion = 2
+const responseSchemaVersion = 1
 
 const setupUsage = "v-local-cli setup [--dry-run | --cancel-acquisition | --cancel-all-external-workflows] [--account NAME] [--provider FILE] [--allow-key-access | --keys FILE] [--confirm-key-action ACTION] [--storage keychain|snapshot-only] [--database-only] [--require-media] [--allow-coverage-regression] [--show-paths]"
 
@@ -809,10 +809,9 @@ func loadCandidateFile(path string) (provider.CandidateBundle, error) {
 	if err != nil {
 		return provider.CandidateBundle{}, err
 	}
-	// User-supplied candidate files are deliberately narrower than Provider
-	// responses. In particular they cannot assert catalog proof, diagnostics or
-	// structured credential provenance; the CLI revalidates these raw candidates
-	// against the current database generation before persisting per-database keys.
+	// 用户提供的候选文件有意采用比 Provider 响应更受限的结构，尤其不能声明
+	// catalog 证明、诊断信息或结构化凭据来源；CLI 会先针对当前数据库 generation
+	// 重新验证这些原始候选，再持久化各数据库密钥。
 	var candidate struct {
 		DatabaseKeys map[string]string   `json:"database_keys"`
 		ImageKeys    *provider.ImageKeys `json:"image_keys,omitempty"`

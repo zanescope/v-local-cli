@@ -191,10 +191,8 @@ func completeDiagnosticDefaults(values map[string]any) map[string]any {
 }
 
 func TestBlockingReasonAllowlistCoversProviderV1Producers(t *testing.T) {
-	// This list mirrors every blocking reason currently emitted by the Provider's
-	// ordered outcome rules and session terminal paths. Reserved CLI-only reasons
-	// may exist in addition, but a Provider producer must never be rejected as an
-	// unknown protocol enum.
+	// 此列表映射 Provider 有序结果规则和 session 终止路径当前可能生成的全部阻塞原因。
+	// 此外可以保留仅供 CLI 使用的原因，但不得把 Provider 生成的值误判为未知协议枚举。
 	providerReasons := []string{
 		"account_mismatch", "database_targets_not_found", "hook_not_triggered",
 		"database_open_required", "login_time_derivation_required", "wechat_not_running",

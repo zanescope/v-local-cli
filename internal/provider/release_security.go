@@ -8,12 +8,11 @@ import (
 	"strings"
 )
 
-// buildMode is changed to "release" by the signed build scripts. Development
-// binaries intentionally keep explicit fixtures available for protocol tests.
+// buildMode 由签名构建脚本改为 "release"。开发二进制有意保留显式 fixture，供协议测试使用。
 var buildMode = "development"
 
-// releaseSignerSHA256 is injected into Windows release binaries before signing.
-// It binds the CLI and Provider to the same Authenticode leaf certificate.
+// releaseSignerSHA256 在签名前注入 Windows release 二进制，使 CLI 与 Provider 绑定到
+// 同一张 Authenticode 叶证书。
 var releaseSignerSHA256 string
 
 var ErrComponentUntrusted = errors.New("v-local-key-provider 未通过发行版信任验证")

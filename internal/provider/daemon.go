@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	acquisitionDaemonSchemaVersion = 2
+	acquisitionDaemonSchemaVersion = 1
 	acquisitionResumeVersion       = 1
 	externalCheckpointVersion      = 1
 	acquisitionSessionLifetime     = 15 * time.Minute
@@ -81,11 +81,9 @@ type acquisitionResume struct {
 	ExpiresAt         string   `json:"expires_at"`
 }
 
-// ExternalCheckpointStatus is an authority-free handoff record for workflows that
-// cross a reboot or otherwise destroy the acquisition daemon. It deliberately does
-// not contain an action receipt, daemon token, process path, account path, or key
-// material. A later invocation must create a new session and revalidate all machine
-// evidence before it can make progress.
+// ExternalCheckpointStatus 是跨重启或会令采集 daemon 失效的工作流所使用的无权限
+// handoff 记录。它有意不包含操作回执、daemon token、进程路径、账号路径或密钥材料。
+// 后续调用必须创建新 session 并重新验证全部机器证据，之后才能继续推进。
 type ExternalCheckpointStatus struct {
 	Version                     int      `json:"version"`
 	WorkflowID                  string   `json:"workflow_id"`
@@ -729,9 +727,9 @@ func reconcileExternalCheckpoint(privateRoot, providerPath string, account local
 			diagnosticString(bundle.Diagnostics, "workflow_status") == "terminal" &&
 			diagnosticString(bundle.Diagnostics, "security_posture_status") == "sip_enabled_verified" &&
 			diagnosticString(bundle.Diagnostics, "next_action") == "none"
-		// A disable checkpoint records a requested external action, not proof that
-		// the user performed it. A later complete, ordinary Provider acquisition
-		// with verified SIP-enabled evidence proves that handoff is obsolete.
+		// disable checkpoint 只记录已请求的外部操作，不能证明用户已经执行。后续一次
+		// 完整的普通 Provider 采集若获得经验证的 SIP-enabled 证据，即可证明该 handoff
+		// 已经过期。
 		disableWasNotApplied := matchesCheckpoint && verifiedEnabledTerminal &&
 			previous.RevalidationStage == "external_change_revalidation_required" && previous.PriorRequestedAction == "disable_sip" &&
 			previous.LastSecurityPostureStatus == "sip_enabled_verified" &&
@@ -753,9 +751,8 @@ func reconcileExternalCheckpoint(privateRoot, providerPath string, account local
 	return acquisitionErr
 }
 
-// ListExternalCheckpoints discovers authority-free cross-reboot handoffs without
-// creating the acquisition directory. Invalid records fail closed instead of being
-// presented to an Agent as trustworthy workflow state.
+// ListExternalCheckpoints 在不创建采集目录的情况下查找无权限的跨重启 handoff。
+// 无效记录会按失败关闭处理，不会作为可信工作流状态呈现给 Agent。
 func ListExternalCheckpoints(privateRoot string) ([]ExternalCheckpointStatus, error) {
 	absolute, err := filepath.Abs(privateRoot)
 	if err != nil || strings.TrimSpace(privateRoot) == "" {
@@ -800,10 +797,9 @@ func ListExternalCheckpoints(privateRoot string) ([]ExternalCheckpointStatus, er
 	return result, nil
 }
 
-// ClearExternalCheckpoints removes only authority-free cross-reboot handoff
-// records. It intentionally does not touch daemon endpoints, resumable Phase 2
-// sessions, snapshots, or credentials, and is used as the explicit recovery path
-// when a malformed record cannot be decoded far enough to identify an account.
+// ClearExternalCheckpoints 只移除无权限的跨重启 handoff 记录。它有意不触碰 daemon
+// endpoint、可恢复的 Phase 2 session、snapshot 或凭据；当畸形记录无法解码到足以识别
+// 账号时，以此作为明确的恢复路径。
 func ClearExternalCheckpoints(privateRoot string) (int, error) {
 	absolute, err := filepath.Abs(privateRoot)
 	if err != nil || strings.TrimSpace(privateRoot) == "" {

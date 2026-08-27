@@ -172,10 +172,9 @@ func sameCanonicalPathText(left, right string) bool {
 	return left == right
 }
 
-// macOS exposes /etc, /tmp, and /var as immutable system aliases beneath
-// /private. EvalSymlinks expands those aliases even when the caller did not
-// traverse a user-controlled link. Normalize only these fixed prefixes so a
-// link introduced below them still changes the canonical path and is rejected.
+// macOS 把 /etc、/tmp 和 /var 暴露为 /private 下不可变的系统别名。即使调用方没有
+// 经过用户可控链接，EvalSymlinks 也会展开这些别名。这里只规范化这些固定前缀，确保
+// 在其下层引入的链接仍会改变规范路径并被拒绝。
 func normalizeDarwinSystemAlias(value string) string {
 	for _, prefix := range []string{"/private/etc", "/private/tmp", "/private/var"} {
 		if value == prefix || strings.HasPrefix(value, prefix+"/") {

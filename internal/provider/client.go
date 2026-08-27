@@ -41,9 +41,8 @@ const (
 // 调用方据此区分「组件未安装」与「组件已安装但取证失败」两种情况。
 var ErrComponentMissing = errors.New("未找到 v-local-key-provider")
 
-// ProtocolContractError reports a structurally invalid or internally
-// inconsistent Provider response. It must never be replaced with an acquisition
-// outcome inferred from a subset of the invalid payload.
+// ProtocolContractError 表示结构无效或内部不一致的 Provider 响应。不得用从无效
+// payload 子集推断出的采集结果替代它。
 type ProtocolContractError struct {
 	Cause error
 }
@@ -335,11 +334,10 @@ func reconcileNormalAcquisition(parent context.Context, privateRoot, providerPat
 	catalogKey string, disableCheckpointPending bool, bundle CandidateBundle, acquisitionErr error,
 ) (CandidateBundle, error) {
 	if disableCheckpointPending && acquisitionErr != nil {
-		// A fatal catalog/path/provider error can occur before the ordinary
-		// acquisition emits SIP diagnostics. In that one narrow case, use the
-		// secret-free posture RPC to determine whether the user-performed external
-		// change happened. A disabled result takes precedence so restoration is not
-		// stranded; enabled/unknown results leave the original error and checkpoint.
+		// 普通采集可能尚未生成 SIP 诊断，就先发生致命的 catalog、路径或 Provider
+		// 错误。仅在这一特定场景下，使用不接触秘密的 posture RPC 判断用户是否执行了
+		// 外部变更。disabled 结果优先，以免恢复流程搁置；enabled 或 unknown 结果则保留
+		// 原始错误和 checkpoint。
 		postureBundle, postureErr := revalidateSecurityPostureOneShot(parent, providerPath, account, scopes, catalogKey)
 		var postureFailure *AcquisitionError
 		if errors.As(postureErr, &postureFailure) && postureFailure.NextAction == "reenable_sip" &&
@@ -533,8 +531,8 @@ func revalidateSecurityPostureOneShot(parent context.Context, path string, accou
 	return bundle, nil
 }
 
-// IsSecurityPostureRevalidation reports the successful, secret-free result used
-// by setup to close an external restoration workflow without reacquiring keys.
+// IsSecurityPostureRevalidation 判断结果是否为成功且不接触秘密的重新验证结果，
+// setup 用它在不重新采集密钥的情况下结束外部恢复流程。
 func IsSecurityPostureRevalidation(bundle CandidateBundle) bool {
 	scopes, err := diagnosticStringList(bundle.Diagnostics, "requested_scopes")
 	if err != nil || validateSecurityPostureRevalidation(bundle, scopes) != nil {
@@ -1310,10 +1308,9 @@ func validateProviderAccountBinding(credential *DatabaseCredential, account loca
 	if credential == nil {
 		return nil
 	}
-	// StorageAccountID belongs to the CLI's local keyring envelope. It is
-	// populated only after generation verification and is not part of the
-	// Provider v1 credential schema, so accepting it from the wire would blur
-	// the trust boundary between Provider evidence and local persistence.
+	// StorageAccountID 属于 CLI 的本地 keyring envelope，只会在 generation 验证后
+	// 填充，并非 Provider v1 凭据 schema 的一部分；若从传输内容接受它，会模糊
+	// Provider 证据与本地持久化之间的信任边界。
 	if credential.StorageAccountID != "" {
 		return errors.New("Provider credential 携带了非协议的本地存储账号绑定")
 	}
@@ -1590,9 +1587,8 @@ func acquisitionError(values map[string]any) *AcquisitionError {
 	case "deadline_exhausted":
 		result.Reason = "deadline_exhausted"
 	}
-	// An observed SIP state is not itself authorization or proof that the
-	// protocol's standard and Shadow routes have both failed. Only the explicit
-	// structured next_action may ask for the cross-reboot SIP workflow.
+	// 观察到的 SIP 状态本身既不是授权，也不能证明协议中的 standard 和 Shadow route
+	// 均已失败。只有明确的结构化 next_action 才能请求跨重启的 SIP 工作流。
 	if result.ProcessAccessError == "sip_enabled" && result.NextAction == "disable_sip" {
 		result.Reason = "sip_required"
 	} else if result.ProcessAccessError == "hook_restart_required" {
