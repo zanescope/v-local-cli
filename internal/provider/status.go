@@ -165,7 +165,24 @@ func sameCanonicalPathText(left, right string) bool {
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(left, right)
 	}
+	if runtime.GOOS == "darwin" {
+		left = normalizeDarwinSystemAlias(left)
+		right = normalizeDarwinSystemAlias(right)
+	}
 	return left == right
+}
+
+// macOS exposes /etc, /tmp, and /var as immutable system aliases beneath
+// /private. EvalSymlinks expands those aliases even when the caller did not
+// traverse a user-controlled link. Normalize only these fixed prefixes so a
+// link introduced below them still changes the canonical path and is rejected.
+func normalizeDarwinSystemAlias(value string) string {
+	for _, prefix := range []string{"/private/etc", "/private/tmp", "/private/var"} {
+		if value == prefix || strings.HasPrefix(value, prefix+"/") {
+			return strings.TrimPrefix(value, "/private")
+		}
+	}
+	return value
 }
 
 func platformName() string {

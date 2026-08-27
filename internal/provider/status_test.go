@@ -61,6 +61,20 @@ func TestCanonicalExecutableRejectsLinkedAncestor(t *testing.T) {
 	}
 }
 
+func TestNormalizeDarwinSystemAliasKeepsUserControlledSuffixVisible(t *testing.T) {
+	for input, want := range map[string]string{
+		"/private/var/folders/test/provider": "/var/folders/test/provider",
+		"/private/tmp/provider":              "/tmp/provider",
+		"/private/etc/hosts":                 "/etc/hosts",
+		"/private/variable/provider":         "/private/variable/provider",
+		"/var/folders/test/provider":         "/var/folders/test/provider",
+	} {
+		if got := normalizeDarwinSystemAlias(input); got != want {
+			t.Fatalf("normalizeDarwinSystemAlias(%q)=%q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestFixedProviderInstallPathIsArchitectureScoped(t *testing.T) {
 	windows := fixedProviderInstallPathFor("windows", "arm64", filepath.Join("C:", "Users", "test", "AppData", "Local"))
 	if filepath.Base(windows) != "v-local-key-provider.exe" || filepath.Base(filepath.Dir(windows)) != "windows-arm64" {

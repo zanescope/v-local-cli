@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 
 	"golang.org/x/text/unicode/norm"
@@ -37,5 +39,18 @@ func sourceOpenFileIdentity(file *os.File) (string, error) {
 }
 
 func platformPathKey(path string) string {
-	return norm.NFC.String(filepath.ToSlash(filepath.Clean(path)))
+	value := filepath.ToSlash(filepath.Clean(path))
+	if runtime.GOOS == "darwin" {
+		value = normalizeDarwinSnapshotSystemAlias(value)
+	}
+	return norm.NFC.String(value)
+}
+
+func normalizeDarwinSnapshotSystemAlias(value string) string {
+	for _, prefix := range []string{"/private/etc", "/private/tmp", "/private/var"} {
+		if value == prefix || strings.HasPrefix(value, prefix+"/") {
+			return strings.TrimPrefix(value, "/private")
+		}
+	}
+	return value
 }
