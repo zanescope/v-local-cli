@@ -171,6 +171,11 @@ func validOpaqueID(value string, bytes int) bool {
 	return err == nil && len(decoded) == bytes
 }
 
+// errExternalCheckpointExpired 与结构损坏区分开：过期是 7 天生命周期的正常终点，
+// 过期记录只是失去权限、不再代表待办工作流，调用方可以把它当作不存在；损坏记录则
+// 必须按失败关闭处理，绝不能作为可信工作流状态呈现给 Agent。
+var errExternalCheckpointExpired = errors.New("跨重启 acquisition checkpoint 已过期")
+
 func validateExternalCheckpoint(value ExternalCheckpointStatus, now time.Time) error {
 	createdAt, createdErr := time.Parse(time.RFC3339Nano, value.CreatedAt)
 	expiresAt, expiresErr := time.Parse(time.RFC3339Nano, value.ExpiresAt)
@@ -179,9 +184,9 @@ func validateExternalCheckpoint(value ExternalCheckpointStatus, now time.Time) e
 		!validOpaqueID(value.ProviderID, 8) || !validOpaqueID(value.AccountID, 8) || scopeErr != nil ||
 		strings.Join(value.Scopes, "\x00") != strings.Join(canonical, "\x00") ||
 		externalActionStage(value.PriorRequestedAction) == "" || value.RevalidationStage != externalActionStage(value.PriorRequestedAction) ||
-		createdErr != nil || expiresErr != nil || expiresAt.Before(createdAt) || !now.Before(expiresAt) ||
+		createdErr != nil || expiresErr != nil || expiresAt.Before(createdAt) ||
 		expiresAt.Sub(createdAt) > externalCheckpointLifetime+time.Minute || !value.MachineRevalidationRequired {
-		return errors.New("跨重启 acquisition checkpoint 无效或已过期")
+		return errors.New("跨重启 acquisition checkpoint 无效")
 	}
 	if value.PriorCatalogID != "" && (!validSecretHex(value.PriorCatalogID) || len(value.PriorCatalogID) != 64) {
 		return errors.New("跨重启 acquisition checkpoint 的 catalog 标识无效")
@@ -196,6 +201,11 @@ func validateExternalCheckpoint(value ExternalCheckpointStatus, now time.Time) e
 	}
 	if value.PriorRequestedAction == "disable_sip" && value.LastSecurityPostureStatus != "sip_enabled_verified" {
 		return errors.New("SIP 变更 checkpoint 没有绑定已验证的启用状态")
+	}
+	// 过期判定放在全部结构检查之后：既损坏又过期的记录必须报告为损坏，不能因为
+	// 先命中过期而被当成可跳过的正常记录。
+	if !now.Before(expiresAt) {
+		return errExternalCheckpointExpired
 	}
 	return nil
 }
@@ -554,6 +564,12 @@ func saveAcquisitionJSON(path, temporaryPattern string, value any) error {
 	return nil
 }
 
+// absentExternalCheckpoint 判断这次加载是否等价于「没有待办的跨重启工作流」：
+// 文件不存在，或记录已过期因而不再代表任何待办操作。
+func absentExternalCheckpoint(err error) bool {
+	return os.IsNotExist(err) || errors.Is(err, errExternalCheckpointExpired)
+}
+
 func loadExternalCheckpoint(path string) (ExternalCheckpointStatus, error) {
 	load := func(candidate string) (ExternalCheckpointStatus, error) {
 		var value ExternalCheckpointStatus
@@ -581,7 +597,7 @@ func pendingSecurityRestorationCheckpoint(privateRoot, providerPath string, acco
 		return ExternalCheckpointStatus{}, false, err
 	}
 	checkpoint, err := loadExternalCheckpoint(path)
-	if os.IsNotExist(err) {
+	if absentExternalCheckpoint(err) {
 		return ExternalCheckpointStatus{}, false, nil
 	}
 	if err != nil {
@@ -602,7 +618,7 @@ func pendingExternalChangeCheckpoint(privateRoot, providerPath string, account l
 		return ExternalCheckpointStatus{}, false, err
 	}
 	checkpoint, err := loadExternalCheckpoint(path)
-	if os.IsNotExist(err) {
+	if absentExternalCheckpoint(err) {
 		return ExternalCheckpointStatus{}, false, nil
 	}
 	if err != nil {
@@ -710,7 +726,7 @@ func reconcileExternalCheckpoint(privateRoot, providerPath string, account local
 	}
 	if acquisitionErr == nil {
 		previous, loadErr := loadExternalCheckpoint(path)
-		if os.IsNotExist(loadErr) {
+		if absentExternalCheckpoint(loadErr) {
 			return nil
 		}
 		if loadErr != nil {
@@ -786,6 +802,11 @@ func ListExternalCheckpoints(privateRoot string) ([]ExternalCheckpointStatus, er
 	result := make([]ExternalCheckpointStatus, 0, len(paths))
 	for _, path := range paths {
 		value, loadErr := loadExternalCheckpoint(path)
+		// 过期记录已经不代表待办工作流，跳过它，让其余账号的有效 handoff 仍能列出；
+		// 畸形记录仍然整体失败关闭，不冒充可信工作流状态。
+		if errors.Is(loadErr, errExternalCheckpointExpired) {
+			continue
+		}
 		if loadErr != nil {
 			return nil, loadErr
 		}

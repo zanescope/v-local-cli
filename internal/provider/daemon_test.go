@@ -795,8 +795,14 @@ func TestExternalCheckpointRejectsExpiredOrAuthorityBearingState(t *testing.T) {
 	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ListExternalCheckpoints(root); err == nil {
-		t.Fatal("expired cross-reboot checkpoint was trusted")
+	// 过期是 7 天生命周期的正常终点：记录必须从结果中消失，但不能让整次列举失败，
+	// 否则一个账号的过期记录会挡住其余账号仍然有效的 handoff。
+	values, err := ListExternalCheckpoints(root)
+	if err != nil {
+		t.Fatalf("过期的跨重启 checkpoint 让整次列举失败：%v", err)
+	}
+	if len(values) != 0 {
+		t.Fatalf("expired cross-reboot checkpoint was trusted: %+v", values)
 	}
 	expired.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	expired.ExpiresAt = time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
@@ -808,6 +814,44 @@ func TestExternalCheckpointRejectsExpiredOrAuthorityBearingState(t *testing.T) {
 	}
 	if _, err := ListExternalCheckpoints(root); err == nil {
 		t.Fatal("authority-bearing cross-reboot checkpoint was trusted")
+	}
+}
+
+func TestListExternalCheckpointsSkipsExpiredWithoutHidingValidHandoffs(t *testing.T) {
+	root := privateProviderTestRoot(t)
+	base := ExternalCheckpointStatus{
+		Version: externalCheckpointVersion, WorkflowID: strings.Repeat("a", 32), ProviderID: strings.Repeat("b", 16),
+		AccountID: strings.Repeat("c", 16), Scopes: []string{"database"},
+		RevalidationStage: "external_change_revalidation_required", PriorRequestedAction: "disable_sip",
+		LastSecurityPostureStatus: "sip_enabled_verified", MachineRevalidationRequired: true,
+	}
+	write := func(name string, value ExternalCheckpointStatus) {
+		t.Helper()
+		payload, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if err := os.WriteFile(filepath.Join(root, name), payload, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	expired := base
+	expired.CreatedAt = time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339Nano)
+	expired.ExpiresAt = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339Nano)
+	write("external-"+strings.Repeat("a", 16)+".checkpoint.json", expired)
+
+	pending := base
+	pending.WorkflowID = strings.Repeat("d", 32)
+	pending.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	pending.ExpiresAt = time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+	write("external-"+strings.Repeat("b", 16)+".checkpoint.json", pending)
+
+	values, err := ListExternalCheckpoints(root)
+	if err != nil {
+		t.Fatalf("另一个账号的过期记录挡住了整次列举：%v", err)
+	}
+	if len(values) != 1 || values[0].WorkflowID != pending.WorkflowID {
+		t.Fatalf("仍然有效的跨重启 handoff 没有被列出：%+v", values)
 	}
 }
 

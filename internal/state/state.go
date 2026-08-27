@@ -332,8 +332,14 @@ func decodeState(path, accountID string) (AccountState, error) {
 	if err := decoder.Decode(&value); err != nil {
 		return AccountState{}, fmt.Errorf("状态文件无效：%w", err)
 	}
-	if value.Version != stateVersion || value.AccountID != accountID {
-		return AccountState{}, errors.New("状态文件版本或账号标识不匹配")
+	// 版本不符与账号不符是两种完全不同的处置：前者是本机存在旧版本状态、需要重新
+	// setup 重建，后者说明状态文件与目标账号目录对不上。合并成一句会让诊断时无法
+	// 区分，而 List 对加载失败的条目是静默跳过的，除此之外没有别的信号。
+	if value.Version != stateVersion {
+		return AccountState{}, fmt.Errorf("账号状态文件版本为 %d，当前要求 %d；重新运行 v-local-cli setup 重建账号状态", value.Version, stateVersion)
+	}
+	if value.AccountID != accountID {
+		return AccountState{}, errors.New("账号状态文件的账号标识与所在目录不一致")
 	}
 	accountDirectory, err := AccountDir(accountID)
 	if err != nil {
