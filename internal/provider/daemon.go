@@ -106,6 +106,9 @@ func opaquePathID(value string) string {
 	if absolute, err := filepath.Abs(normalized); err == nil {
 		normalized = absolute
 	}
+	if runtime.GOOS == "darwin" {
+		normalized = normalizeDarwinSystemAlias(filepath.ToSlash(normalized))
+	}
 	sum := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(normalized))))
 	return hex.EncodeToString(sum[:8])
 }

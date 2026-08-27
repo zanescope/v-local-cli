@@ -85,7 +85,17 @@ $response = [ordered]@{
 		return providerPath
 	}
 	providerPath := filepath.Join(directory, "mock-provider")
-	const script = "#!/bin/sh\n" +
+	// macOS deliberately clears the caller's ambient environment before
+	// crossing the Provider process boundary. Embed the fixture's synthetic,
+	// non-secret evidence in the script so this test exercises that production
+	// isolation instead of depending on V_LOCAL_TEST_* being inherited.
+	script := "#!/bin/sh\n" +
+		"V_LOCAL_TEST_FILE_ID='" + identity + "'\n" +
+		"V_LOCAL_TEST_FILE_SIZE='" + strconv.FormatInt(info.Size(), 10) + "'\n" +
+		"V_LOCAL_TEST_FILE_MTIME='" + strconv.FormatInt(info.ModTime().UnixNano(), 10) + "'\n" +
+		"V_LOCAL_TEST_FIRST_PAGE='" + fmt.Sprintf("%x", digest[:]) + "'\n" +
+		"V_LOCAL_TEST_AES='" + aesKey + "'\n" +
+		"V_LOCAL_TEST_XOR='" + strconv.Itoa(xorKey) + "'\n" +
 		"request_id=$(sed -n 's/.*\"request_id\":\"\\([0-9a-f]*\\)\".*/\\1/p')\n" +
 		"printf '{\"protocol\":\"v-local-key-provider/v1\",\"request_id\":\"%s\",\"catalog_id\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"catalog_entries\":[{\"database_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"relative_path\":\"contact/contact.db\",\"canonical_file_id\":\"%s\",\"size\":%s,\"mtime_ns\":%s,\"first_page_sha256\":\"%s\",\"classification\":\"plaintext\",\"required_for_key_coverage\":false}],\"database_keys\":{},\"image_keys\":{\"aes\":\"%s\",\"xor\":%s},\"diagnostics\":{\"result_code\":\"complete\",\"workflow_status\":\"terminal\",\"requested_scopes\":[\"database\",\"media\"],\"database_target_status\":\"present\",\"database_coverage_status\":\"complete\",\"media_coverage_status\":\"complete\",\"security_posture_status\":\"not_applicable\",\"shadow_route_status\":\"not_applicable\",\"route_priority\":[],\"routes_attempted\":[],\"next_action\":\"none\",\"target_binding_status\":\"unknown\",\"session_account_status\":\"unknown\",\"candidate_mode\":\"none\",\"candidate_sources\":[],\"blocking_reasons\":[],\"platform\":\"windows\",\"binary_fingerprint_status\":\"unavailable\",\"binary_signing_status\":\"unavailable\",\"process_architecture\":\"unknown\",\"process_architecture_status\":\"unavailable\",\"process_translation_status\":\"not_applicable\",\"compatibility_registry_status\":\"not_evaluated\",\"config_cipher_route_status\":\"not_evaluated\",\"windows_route_evidence\":[],\"process_count\":0,\"selected_process_count\":0,\"target_bound_process_count\":0,\"other_account_process_count\":0,\"unknown_account_process_count\":0,\"opened_process_count\":0,\"access_denied_count\":0,\"per_process_collector_count\":0,\"config_cipher_structure_count\":0,\"config_cipher_invalid_structure_count\":0,\"config_cipher_candidate_count\":0,\"config_cipher_verified_candidate_count\":0,\"static_scan_fallback\":false,\"fallback_candidate_count\":0,\"fallback_stage_counts\":{}}}\\n' \"$request_id\" \"$V_LOCAL_TEST_FILE_ID\" \"$V_LOCAL_TEST_FILE_SIZE\" \"$V_LOCAL_TEST_FILE_MTIME\" \"$V_LOCAL_TEST_FIRST_PAGE\" \"$V_LOCAL_TEST_AES\" \"$V_LOCAL_TEST_XOR\"\n"
 	if err := os.WriteFile(providerPath, []byte(script), 0o700); err != nil {

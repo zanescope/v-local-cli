@@ -10,12 +10,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	localplatform "github.com/zanescope/v-local-cli/internal/platform"
 )
+
+func TestOpaquePathIDDarwinSystemAliasIsStable(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS system aliases are Darwin-specific")
+	}
+	if opaquePathID("/var/folders/example/provider") != opaquePathID("/private/var/folders/example/provider") {
+		t.Fatal("macOS system alias changed the anonymous checkpoint identity")
+	}
+}
 
 func decodeDaemonTestRequest(connection net.Conn, request *acquisitionDaemonRequest) error {
 	payload, err := bufio.NewReader(connection).ReadBytes('\n')
