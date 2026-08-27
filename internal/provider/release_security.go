@@ -15,6 +15,11 @@ var buildMode = "development"
 // 同一张 Authenticode 叶证书。
 var releaseSignerSHA256 string
 
+// releaseTeamID 在签名前注入 macOS 发布二进制，把 CLI 与 Provider 同时绑定到发行方
+// 的 Developer ID Team。只比较两者 Team ID 相等是不够的：任何持有 Developer ID 证书
+// 的人都能签出一对自洽的二进制。这与 Windows 侧固定叶证书 SHA-256 是同一强度。
+var releaseTeamID string
+
 var ErrComponentUntrusted = errors.New("v-local-key-provider 未通过发行版信任验证")
 
 func releaseBuild() bool {

@@ -60,8 +60,9 @@ func TestPhase5CLIReleaseKeepsAllArchitectureSigningAndPublishingGates(t *testin
 		"timestamp_signer_thumbprint", "signature-manifest.json",
 	)
 	requireCLIReleaseFragments(t, "scripts/build-macos-release.sh",
-		"internal/provider.buildMode=release", "--identifier com.zanescope.v-local-cli",
-		"--options runtime", "--timestamp", "codesign --verify --strict",
+		"internal/provider.buildMode=release", "internal/provider.releaseTeamID=",
+		"V_LOCAL_CLI_RELEASE_TEAM_ID", "--identifier com.zanescope.v-local-cli",
+		"--options runtime", "--timestamp", "codesign --verify --strict", "TeamIdentifier=",
 	)
 	requireCLIReleaseFragments(t, "internal/provider/runtime_trust_windows.go",
 		"WTD_REVOKE_NONE", "WTD_REVOCATION_CHECK_NONE", "WTD_CACHE_ONLY_URL_RETRIEVAL",
@@ -77,7 +78,10 @@ func TestPhase5CLIReleaseKeepsAllArchitectureSigningAndPublishingGates(t *testin
 	requireCLIReleaseFragments(t, "internal/provider/runtime_trust_darwin.go",
 		"com.zanescope.v-local-cli", "com.zanescope.v-local-key-provider",
 		"com.zanescope.v-local-key-provider.helper", "anchor apple generic",
-		"CLI and Provider Team IDs do not match", "daemon PID is not running the advertised helper image",
+		"releaseTeamID", "expectedDarwinTeamID",
+		"CLI is not signed by the release Developer ID team",
+		"Provider is not signed by the release Developer ID team",
+		"daemon PID is not running the advertised helper image",
 	)
 	requireCLIReleaseFragments(t, "internal/provider/status.go",
 		"override_rejected", "fixedProviderInstallPath", "canonicalExecutable",

@@ -37,7 +37,7 @@ bootstrap 后，正式流水线只提交 staged publish，不接受长期 npm to
 1. 在 `main` 上确认 `Audit gates` 全绿并手动运行 `Release candidate`。
 2. 下载候选件，按 `references/macos-acceptance.md` 和支持平台清单完成真机验收；保存脱敏的机器/微信/CLI 版本、候选件 SHA-256、generation 功能和签名检查结果，不保存账号、路径、正文或密钥。`Release candidate` 明确使用 `buildMode=candidate`，不是签名发行证据。
 3. 从已验收提交创建并推送与包版本一致的标签，例如 `v0.1.0-dev.1`。
-4. `Signed release` 会重新构建并启用发行门禁。Windows 把 Authenticode 叶证书 SHA-256 注入 CLI 后再签名/时间戳并复核；macOS 使用固定 identifier、Developer ID 和 Hardened Runtime，将二进制装入签名 DMG 后 notarize，拒绝日志 warning/error，并执行 staple/validate 与 Gatekeeper。每架构同时发布 `signature-manifest-*.json`，macOS 发布 notary log/DMG，全集生成 `release-checksums.txt` 和来源证明，然后只创建 GitHub prerelease。
+4. `Signed release` 会重新构建并启用发行门禁。Windows 把 Authenticode 叶证书 SHA-256 注入 CLI 后再签名/时间戳并复核；macOS 把 `APPLE_NOTARY_TEAM_ID` 作为发行 Developer ID Team 注入 CLI 后再签名，并复核签名后的实际 `TeamIdentifier` 与注入值一致（因此该 secret 不只用于 notarization，还是运行时信任的绑定来源，更换 Team 会使已安装的旧 CLI 拒绝新 Provider），使用固定 identifier、Developer ID 和 Hardened Runtime，将二进制装入签名 DMG 后 notarize，拒绝日志 warning/error，并执行 staple/validate 与 Gatekeeper。每架构同时发布 `signature-manifest-*.json`，macOS 发布 notary log/DMG，全集生成 `release-checksums.txt` 和来源证明，然后只创建 GitHub prerelease。
 5. 下载这个确切 prerelease，从最终 tgz 在干净机器安装 CLI 和独立 Provider。确认 Provider 固定路径、签名身份、helper sibling、daemon PID image、发行版 override 拒绝、协议版本不匹配失败、Keychain/Credential Manager、WER/core-dump 和卸载清理，再按支持平台复验真实数据路径和能力边界。把 tgz、DMG、manifest、notary log 和二进制摘要写入签名 live evidence。只有这份证据通过后才人工提升 GitHub Release；后续 npm staged publish 也只能在核对同一 tgz 摘要后用 2FA 批准。
 
 任何签名身份、公证/staple、版本、摘要、运行时信任、干净机器、真机验收或 Trusted Publishing 条件未满足时，不得发布 `latest`。签名与 CI 通过本身不改变 `build_only/unverified` 能力状态。

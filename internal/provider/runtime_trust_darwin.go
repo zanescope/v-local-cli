@@ -178,15 +178,38 @@ func validateProviderExecutableTrust(path string) (string, error) {
 	if err != nil {
 		return "untrusted", err
 	}
-	cliIdentity, err := darwinIdentity(cli, darwinCLIIdentifier)
+	expectedTeam, err := expectedDarwinTeamID()
 	if err != nil {
 		return "untrusted", err
 	}
+	cliIdentity, err := darwinIdentity(cli, darwinCLIIdentifier)
+	if err != nil || !sameDarwinTeamID(cliIdentity.teamID, expectedTeam) {
+		return "untrusted", errors.New("CLI is not signed by the release Developer ID team")
+	}
 	providerIdentity, err := darwinIdentity(provider, darwinProviderIdentifier)
-	if err != nil || providerIdentity.teamID != cliIdentity.teamID {
-		return "untrusted", errors.New("CLI and Provider Team IDs do not match")
+	if err != nil || !sameDarwinTeamID(providerIdentity.teamID, expectedTeam) {
+		return "untrusted", errors.New("Provider is not signed by the release Developer ID team")
 	}
 	return "developer_id_verified", nil
+}
+
+// expectedDarwinTeamID 返回编译期绑定的 Developer ID Team。Apple 的 Team ID 是 10 位
+// 大写字母数字；没有注入或格式不对时一律失败关闭，不退回「两边相等即可」。
+func expectedDarwinTeamID() (string, error) {
+	value := strings.ToUpper(strings.TrimSpace(releaseTeamID))
+	if len(value) != 10 {
+		return "", errors.New("release Developer ID team identity is not embedded")
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'A' || character > 'Z') {
+			return "", errors.New("release Developer ID team identity is not embedded")
+		}
+	}
+	return value, nil
+}
+
+func sameDarwinTeamID(actual, expected string) bool {
+	return expected != "" && strings.EqualFold(strings.TrimSpace(actual), expected)
 }
 
 func validateProviderHelperTrust(providerPath, helperPath string) (string, error) {
@@ -201,13 +224,17 @@ func validateProviderHelperTrust(providerPath, helperPath string) (string, error
 	if err != nil || !sameFilePath(filepath.Dir(provider), filepath.Dir(helper)) {
 		return "untrusted", errors.New("helper is not a fixed Provider sibling")
 	}
-	providerIdentity, err := darwinIdentity(provider, darwinProviderIdentifier)
+	expectedTeam, err := expectedDarwinTeamID()
 	if err != nil {
 		return "untrusted", err
 	}
+	providerIdentity, err := darwinIdentity(provider, darwinProviderIdentifier)
+	if err != nil || !sameDarwinTeamID(providerIdentity.teamID, expectedTeam) {
+		return "untrusted", errors.New("Provider is not signed by the release Developer ID team")
+	}
 	helperIdentity, err := darwinIdentity(helper, darwinHelperIdentifier)
-	if err != nil || helperIdentity.teamID != providerIdentity.teamID {
-		return "untrusted", errors.New("Provider and helper Team IDs do not match")
+	if err != nil || !sameDarwinTeamID(helperIdentity.teamID, expectedTeam) {
+		return "untrusted", errors.New("helper is not signed by the release Developer ID team")
 	}
 	return "developer_id_verified", nil
 }

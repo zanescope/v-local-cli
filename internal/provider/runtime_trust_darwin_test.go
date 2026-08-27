@@ -56,3 +56,33 @@ func TestDarwinProcessImagePathRejectsInvalidPID(t *testing.T) {
 		}
 	}
 }
+
+// 只校验 CLI 与 Provider 的 Team ID 相等是不够的：任何持有 Developer ID 证书的人都能
+// 签出一对自洽的二进制。发行身份必须在编译期绑定，未注入时失败关闭。
+func TestExpectedDarwinTeamIDRequiresEmbeddedReleaseIdentity(t *testing.T) {
+	previous := releaseTeamID
+	t.Cleanup(func() { releaseTeamID = previous })
+
+	releaseTeamID = "ABCDE12345"
+	value, err := expectedDarwinTeamID()
+	if err != nil || value != "ABCDE12345" {
+		t.Fatalf("合法 Team ID 未被接受：value=%q err=%v", value, err)
+	}
+	releaseTeamID = " abcde12345 "
+	if value, err = expectedDarwinTeamID(); err != nil || value != "ABCDE12345" {
+		t.Fatalf("Team ID 未按大写归一化：value=%q err=%v", value, err)
+	}
+	for _, invalid := range []string{"", "   ", "ABCDE1234", "ABCDE123456", "ABCDE-1234", "ABCDE 1234"} {
+		releaseTeamID = invalid
+		if _, err := expectedDarwinTeamID(); err == nil {
+			t.Fatalf("未注入或格式错误的 Team ID %q 被接受", invalid)
+		}
+	}
+	releaseTeamID = "ABCDE12345"
+	if sameDarwinTeamID("", "ABCDE12345") || sameDarwinTeamID("ABCDE12345", "") {
+		t.Fatal("空 Team ID 被判为匹配")
+	}
+	if !sameDarwinTeamID("abcde12345", "ABCDE12345") {
+		t.Fatal("大小写不同的同一 Team ID 被判为不匹配")
+	}
+}

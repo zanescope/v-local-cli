@@ -159,6 +159,8 @@ jobs:
           echo "V_LOCAL_CLI_CODESIGN_IDENTITY=${CODESIGN_IDENTITY}" >> "${GITHUB_ENV}"
       - name: 构建并签名 macOS 发布件
         shell: bash
+        env:
+          V_LOCAL_CLI_RELEASE_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
         run: |
           bash scripts/build-macos-release.sh '${{ matrix.arch }}'
           mkdir -p dist
