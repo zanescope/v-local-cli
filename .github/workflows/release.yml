@@ -24,17 +24,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: 配置 Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
       - name: 配置 Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
-      - name: 验证标签、版本与测试
+      - name: 验证标签与版本
         id: version
         shell: bash
         run: |
@@ -45,14 +40,19 @@ jobs:
           else
             echo "npm-tag=latest" >> "${GITHUB_OUTPUT}"
           fi
-          go mod verify
-          go test ./...
-          go vet ./...
-          npm --prefix npm test
+
+  # 测试与静态检查由 Audit gates 统一提供，签名作业以它为前置条件。此前打标签时只在
+  # ubuntu 跑一遍 go test/vet，Authenticode、WER、reparse point 和 darwin 信任等平台
+  # 专属代码从未在发布路径上验证过；Audit gates 虽然也会在 push 时触发，但那是与发布
+  # 并行运行，失败并不能阻止发布。
+  audit:
+    name: Audit gates
+    needs: validate
+    uses: ./.github/workflows/audit-gates.yml
 
   windows:
     name: Sign Windows ${{ matrix.arch }}
-    needs: validate
+    needs: [validate, audit]
     runs-on: windows-latest
     timeout-minutes: 25
     environment: release
@@ -99,10 +99,21 @@ jobs:
             & 'dist/v-local-cli-windows-amd64.exe' --output yaml schema sessions | Out-Null
             if ($LASTEXITCODE -ne 0) { throw '签名 Windows 二进制 YAML 烟测失败' }
           }
-      - name: 移除临时证书
-        if: always() && steps.certificate.outputs.thumbprint != ''
+      - name: 移除临时证书与 PFX 私钥文件
+        # 无条件运行：导入失败时 PFX 已经落盘而 thumbprint 为空，按 thumbprint 设条件
+        # 会正好跳过最需要清理的那种情况。托管 runner 随作业销毁，自托管则会把签名
+        # 私钥留在磁盘上。
+        if: always()
         shell: pwsh
-        run: Remove-Item -LiteralPath 'Cert:\CurrentUser\My\${{ steps.certificate.outputs.thumbprint }}' -Force
+        run: |
+          $thumbprint = '${{ steps.certificate.outputs.thumbprint }}'
+          if ($thumbprint -and (Test-Path -LiteralPath "Cert:\CurrentUser\My\$thumbprint")) {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -Force
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'windows-signing.pfx'
+          if (Test-Path -LiteralPath $pfx) {
+            Remove-Item -LiteralPath $pfx -Force
+          }
       - name: 保存签名资产
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -113,7 +124,7 @@ jobs:
 
   macos:
     name: Sign and notarize ${{ matrix.name }}
-    needs: validate
+    needs: [validate, audit]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     environment: release
@@ -155,7 +166,9 @@ jobs:
           security unlock-keychain -p "${keychain_password}" "${keychain_path}"
           security import "${certificate_path}" -P "${CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${keychain_path}"
           security set-key-partition-list -S apple-tool:,apple: -k "${keychain_password}" "${keychain_path}"
-          security list-keychains -d user -s "${keychain_path}"
+          # 追加而不是替换搜索列表：-s 会用给定值覆盖整个列表，删除临时钥匙串后就只剩
+          # 一个空列表，自托管 runner 上的后续签名会失败。
+          security list-keychains -d user -s "${keychain_path}" $(security list-keychains -d user | tr -d '"')
           echo "V_LOCAL_CLI_CODESIGN_IDENTITY=${CODESIGN_IDENTITY}" >> "${GITHUB_ENV}"
       - name: 构建并签名 macOS 发布件
         shell: bash
@@ -226,6 +239,17 @@ jobs:
           plutil -insert notarization_status -string "${submission_status}" "${manifest}"
           plutil -insert stapled -bool true "${manifest}"
           plutil -insert dmg_sha256 -string "$(shasum -a 256 "${dmg}" | awk '{print $1}')" "${manifest}"
+      - name: 移除临时签名钥匙串与 p12
+        # 与 Windows 侧同理：Developer ID 私钥不能在作业结束后留在磁盘上。
+        # delete-keychain 同时把它从搜索列表中移除，前一步追加式设置保证原有条目仍在。
+        if: always()
+        shell: bash
+        run: |
+          keychain_path="${RUNNER_TEMP}/release-signing.keychain-db"
+          if [ -f "${keychain_path}" ]; then
+            security delete-keychain "${keychain_path}" || true
+          fi
+          rm -f "${RUNNER_TEMP}/developer-id.p12"
       - name: 保存签名资产
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -236,7 +260,7 @@ jobs:
 
   linux:
     name: Build Linux ${{ matrix.arch }}
-    needs: validate
+    needs: [validate, audit]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:

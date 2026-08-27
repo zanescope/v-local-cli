@@ -2,8 +2,14 @@ name: Audit gates
 
 on:
   push:
+    # 标签推送不在这里独立触发：那样这些门禁只会与 Signed release 并行运行，无法
+    # 阻止一次测试未通过的发布。发布流程改为通过 workflow_call 调用它们，使其成为
+    # 真正的前置条件。
+    tags-ignore:
+      - 'v*'
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

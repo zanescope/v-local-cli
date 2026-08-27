@@ -27,6 +27,13 @@ func TestPhase5CLIReleaseKeepsAllArchitectureSigningAndPublishingGates(t *testin
 	release := requireCLIReleaseFragments(t, ".github/workflows/release.yml",
 		"persist-credentials: false",
 		"arch: [amd64, arm64]",
+		// 签名与发布必须以 Audit gates 为前置条件：只在 push 时并行触发它，失败也
+		// 拦不住发布。
+		"uses: ./.github/workflows/audit-gates.yml",
+		"needs: [validate, audit]",
+		// 签名私钥不得在作业结束后留在磁盘上。
+		"windows-signing.pfx",
+		"security delete-keychain",
 		"notarytool submit",
 		"submission_status",
 		"notarytool log",
