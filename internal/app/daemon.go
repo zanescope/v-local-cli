@@ -351,7 +351,7 @@ func serveDaemonConnection(connection net.Conn, info daemonInfo, cache *daemonCa
 }
 
 func serveDaemon() error {
-	lock, err := state.AcquireAccountLock(state.AccountID("daemon-control"))
+	lock, err := state.AcquireAccountLock(state.DaemonControlLockID())
 	if errors.Is(err, state.ErrAccountBusy) {
 		return errors.New("查询 daemon 已经运行或正在启动")
 	}

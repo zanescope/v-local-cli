@@ -73,6 +73,15 @@ func AccountID(accountPath string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// DaemonControlLockID 是查询 daemon 单实例锁的固定标识。它不能经过 AccountID：后者
+// 会先做 filepath.Abs，把伪路径喂进去会让锁标识随当前工作目录变化，于是从不同目录
+// 启动的两个 daemon 各自拿到一把锁，单实例保护退化为只靠 endpoint 文件与 ping，留下
+// 两个 daemon 同时监听、后者覆盖 endpoint 而前者变成占用端口的孤儿进程的窗口。
+func DaemonControlLockID() string {
+	sum := sha256.Sum256([]byte("v-local-cli/daemon-control/v1"))
+	return hex.EncodeToString(sum[:8])
+}
+
 func AccountDir(accountID string) (string, error) {
 	if !validAccountID(accountID) {
 		return "", errors.New("账号标识无效")
@@ -376,18 +385,28 @@ func Load(accountID string) (AccountState, error) {
 }
 
 func List() ([]AccountState, error) {
+	values, _, err := ListWithUnreadable()
+	return values, err
+}
+
+// ListWithUnreadable 额外返回无法读取的账号标识。List 会静默跳过它们，但状态文件因
+// 版本不符或损坏读不出来时，账号目录、快照和系统凭据其实都还在，只是当前构建读不了。
+// 如果这里也沉默，doctor 就只能看到「零个已初始化账号」，并据此断言状态可读——用来
+// 诊断这件事的工具反而给不出任何信号。
+func ListWithUnreadable() ([]AccountState, []string, error) {
 	root, err := Home()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	entries, err := os.ReadDir(filepath.Join(root, "accounts"))
 	if os.IsNotExist(err) {
-		return []AccountState{}, nil
+		return []AccountState{}, []string{}, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	values := make([]AccountState, 0, len(entries))
+	unreadable := make([]string, 0)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -395,10 +414,16 @@ func List() ([]AccountState, error) {
 		value, loadErr := Load(entry.Name())
 		if loadErr == nil {
 			values = append(values, value)
+			continue
+		}
+		// 只把形如账号标识的目录算作不可读账号，避免把无关目录报成故障。
+		if validAccountID(entry.Name()) {
+			unreadable = append(unreadable, entry.Name())
 		}
 	}
 	sort.Slice(values, func(left, right int) bool { return values[left].UpdatedAt > values[right].UpdatedAt })
-	return values, nil
+	sort.Strings(unreadable)
+	return values, unreadable, nil
 }
 
 func Select(selector string) (AccountState, error) {

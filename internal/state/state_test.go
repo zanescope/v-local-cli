@@ -180,3 +180,75 @@ func TestCommitStateFileRestoresOldStateWhenPublishFails(t *testing.T) {
 		t.Fatalf("rollback backup should have returned to current path: %v", statErr)
 	}
 }
+
+func TestDaemonControlLockIDDoesNotDependOnWorkingDirectory(t *testing.T) {
+	first := DaemonControlLockID()
+	if !validAccountID(first) {
+		t.Fatalf("daemon 控制锁标识不是合法的锁标识：%q", first)
+	}
+	t.Chdir(t.TempDir())
+	if second := DaemonControlLockID(); second != first {
+		t.Fatalf("daemon 控制锁标识随工作目录变化：%q != %q", first, second)
+	}
+}
+
+// 状态文件因版本不符或损坏读不出来时，账号目录、快照和系统凭据其实都还在。List 会
+// 静默跳过这类账号，doctor 据此断言 account_state_readable，因此必须有独立信号。
+func TestListWithUnreadableReportsAccountsThisBuildCannotRead(t *testing.T) {
+	home := testHome(t)
+	t.Setenv("V_LOCAL_CLI_HOME", home)
+	save := func(name string) string {
+		t.Helper()
+		accountID := AccountID(name)
+		snapshot := filepath.Join(home, "accounts", accountID, "snapshots", "generation")
+		if err := os.MkdirAll(snapshot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		value := AccountState{
+			AccountID: accountID, AccountName: name, SnapshotPath: snapshot,
+			GenerationID: "generation", Storage: "snapshot-only",
+		}
+		if err := Save(&value); err != nil {
+			t.Fatal(err)
+		}
+		return accountID
+	}
+	readableID := save("readable-account")
+	staleID := save("stale-account")
+
+	// 模拟上一版本写下的状态文件。
+	stalePath, err := StatePath(staleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(stalePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["version"] = stateVersion + 1
+	bumped, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stalePath, bumped, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(stalePath + ".old"); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+
+	values, unreadable, err := ListWithUnreadable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values[0].AccountID != readableID {
+		t.Fatalf("可读账号没有被正常列出：%+v", values)
+	}
+	if len(unreadable) != 1 || unreadable[0] != staleID {
+		t.Fatalf("当前构建读不出来的账号没有被报告：%v", unreadable)
+	}
+}

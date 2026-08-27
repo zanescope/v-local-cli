@@ -625,7 +625,7 @@ func runDoctor(args []string) (any, error) {
 		return nil, invalidArguments("用法：v-local-cli doctor [--provider FILE] [--show-paths] [--bundle FILE] [--force]")
 	}
 	accounts := localplatform.Accounts()
-	initialized, err := state.List()
+	initialized, unreadable, err := state.ListWithUnreadable()
 	if err != nil {
 		return nil, err
 	}
@@ -638,10 +638,13 @@ func runDoctor(args []string) (any, error) {
 		"platform": runtime.GOOS, "arch": runtime.GOARCH,
 		"accounts": publicLocalAccounts(accounts, *showPaths), "account_count": len(accounts),
 		"initialized_accounts": publicAccountStates(initialized, *showPaths), "key_provider": publicProviderStatus(providerStatus, *showPaths),
-		"external_key_workflows": externalWorkflows,
-		"paths_included":         *showPaths,
+		"external_key_workflows":    externalWorkflows,
+		"paths_included":            *showPaths,
+		"unreadable_account_states": unreadable,
 		"checks": map[string]any{
-			"account_state_readable": true, "external_workflow_state_valid": true,
+			// account_state_readable 必须据实计算：List 会静默跳过读不出来的账号，
+			// 直接写 true 等于用「看不到故障」冒充「没有故障」。
+			"account_state_readable": len(unreadable) == 0, "external_workflow_state_valid": true,
 			"key_provider_executable_present": providerStatus.Available, "key_provider_integrity": providerStatus.Integrity,
 		},
 	}
