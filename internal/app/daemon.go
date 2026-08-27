@@ -213,22 +213,21 @@ func allowedDaemonCommand(command string) bool {
 	}[command]
 }
 
-func daemonAccountSelector(args []string) string {
-	for index, argument := range args {
-		if strings.HasPrefix(argument, "--account=") {
-			return strings.TrimSpace(strings.TrimPrefix(argument, "--account="))
-		}
-		if argument == "--account" && index+1 < len(args) {
-			return strings.TrimSpace(args[index+1])
-		}
-	}
-	return ""
+// daemonCacheBinding 记录缓存键以及它所绑定的 generation 证据。键必须在执行前
+// 构造，因此账号只能按 flag 语法从参数里推断；推断结果与命令实际使用的账号不一致
+// 时，键会绑定到另一个账号的 generation，目标账号刷新后旧结果仍会命中。写入缓存前
+// 用响应回显的 generation 复核这份绑定，可以让这种情况退化为不缓存而不是给出陈旧
+// 证据。
+type daemonCacheBinding struct {
+	key                    string
+	generationID           string
+	snapshotManifestSHA256 string
 }
 
-func daemonCacheKey(command string, args []string) string {
-	value, err := resolveInitializedAccount(daemonAccountSelector(args))
+func daemonCacheKey(command string, args []string) daemonCacheBinding {
+	value, err := resolveInitializedAccount(accountSelectorFromArgs(args))
 	if err != nil || value.GenerationID == "" || value.SnapshotManifestSHA256 == "" {
-		return ""
+		return daemonCacheBinding{}
 	}
 	payload, _ := json.Marshal(args)
 	indexIdentity := "index-unavailable"
@@ -241,26 +240,46 @@ func daemonCacheKey(command string, args []string) string {
 			}, ":")
 		}
 	}
-	return strings.Join([]string{
-		value.AccountID, value.GenerationID, value.SnapshotManifestSHA256,
-		indexIdentity, time.Now().Format("2006-01-02"), command, string(payload), Version,
-	}, "\x00")
+	return daemonCacheBinding{
+		key: strings.Join([]string{
+			value.AccountID, value.GenerationID, value.SnapshotManifestSHA256,
+			indexIdentity, time.Now().Format("2006-01-02"), command, string(payload), Version,
+		}, "\x00"),
+		generationID:           value.GenerationID,
+		snapshotManifestSHA256: value.SnapshotManifestSHA256,
+	}
+}
+
+// daemonResponseMatchesBinding 确认响应回显的证据版本与缓存键绑定的一致。命令没有
+// 回显 generation 时同样判为不匹配，宁可不缓存。
+func daemonResponseMatchesBinding(stdout string, binding daemonCacheBinding) bool {
+	var value struct {
+		Meta struct {
+			GenerationID           string `json:"generation_id"`
+			SnapshotManifestSHA256 string `json:"snapshot_manifest_sha256"`
+		} `json:"meta"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &value); err != nil {
+		return false
+	}
+	return value.Meta.GenerationID != "" && value.Meta.GenerationID == binding.generationID &&
+		value.Meta.SnapshotManifestSHA256 != "" && value.Meta.SnapshotManifestSHA256 == binding.snapshotManifestSHA256
 }
 
 func executeDaemonQuery(cache *daemonCache, request daemonRequest) daemonResponse {
 	if !allowedDaemonCommand(request.Command) {
 		return daemonResponse{SchemaVersion: daemonProtocolVersion, ExitCode: 2, Stderr: "daemon 只允许 immutable generation 白名单查询\n"}
 	}
+	// 这里刻意不在 `--` 处停止：位置参数里出现 refresh 或可变媒体解析的写法一律
+	// 拒绝，宁可误拒也不放行。
 	for _, argument := range request.Args {
-		if argument == "--fresh" || strings.HasPrefix(argument, "--fresh=") || argument == "-fresh" || strings.HasPrefix(argument, "-fresh=") ||
-			argument == "--resolve-media" || strings.HasPrefix(argument, "--resolve-media=") || argument == "-resolve-media" || strings.HasPrefix(argument, "-resolve-media=") ||
-			len(argument) > 64*1024 {
+		if namedFlagArgument(argument, "fresh", "resolve-media") || len(argument) > 64*1024 {
 			return daemonResponse{SchemaVersion: daemonProtocolVersion, ExitCode: 2, Stderr: "daemon 拒绝 refresh、超长参数或非只读行为\n"}
 		}
 	}
-	key := daemonCacheKey(request.Command, request.Args)
-	if key != "" {
-		if stdout, found := cache.get(key); found {
+	binding := daemonCacheKey(request.Command, request.Args)
+	if binding.key != "" {
+		if stdout, found := cache.get(binding.key); found {
 			return daemonResponse{
 				SchemaVersion: daemonProtocolVersion, ExitCode: 0, Stdout: stdout,
 				Meta: map[string]any{"cache": "hit"},
@@ -273,8 +292,9 @@ func executeDaemonQuery(cache *daemonCache, request daemonRequest) daemonRespons
 		SchemaVersion: daemonProtocolVersion, ExitCode: exitCode,
 		Stdout: stdout.String(), Stderr: stderr.String(), Meta: map[string]any{"cache": "miss"},
 	}
-	if exitCode == 0 && key != "" && stdout.Len() <= maxDaemonResponseBytes {
-		cache.put(key, stdout.String())
+	if exitCode == 0 && binding.key != "" && stdout.Len() <= maxDaemonResponseBytes &&
+		daemonResponseMatchesBinding(stdout.String(), binding) {
+		cache.put(binding.key, stdout.String())
 	}
 	return response
 }

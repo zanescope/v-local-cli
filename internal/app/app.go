@@ -284,28 +284,12 @@ func prepareFreshQuery(args []string) ([]string, bool, error) {
 	}
 	if args[0] == "new-messages" {
 		for _, argument := range filtered[1:] {
-			if argument == "--status" || argument == "-status" || strings.HasPrefix(argument, "--status=") || strings.HasPrefix(argument, "-status=") ||
-				argument == "--delete" || argument == "-delete" || strings.HasPrefix(argument, "--delete=") || strings.HasPrefix(argument, "-delete=") ||
-				argument == "--ack" || argument == "-ack" || strings.HasPrefix(argument, "--ack=") || strings.HasPrefix(argument, "-ack=") {
+			if namedFlagArgument(argument, "status", "delete", "ack") {
 				return filtered, false, invalidArguments("new-messages 的 --fresh 只用于 poll，不能与 --ack、--status 或 --delete 合用")
 			}
 		}
 	}
-	selector := ""
-	for index := 1; index < len(filtered); index++ {
-		argument := filtered[index]
-		if strings.HasPrefix(argument, "--account=") || strings.HasPrefix(argument, "-account=") {
-			selector = strings.TrimSpace(strings.SplitN(argument, "=", 2)[1])
-			break
-		}
-		if argument == "--account" || argument == "-account" {
-			if index+1 < len(filtered) {
-				selector = filtered[index+1]
-			}
-			break
-		}
-	}
-	_, err := resolveQueryAccount(selector, true)
+	_, err := resolveQueryAccount(accountSelectorFromArgs(filtered[1:]), true)
 	return filtered, true, err
 }
 
@@ -318,8 +302,7 @@ func noExtraArguments(set *flag.FlagSet, args []string) error {
 
 func flagProvided(args []string, name string) bool {
 	for _, argument := range args {
-		if argument == "--"+name || argument == "-"+name ||
-			strings.HasPrefix(argument, "--"+name+"=") || strings.HasPrefix(argument, "-"+name+"=") {
+		if namedFlagArgument(argument, name) {
 			return true
 		}
 	}
