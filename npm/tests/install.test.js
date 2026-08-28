@@ -19,7 +19,9 @@ test('npm dual-use 声明随发布包持久存在', () => {
   assert.match(fs.readFileSync(path.resolve(__dirname, '..', 'DISCLOSURE'), 'utf8'), /explicitly authorized/i);
 });
 
-test('平台和架构映射稳定', () => {
+test('首发平台和架构只包含三个目标', () => {
+  const metadata = require('../package.json');
+  assert.deepStrictEqual(metadata.os, ['darwin', 'win32']);
   assert.deepStrictEqual(installer.target('win32', 'x64'), {
     platform: 'windows', arch: 'amd64',
     asset: 'v-local-cli-windows-amd64.exe', binary: 'v-local-cli.exe',
@@ -28,6 +30,13 @@ test('平台和架构映射稳定', () => {
     platform: 'darwin', arch: 'arm64',
     asset: 'v-local-cli-darwin-arm64', binary: 'v-local-cli',
   });
+  assert.deepStrictEqual(installer.target('darwin', 'x64'), {
+    platform: 'darwin', arch: 'amd64',
+    asset: 'v-local-cli-darwin-amd64', binary: 'v-local-cli',
+  });
+  assert.throws(() => installer.target('win32', 'arm64'), /不支持的平台/);
+  assert.throws(() => installer.target('linux', 'x64'), /不支持的平台/);
+  assert.throws(() => installer.target('linux', 'arm64'), /不支持的平台/);
 });
 
 test('校验和解析拒绝模糊格式', () => {

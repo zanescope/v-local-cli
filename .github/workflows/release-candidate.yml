@@ -57,11 +57,8 @@ jobs:
           mkdir -p dist
           candidate_ldflags="-s -w -X github.com/zanescope/v-local-cli/internal/provider.buildMode=candidate"
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "${candidate_ldflags}" -o dist/v-local-cli-windows-amd64.exe ./cmd/v-local-cli
-          GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "${candidate_ldflags}" -o dist/v-local-cli-windows-arm64.exe ./cmd/v-local-cli
           GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "${candidate_ldflags}" -o dist/v-local-cli-darwin-amd64 ./cmd/v-local-cli
           GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "${candidate_ldflags}" -o dist/v-local-cli-darwin-arm64 ./cmd/v-local-cli
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "${candidate_ldflags}" -o dist/v-local-cli-linux-amd64 ./cmd/v-local-cli
-          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "${candidate_ldflags}" -o dist/v-local-cli-linux-arm64 ./cmd/v-local-cli
       - name: 生成并复制校验和
         run: |
           cd dist
@@ -175,6 +172,7 @@ jobs:
             '' \
             '- 二进制 build mode 为 candidate。' \
             '- 不包含 Authenticode、Developer ID 或 Apple notarization 声明。' \
+            '- 首发资产仅包含 Windows amd64、macOS amd64 和 macOS arm64。' \
             '- Provider 完整性状态会明确显示 candidate_unverified。' \
             '- 不构成 signed release 或 latest 支持声明。' \
             '- 所有资产均绑定本次 candidate 源码和 GitHub artifact attestation。' > "${notes}"

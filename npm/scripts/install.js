@@ -16,16 +16,20 @@ const allowedHosts = new Set([
 const maxBinaryBytes = 128 * 1024 * 1024;
 
 function target(platform = process.platform, arch = process.arch) {
-  const platforms = {win32: 'windows', darwin: 'darwin', linux: 'linux'};
-  const arches = {x64: 'amd64', arm64: 'arm64'};
-  if (!platforms[platform] || !arches[arch]) {
+  const supported = {
+    'win32/x64': {platform: 'windows', arch: 'amd64'},
+    'darwin/x64': {platform: 'darwin', arch: 'amd64'},
+    'darwin/arm64': {platform: 'darwin', arch: 'arm64'},
+  };
+  const selected = supported[`${platform}/${arch}`];
+  if (!selected) {
     throw new Error(`不支持的平台：${platform}/${arch}`);
   }
   const extension = platform === 'win32' ? '.exe' : '';
   return {
-    platform: platforms[platform],
-    arch: arches[arch],
-    asset: `v-local-cli-${platforms[platform]}-${arches[arch]}${extension}`,
+    platform: selected.platform,
+    arch: selected.arch,
+    asset: `v-local-cli-${selected.platform}-${selected.arch}${extension}`,
     binary: `v-local-cli${extension}`,
   };
 }

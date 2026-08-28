@@ -10,11 +10,8 @@ const packageRoot = path.resolve(__dirname, '..');
 const metadata = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
 const expectedAssets = [
   'v-local-cli-windows-amd64.exe',
-  'v-local-cli-windows-arm64.exe',
   'v-local-cli-darwin-amd64',
   'v-local-cli-darwin-arm64',
-  'v-local-cli-linux-amd64',
-  'v-local-cli-linux-arm64',
 ];
 
 const requestedVersion = process.env.RELEASE_VERSION || metadata.version;

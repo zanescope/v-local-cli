@@ -18,7 +18,7 @@ promotion 完成前，release 仍保持 fail closed，x64 结论也不能复制�
 | WIN-01 | Windows x64、已登记 4.1.x fingerprint | 命中 fingerprint 如实登记的 route；`reviewed_no_structure` 只能走精确绑定 fallback，每库首页 HMAC 唯一通过 |
 | WIN-02 | Windows x64、未登记 fingerprint/签名者 | 不使用固定偏移，也不读取目标进程内存；返回稳定的 unregistered/unsupported 诊断 |
 | WIN-03 | Windows x64、完整身份精确登记且明确允许 fallback | 主路径不可用时 missing-only fallback 成功，已完成 ID 不重复扫描；仅匹配签名者不足以授权 |
-| WIN-04 | Windows ARM64、原生 ARM64 微信 | `process_architecture=arm64`，候选和 fingerprint 不借用 x64 结论 |
+| WIN-04 | Windows ARM64、原生 ARM64 微信（首发范围外） | 不生成首发资产；未来适配时 `process_architecture=arm64`，候选和 fingerprint 不借用 x64 结论 |
 | WIN-05 | 多个 Weixin/WeChat、两个测试账号 | 候选按 process instance 隔离；目标 A/当前 B 返回 mismatch 且不保存根凭据 |
 | WIN-06 | 一个进程 access denied、另一个可读 | 返回准确 partial/process counts；不得丢弃已验证结果或声称 complete |
 | WIN-07 | 候选冲突与极短 deadline | conflict fail closed；deadline 在 session hard limit 内返回已验真的 partial/none |

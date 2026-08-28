@@ -20,13 +20,13 @@
 - **公众号** — 账号发现、图文历史、标题/摘要搜索；文章正文可以逐次授权访问 `mp.weixin.qq.com`。
 - **导出与解密** — 聊天导出为 JSON/JSONL，DAT 图片解密（v1/v2/v3）。
 
-**平台**：Windows、macOS、Linux 均有构建目标。构建成功不等于微信版本、架构、Provider、OCR 或索引已通过真机验收；普通 `capabilities` 不内嵌签名 live evidence，因此会返回 `validation_evidence.status=not_embedded`。发布能力声明必须另附对应架构、版本和签名构建的真机证据，不能从其他架构或 mock 外推。
+**首发平台**：只发布 Windows amd64、macOS amd64 和 macOS arm64。Windows ARM64 与 Linux 不生成候选、签名或 npm 安装资产；源码中的跨平台实现和 CI 只用于开发验证，不构成首发支持。构建成功也不等于微信版本、架构、Provider、OCR 或索引已通过真机验收；普通 `capabilities` 不内嵌签名 live evidence，因此会返回 `validation_evidence.status=not_embedded`。发布能力声明必须另附对应架构、版本和签名构建的真机证据，不能从其他架构或 mock 外推。
 
 Windows Provider 响应会由 CLI 再次校验目标进程实际架构、目标可执行文件/签名者摘要、
 精确兼容 registry、`Config.Cipher` 状态、账号路径分类、逐进程 collector 和 ordered fallback
 计数。未登记 fingerprint 不能宣称固定结构可用；不同进程的未经验证候选不能合并；Provider
-返回的结构化凭据还必须以本次 catalog key 对当前账号真实路径做 HMAC 绑定。当前 Windows
-amd64/arm64 都保持 `build_only`，直到对应架构的签名候选件和真实微信构建分别完成验收。
+返回的结构化凭据还必须以本次 catalog key 对当前账号真实路径做 HMAC 绑定。Windows amd64
+是唯一的 Windows 首发目标；Windows ARM64 明确排除在首发资产之外，不能继承 amd64 的验收。
 候选 Provider 只可报告 `registry_candidate_entry + registry_exact_match` 供受控 live regression
 生成 evidence；发行 CLI 只接受额外带有 `real_device_evidence_present + release_promotion_verified`
 的精确匹配，因而未 promotion 的候选件不能冒充正式兼容声明。
