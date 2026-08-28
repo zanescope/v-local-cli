@@ -23,7 +23,7 @@ type Session struct {
 
 type SessionReport struct {
 	Items    []Session      `json:"items"`
-	Coverage map[string]any `json:"coverage"`
+	Coverage map[string]any `json:"session_source_coverage"`
 }
 
 func sessionDatabase(root string) string {
@@ -70,7 +70,7 @@ func scanDynamicRows(rows *sql.Rows, selected []string, emit func(map[string]any
 
 func Sessions(root string, unreadOnly bool, kind string, limit int) (SessionReport, error) {
 	report := SessionReport{Coverage: map[string]any{
-		"available": false, "complete": false, "source": "session.db/SessionTable",
+		"source_present": false, "status": "none", "source": "session.db/SessionTable",
 	}}
 	path := sessionDatabase(root)
 	if path == "" {
@@ -155,8 +155,8 @@ func Sessions(root string, unreadOnly bool, kind string, limit int) (SessionRepo
 	} else {
 		report.Coverage["result_limit_applied"] = false
 	}
-	report.Coverage["available"] = true
-	report.Coverage["complete"] = true
+	report.Coverage["source_present"] = true
+	report.Coverage["status"] = "complete"
 	report.Coverage["columns"] = selected
 	return report, nil
 }

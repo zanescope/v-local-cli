@@ -63,7 +63,7 @@ func FuzzCanonicalOfficialArticleURL(f *testing.F) {
 		if target.Scheme != "https" || target.Host != "mp.weixin.qq.com" || target.User != nil ||
 			target.Port() != "" || target.Fragment != "" ||
 			(target.Path != "/s" && !officialShortPath.MatchString(target.Path)) {
-			t.Fatalf("成功收敛的公众号 URL 越出目标边界：%s", target.Redacted())
+			t.Fatalf("成功归一化的公众号 URL 越出目标边界：%s", target.Redacted())
 		}
 		query := target.Query()
 		if target.Path != "/s" && len(query) != 0 {

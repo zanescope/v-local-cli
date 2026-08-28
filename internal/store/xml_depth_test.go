@@ -33,7 +33,7 @@ func nestedXMLPayload(depth int, prefix, suffix string) string {
 	return builder.String()
 }
 
-// 回归：深层嵌套曾让 goroutine 栈耗尽并触发无法 recover 的 fatal error。
+// 回归：深层嵌套曾耗尽 Go 协程栈，并触发 recover 无法捕获的致命错误。
 // 现在必须返回 too_deep，且进程存活。
 func TestParseXMLRejectsExcessiveNestingInsteadOfExhaustingStack(t *testing.T) {
 	payload := nestedXMLPayload(500_000, "", "")

@@ -24,17 +24,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: 配置 Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
       - name: 配置 Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
-      - name: 验证标签、版本与测试
+      - name: 验证标签与版本
         id: version
         shell: bash
         run: |
@@ -45,14 +40,19 @@ jobs:
           else
             echo "npm-tag=latest" >> "${GITHUB_OUTPUT}"
           fi
-          go mod verify
-          go test ./...
-          go vet ./...
-          npm --prefix npm test
+
+  # 测试与静态检查由 Audit gates 统一提供，签名作业以它为前置条件。此前打标签时只在
+  # ubuntu 跑一遍 go test/vet，Authenticode、WER、reparse point 和 darwin 信任等平台
+  # 专属代码从未在发布路径上验证过；Audit gates 虽然也会在 push 时触发，但那是与发布
+  # 并行运行，失败并不能阻止发布。
+  audit:
+    name: Audit gates
+    needs: validate
+    uses: ./.github/workflows/audit-gates.yml
 
   windows:
     name: Sign Windows ${{ matrix.arch }}
-    needs: validate
+    needs: [validate, audit]
     runs-on: windows-latest
     timeout-minutes: 25
     environment: release
@@ -90,6 +90,7 @@ jobs:
           ./scripts/build-windows-release.ps1 -Arch '${{ matrix.arch }}' -CertificateThumbprint '${{ steps.certificate.outputs.thumbprint }}'
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item 'build/windows-${{ matrix.arch }}/v-local-cli.exe' 'dist/v-local-cli-windows-${{ matrix.arch }}.exe'
+          Copy-Item 'build/windows-${{ matrix.arch }}/signature-manifest.json' 'dist/signature-manifest-windows-${{ matrix.arch }}.json'
           if ('${{ matrix.arch }}' -eq 'amd64') {
             & 'dist/v-local-cli-windows-amd64.exe' --version
             if ($LASTEXITCODE -ne 0) { throw '签名 Windows 二进制 version 烟测失败' }
@@ -98,10 +99,21 @@ jobs:
             & 'dist/v-local-cli-windows-amd64.exe' --output yaml schema sessions | Out-Null
             if ($LASTEXITCODE -ne 0) { throw '签名 Windows 二进制 YAML 烟测失败' }
           }
-      - name: 移除临时证书
-        if: always() && steps.certificate.outputs.thumbprint != ''
+      - name: 移除临时证书与 PFX 私钥文件
+        # 无条件运行：导入失败时 PFX 已经落盘而 thumbprint 为空，按 thumbprint 设条件
+        # 会正好跳过最需要清理的那种情况。托管 runner 随作业销毁，自托管则会把签名
+        # 私钥留在磁盘上。
+        if: always()
         shell: pwsh
-        run: Remove-Item -LiteralPath 'Cert:\CurrentUser\My\${{ steps.certificate.outputs.thumbprint }}' -Force
+        run: |
+          $thumbprint = '${{ steps.certificate.outputs.thumbprint }}'
+          if ($thumbprint -and (Test-Path -LiteralPath "Cert:\CurrentUser\My\$thumbprint")) {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -Force
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'windows-signing.pfx'
+          if (Test-Path -LiteralPath $pfx) {
+            Remove-Item -LiteralPath $pfx -Force
+          }
       - name: 保存签名资产
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -112,7 +124,7 @@ jobs:
 
   macos:
     name: Sign and notarize ${{ matrix.name }}
-    needs: validate
+    needs: [validate, audit]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     environment: release
@@ -154,14 +166,24 @@ jobs:
           security unlock-keychain -p "${keychain_password}" "${keychain_path}"
           security import "${certificate_path}" -P "${CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${keychain_path}"
           security set-key-partition-list -S apple-tool:,apple: -k "${keychain_password}" "${keychain_path}"
-          security list-keychains -d user -s "${keychain_path}"
+          # 追加而不是替换搜索列表：-s 会用给定值覆盖整个列表，删除临时钥匙串后就只剩
+          # 一个空列表，自托管 runner 上的后续签名会失败。
+          security list-keychains -d user -s "${keychain_path}" $(security list-keychains -d user | tr -d '"')
           echo "V_LOCAL_CLI_CODESIGN_IDENTITY=${CODESIGN_IDENTITY}" >> "${GITHUB_ENV}"
       - name: 构建并签名 macOS 发布件
         shell: bash
+        env:
+          V_LOCAL_CLI_RELEASE_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
         run: |
           bash scripts/build-macos-release.sh '${{ matrix.arch }}'
           mkdir -p dist
           cp 'build/darwin-${{ matrix.arch }}/v-local-cli' 'dist/v-local-cli-darwin-${{ matrix.arch }}'
+          stage="${RUNNER_TEMP}/cli-dmg-${{ matrix.arch }}"
+          mkdir -p "${stage}"
+          cp 'build/darwin-${{ matrix.arch }}/v-local-cli' "${stage}/v-local-cli"
+          dmg="dist/v-local-cli-${{ matrix.name }}.dmg"
+          hdiutil create -volname 'v-local-cli' -srcfolder "${stage}" -ov -format UDZO "${dmg}"
+          codesign --force --timestamp --sign "${V_LOCAL_CLI_CODESIGN_IDENTITY}" "${dmg}"
       - name: 提交 Apple notarization 并验收
         shell: bash
         env:
@@ -170,9 +192,8 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_NOTARY_APP_PASSWORD }}
         run: |
           test -n "${APPLE_ID}"
-          archive="${RUNNER_TEMP}/v-local-cli-${{ matrix.name }}.zip"
-          ditto -c -k --sequesterRsrc --keepParent 'dist/v-local-cli-darwin-${{ matrix.arch }}' "${archive}"
-          submission="$(xcrun notarytool submit "${archive}" --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" --password "${APPLE_APP_PASSWORD}" --wait --output-format json)"
+          dmg='dist/v-local-cli-${{ matrix.name }}.dmg'
+          submission="$(xcrun notarytool submit "${dmg}" --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" --password "${APPLE_APP_PASSWORD}" --wait --output-format json)"
           submission_id="$(printf '%s' "${submission}" | plutil -extract id raw -o - -)"
           submission_status="$(printf '%s' "${submission}" | plutil -extract status raw -o - -)"
           test -n "${submission_id}"
@@ -180,13 +201,55 @@ jobs:
           notary_log="${RUNNER_TEMP}/notary-${{ matrix.name }}.json"
           xcrun notarytool log "${submission_id}" --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" --password "${APPLE_APP_PASSWORD}" "${notary_log}"
           python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); bad=[i for i in d.get("issues", []) if str(i.get("severity", "")).lower() in {"warning", "error"}]; print(json.dumps(bad, ensure_ascii=False, indent=2)) if bad else None; sys.exit(1 if bad else 0)' "${notary_log}"
+          xcrun stapler staple -v "${dmg}"
+          xcrun stapler validate -v "${dmg}"
+          codesign --verify --strict --verbose=2 "${dmg}"
           codesign --verify --strict --verbose=2 'dist/v-local-cli-darwin-${{ matrix.arch }}'
           spctl --assess --type execute --verbose=4 'dist/v-local-cli-darwin-${{ matrix.arch }}'
+          spctl --assess --type open --context context:primary-signature --verbose=4 "${dmg}"
           'dist/v-local-cli-darwin-${{ matrix.arch }}' --version
           'dist/v-local-cli-darwin-${{ matrix.arch }}' schema sessions >/dev/null
           'dist/v-local-cli-darwin-${{ matrix.arch }}' --output yaml schema sessions >/dev/null
           file 'dist/v-local-cli-darwin-${{ matrix.arch }}'
           cp "${notary_log}" 'dist/notary-log-${{ matrix.name }}.json'
+          cli='dist/v-local-cli-darwin-${{ matrix.arch }}'
+          team_id="$(codesign --display --verbose=4 "${cli}" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2; exit}')"
+          identifier="$(codesign --display --verbose=4 "${cli}" 2>&1 | awk -F= '/^Identifier=/{print $2; exit}')"
+          test -n "${team_id}"
+          test "${team_id}" = "${APPLE_TEAM_ID}"
+          test "${identifier}" = 'com.zanescope.v-local-cli'
+          requirement_text="$(codesign --display --requirements - "${cli}" 2>&1 | sed -n 's/^designated => //p')"
+          test -n "${requirement_text}"
+          printf '%s' "${requirement_text}" | grep -F 'anchor apple generic' >/dev/null
+          printf '%s' "${requirement_text}" | grep -F 'identifier "com.zanescope.v-local-cli"' >/dev/null
+          requirement="$(printf '%s' "${requirement_text}" | shasum -a 256 | awk '{print $1}')"
+          manifest='dist/signature-manifest-${{ matrix.name }}.json'
+          plutil -create json "${manifest}"
+          plutil -insert schema_version -integer 1 "${manifest}"
+          plutil -insert platform -string darwin "${manifest}"
+          plutil -insert arch -string '${{ matrix.arch }}' "${manifest}"
+          plutil -insert build_mode -string release "${manifest}"
+          plutil -insert team_id -string "${team_id}" "${manifest}"
+          plutil -insert code_identifier -string "${identifier}" "${manifest}"
+          plutil -insert runtime_signature_required -bool true "${manifest}"
+          plutil -insert fixed_install_required -bool true "${manifest}"
+          plutil -insert cli_sha256 -string "$(shasum -a 256 "${cli}" | awk '{print $1}')" "${manifest}"
+          plutil -insert cli_designated_requirement_sha256 -string "${requirement}" "${manifest}"
+          plutil -insert notarization_submission_id -string "${submission_id}" "${manifest}"
+          plutil -insert notarization_status -string "${submission_status}" "${manifest}"
+          plutil -insert stapled -bool true "${manifest}"
+          plutil -insert dmg_sha256 -string "$(shasum -a 256 "${dmg}" | awk '{print $1}')" "${manifest}"
+      - name: 移除临时签名钥匙串与 p12
+        # 与 Windows 侧同理：Developer ID 私钥不能在作业结束后留在磁盘上。
+        # delete-keychain 同时把它从搜索列表中移除，前一步追加式设置保证原有条目仍在。
+        if: always()
+        shell: bash
+        run: |
+          keychain_path="${RUNNER_TEMP}/release-signing.keychain-db"
+          if [ -f "${keychain_path}" ]; then
+            security delete-keychain "${keychain_path}" || true
+          fi
+          rm -f "${RUNNER_TEMP}/developer-id.p12"
       - name: 保存签名资产
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -197,7 +260,7 @@ jobs:
 
   linux:
     name: Build Linux ${{ matrix.arch }}
-    needs: validate
+    needs: [validate, audit]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -218,7 +281,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          GOOS=linux GOARCH='${{ matrix.arch }}' CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o 'dist/v-local-cli-linux-${{ matrix.arch }}' ./cmd/v-local-cli
+          GOOS=linux GOARCH='${{ matrix.arch }}' CGO_ENABLED=0 go build -trimpath -ldflags '-s -w -X github.com/zanescope/v-local-cli/internal/provider.buildMode=release' -o 'dist/v-local-cli-linux-${{ matrix.arch }}' ./cmd/v-local-cli
       - name: 保存 Linux 资产
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -276,12 +339,26 @@ jobs:
             test -f "dist/${file}"
             (cd dist && sha256sum "${file}") >> dist/checksums.txt
           done
+          for arch in amd64 arm64; do
+            test -f "dist/v-local-cli-darwin-${arch}.dmg"
+            test -f "dist/signature-manifest-windows-${arch}.json"
+            test -f "dist/signature-manifest-darwin-${arch}.json"
+            test -f "dist/notary-log-darwin-${arch}.json"
+          done
           cp dist/checksums.txt npm/checksums.txt
           go list -m -json all > dist/go-modules.jsonl
-          for binary in dist/v-local-cli-*; do go version -m "${binary}"; done > dist/build-info.txt
+          for binary in "${expected[@]}"; do go version -m "dist/${binary}"; done > dist/build-info.txt
           npm --prefix npm test
           npm --prefix npm run verify-release
           (cd npm && npm pack)
+          {
+            find dist -maxdepth 1 -type f ! -name release-checksums.txt -printf '%f\n' | while IFS= read -r file; do
+              (cd dist && sha256sum "${file}")
+            done
+            for package in npm/*.tgz; do
+              sha256sum "${package}" | sed 's#  npm/#  #'
+            done
+          } | LC_ALL=C sort -k2 > dist/release-checksums.txt
       - name: 为正式发布件生成 GitHub 来源证明
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
@@ -293,12 +370,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          prerelease=()
-          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then prerelease=(--prerelease); fi
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            is_prerelease="$(gh release view "${GITHUB_REF_NAME}" --json isPrerelease --jq '.isPrerelease')"
+            test "${is_prerelease}" = "true" || { echo '已存在的正式 Release 不能由未复验工作流覆盖' >&2; exit 1; }
             gh release upload "${GITHUB_REF_NAME}" dist/* npm/*.tgz --clobber
           else
-            gh release create "${GITHUB_REF_NAME}" dist/* npm/*.tgz --verify-tag --generate-notes --title "${GITHUB_REF_NAME}" "${prerelease[@]}"
+            gh release create "${GITHUB_REF_NAME}" dist/* npm/*.tgz --verify-tag --generate-notes --title "${GITHUB_REF_NAME}" --prerelease
           fi
       - name: 检查 npm 首次发布状态
         id: npm-registry

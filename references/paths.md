@@ -13,7 +13,9 @@ CLI 只把包含 `db_storage` 目录的父目录识别为微信账号目录。�
 - `V_LOCAL_CLI_DATA_ROOT`：覆盖账号搜索根。
 - `V_LOCAL_CLI_ACCOUNT_DIR`：直接指定一个账号目录；其中必须存在 `db_storage`。
 - `V_LOCAL_CLI_HOME`：覆盖 v-local-cli 状态、快照、锁和私有临时文件根。
-- `V_LOCAL_CLI_KEY_PROVIDER`：指定独立 Provider 可执行文件。
+- `V_LOCAL_CLI_PRIVATE_OUTPUT_PATH`：仅供本机受控验收把单个 schema v1 响应原子写入私有 JSON 文件；必须是既有、非重解析点私有目录中的绝对新路径，拒绝覆盖，命令结束后立即清除该变量。不得把它写入普通用户配置或指向仓库、共享目录。
+- `V_LOCAL_CLI_KEY_PROVIDER`：仅开发/候选构建可指定隔离测试 Provider；发行构建检测到该变量会拒绝密钥组件，不会回退 PATH。
+- `V_LOCAL_KEY_PROVIDER_BINARY_PATH`、`V_LOCAL_KEY_PROVIDER_DEVELOPMENT`、`V_LOCAL_KEY_PROVIDER_ALLOW_UNVERIFIED_LOCAL_BINARY`：仅本机受控开发验收使用；三者必须分别是绝对 Provider 路径、`1`、`1` 才解析本地未签名构建。任一缺失或发行构建都会 fail closed；它们只放宽本地组件解析，不构成 compatibility authorization。
 - `V_LOCAL_CLI_WHISPER_BIN`：指定用户已安装的本地 `whisper-cli`；也可每次传 `--engine`。
 - `V_LOCAL_CLI_WHISPER_MODEL`：指定用户已下载的 whisper.cpp 多语言模型；也可每次传 `--model`。
 - `V_LOCAL_CLI_ASR_PROVIDER`：指定用户选择的 `v-local-cli-asr/1` 本地适配器；也可每次传 `--asr-provider`。
@@ -21,7 +23,9 @@ CLI 只把包含 `db_storage` 目录的父目录识别为微信账号目录。�
 - `V_LOCAL_CLI_SKILL_DIR`：仅供发布包指向已带摘要清单的 Skill bundle；不要指向不可信目录。
 - `V_LOCAL_CLI_AGENT_SKILL_HOME`、`V_LOCAL_CLI_SKILL_HOME`：分别覆盖通用 Agent 与 Codex 的 Skill 安装根，主要用于隔离测试或受管环境。
 
-npm 安装层还保留三个仅供本仓库构建、测试或受管镜像使用的变量：`V_LOCAL_CLI_SKIP_BINARY_INSTALL` 跳过 postinstall 二进制安装；`V_LOCAL_CLI_BINARY_PATH` 指向本地测试二进制，但只有同时设置 `V_LOCAL_CLI_ALLOW_UNVERIFIED_LOCAL_BINARY=1` 才生效。最后两个变量会绕过发布摘要链，只能用于明确隔离的开发环境，不得写入普通用户配置、生产镜像或发布说明中的推荐流程。
+npm 安装层还保留仅供本仓库构建、测试或受管镜像使用的变量：`V_LOCAL_CLI_SKIP_BINARY_INSTALL` 跳过 postinstall 二进制安装；`V_LOCAL_CLI_BINARY_PATH` 指向本地测试二进制，但只有同时设置 `V_LOCAL_CLI_DEVELOPMENT=1` 与 `V_LOCAL_CLI_ALLOW_UNVERIFIED_LOCAL_BINARY=1` 才生效。路径、development 和 allow 三者缺一即拒绝；这些变量会绕过发布摘要链，只能用于明确隔离的开发环境，不得写入普通用户配置、生产镜像或发布说明中的推荐流程。
+
+正式 Provider 不位于 CLI 包目录或 PATH。其独立安装器使用当前用户固定路径：Windows `%LOCALAPPDATA%\v-local\key-provider\windows-<arch>\v-local-key-provider.exe`；macOS `~/Library/Application Support/v-local/key-provider/darwin-<arch>/v-local-key-provider`，helper 是同目录的 `v-local-key-provider-helper`。发行 CLI 会把该位置、架构、canonical file identity 和签名作为运行时门禁。
 
 默认状态位于系统用户缓存目录的 `v-local-cli/`：
 

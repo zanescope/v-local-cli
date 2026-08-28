@@ -6,15 +6,19 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	localplatform "github.com/zanescope/v-local-cli/internal/platform"
 )
 
-// Protocol v2 在请求里加入 deadline_ms，让提供器按调用方给的时限自我收敛，
-// 在被杀之前返回已验证出的密钥和诊断，而不是丢失全部工作。
-const Protocol = "v-local-key-provider/v2"
+// Protocol 是首个公开的密钥提供器协议。首次发布前已移除从未发布的 v2 开发常量。
+const Protocol = "v-local-key-provider/v1"
 const EnvironmentVariable = "V_LOCAL_CLI_KEY_PROVIDER"
+const DevelopmentBinaryPathVariable = "V_LOCAL_KEY_PROVIDER_BINARY_PATH"
+const DevelopmentModeVariable = "V_LOCAL_KEY_PROVIDER_DEVELOPMENT"
+const DevelopmentUnverifiedVariable = "V_LOCAL_KEY_PROVIDER_ALLOW_UNVERIFIED_LOCAL_BINARY"
 
 type Status struct {
-	Available       bool   `json:"available"`
+	Available       bool   `json:"executable_present"`
 	Source          string `json:"source"`
 	Name            string `json:"name"`
 	Path            string `json:"path,omitempty"`
@@ -22,14 +26,14 @@ type Status struct {
 	Protocol        string `json:"protocol"`
 	Integrity       string `json:"integrity"`
 	HelperRequired  bool   `json:"helper_required"`
-	HelperAvailable bool   `json:"helper_available"`
+	HelperAvailable bool   `json:"helper_executable_present"`
 	HelperName      string `json:"helper_name,omitempty"`
 	HelperPath      string `json:"helper_path,omitempty"`
 	HelperIntegrity string `json:"helper_integrity"`
 }
 
 func Current(explicit string) Status {
-	path, source := resolve(explicit)
+	path, source := resolveCandidate(explicit)
 	available := false
 	name := "v-local-key-provider"
 	if path != "" {
@@ -40,7 +44,12 @@ func Current(explicit string) Status {
 	}
 	integrity := "missing"
 	if available {
-		integrity = "not_verified_by_cli"
+		integrity, _ = validateProviderExecutableTrust(path)
+		if integrity == "" {
+			integrity = "untrusted"
+		}
+	} else if source == "override_rejected" {
+		integrity = "override_rejected"
 	}
 	status := Status{
 		Available: available,
@@ -55,7 +64,10 @@ func Current(explicit string) Status {
 		status.HelperRequired = true
 		status.HelperName = "v-local-key-provider-helper"
 		status.HelperIntegrity = "missing"
-		helper := os.Getenv("V_LOCAL_KEY_PROVIDER_HELPER")
+		helper := ""
+		if !releaseBuild() {
+			helper = os.Getenv("V_LOCAL_KEY_PROVIDER_HELPER")
+		}
 		if helper == "" && path != "" {
 			helper = filepath.Join(filepath.Dir(path), status.HelperName)
 		}
@@ -63,7 +75,10 @@ func Current(explicit string) Status {
 			status.HelperAvailable = true
 			status.HelperPath = resolved
 			status.HelperName = filepath.Base(resolved)
-			status.HelperIntegrity = "not_verified_by_cli"
+			status.HelperIntegrity, _ = validateProviderHelperTrust(path, resolved)
+			if status.HelperIntegrity == "" {
+				status.HelperIntegrity = "untrusted"
+			}
 		}
 	} else {
 		status.HelperIntegrity = "not_applicable"
@@ -73,16 +88,48 @@ func Current(explicit string) Status {
 
 // Resolve 返回密钥提供器的可执行文件路径及来源。
 func Resolve(explicit string) (string, string) {
-	return resolve(explicit)
+	path, source := resolveCandidate(explicit)
+	if path == "" {
+		return "", source
+	}
+	if _, err := validateProviderExecutableTrust(path); err != nil {
+		return "", "untrusted_" + source
+	}
+	return path, source
 }
 
-func resolve(explicit string) (string, string) {
+func resolveCandidate(explicit string) (string, string) {
+	developmentPath := strings.TrimSpace(os.Getenv(DevelopmentBinaryPathVariable))
+	developmentMode := strings.TrimSpace(os.Getenv(DevelopmentModeVariable))
+	developmentUnverified := strings.TrimSpace(os.Getenv(DevelopmentUnverifiedVariable))
+	developmentOverrideConfigured := developmentPath != "" || developmentMode != "" || developmentUnverified != ""
+	if releaseBuild() {
+		if strings.TrimSpace(explicit) != "" || strings.TrimSpace(os.Getenv(EnvironmentVariable)) != "" || developmentOverrideConfigured {
+			return "", "override_rejected"
+		}
+		path, ok := canonicalExecutable(fixedProviderInstallPath())
+		if !ok {
+			return "", "fixed_install"
+		}
+		return path, "fixed_install"
+	}
 	if explicit != "" {
 		path, ok := canonicalExecutable(explicit)
 		if !ok {
 			return "", "explicit"
 		}
 		return path, "explicit"
+	}
+	if developmentOverrideConfigured {
+		// 本机开发 Provider 只有在路径、开发模式和未签名确认三项同时精确设置时才可解析。
+		if developmentPath == "" || developmentMode != "1" || developmentUnverified != "1" {
+			return "", "override_rejected"
+		}
+		path, ok := canonicalExecutable(developmentPath)
+		if !ok {
+			return "", "guarded_environment"
+		}
+		return path, "guarded_environment"
 	}
 	if configured := os.Getenv(EnvironmentVariable); configured != "" {
 		path, ok := canonicalExecutable(configured)
@@ -117,15 +164,28 @@ func canonicalExecutable(value string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	resolved, err := filepath.EvalSymlinks(absolute)
-	if err != nil {
+	info, err := os.Lstat(absolute)
+	unsafePath := false
+	if err == nil {
+		unsafePath, err = providerPathIsLinkOrReparse(absolute, info.Mode())
+	}
+	if err != nil || unsafePath || !info.Mode().IsRegular() {
 		return "", false
 	}
-	info, err := os.Lstat(resolved)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil || !sameCanonicalPathText(absolute, resolved) {
 		return "", false
 	}
 	return resolved, true
+}
+
+func sameCanonicalPathText(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return localplatform.CanonicalSystemPath(left) == localplatform.CanonicalSystemPath(right)
 }
 
 func platformName() string {

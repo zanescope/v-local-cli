@@ -24,7 +24,7 @@ func TestCanonicalOfficialArticleURLStripsSessionParameters(t *testing.T) {
 	}
 	query := target.Query()
 	if target.Scheme != "https" || target.Host != "mp.weixin.qq.com" || query.Get("pass_ticket") != "" || query.Get("scene") != "" {
-		t.Fatalf("公众号文章 URL 未正确收敛：%s", target.Redacted())
+		t.Fatalf("公众号文章 URL 未正确归一化：%s", target.Redacted())
 	}
 	if query.Get("__biz") == "" || query.Get("mid") == "" || query.Get("idx") == "" || query.Get("sn") == "" {
 		t.Fatalf("公众号文章公开标识被错误移除：%s", target.Redacted())
@@ -40,7 +40,7 @@ func TestCanonicalOfficialArticleURLAcceptsOnlyRestrictedShortPaths(t *testing.T
 		t.Fatal(err)
 	}
 	if target.Scheme != "https" || target.Host != "mp.weixin.qq.com" || target.Path != "/s/Abc_123-xyz" || target.RawQuery != "" || target.Fragment != "" {
-		t.Fatalf("公众号短路径未正确收敛：%s", target.Redacted())
+		t.Fatalf("公众号短路径未正确归一化：%s", target.Redacted())
 	}
 	for _, value := range []string{
 		"https://mp.weixin.qq.com/s/short",

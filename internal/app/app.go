@@ -30,11 +30,13 @@ var Version = "0.1.0-dev.1"
 
 const responseSchemaVersion = 1
 
-const setupUsage = "v-local-cli setup [--dry-run] [--account NAME] [--provider FILE] [--allow-key-access | --keys FILE] [--storage keychain|snapshot-only] [--database-only] [--require-media] [--allow-coverage-regression] [--show-paths]"
+const privateOutputPathEnv = "V_LOCAL_CLI_PRIVATE_OUTPUT_PATH"
+
+const setupUsage = "v-local-cli setup [--dry-run | --cancel-acquisition | --cancel-all-external-workflows] [--account NAME] [--provider FILE] [--allow-key-access | --keys FILE] [--confirm-key-action ACTION] [--storage keychain|snapshot-only] [--database-only] [--require-media] [--allow-coverage-regression] [--show-paths]"
 
 type envelope struct {
 	SchemaVersion int            `json:"schema_version"`
-	OK            bool           `json:"ok"`
+	CommandStatus string         `json:"command_status"`
 	Data          any            `json:"data,omitempty"`
 	Meta          map[string]any `json:"meta,omitempty"`
 	Error         *errorValue    `json:"error,omitempty"`
@@ -84,7 +86,68 @@ type commandError struct {
 func (err *commandError) Error() string { return err.message }
 
 func Main(args []string, stdout, stderr io.Writer) int {
+	if err := hardenSensitiveProcess(); err != nil {
+		writeError(stderr, &commandError{typeName: "crash_protection_unavailable", message: "无法禁用密钥处理进程的 crash artifact", hint: "停止密钥获取并检查当前进程的 core dump / crash reporting 策略。", code: 5})
+		return 5
+	}
+	if output := strings.TrimSpace(os.Getenv(privateOutputPathEnv)); output != "" {
+		return mainWithPrivateOutput(args, output, stderr)
+	}
 	return mainWithPolicy(args, stdout, stderr, false)
+}
+
+func mainWithPrivateOutput(args []string, output string, fallbackStderr io.Writer) int {
+	if !filepath.IsAbs(output) {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_invalid", message: "私有 JSON 输出必须使用绝对路径", code: 2})
+		return 2
+	}
+	parent := filepath.Dir(filepath.Clean(output))
+	info, err := os.Lstat(parent)
+	if err != nil || !info.IsDir() {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_invalid", message: "私有 JSON 输出父目录不可用", code: 2})
+		return 2
+	}
+	reparse, err := outputPathIsReparsePoint(parent)
+	if err != nil || reparse {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_invalid", message: "私有 JSON 输出父目录是链接或重解析点", code: 2})
+		return 2
+	}
+	if err := state.ValidatePrivateDirectorySecurity(parent); err != nil {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_invalid", message: "私有 JSON 输出父目录权限不安全", code: 2})
+		return 2
+	}
+	target, err := prepareOutputTarget(output, false)
+	if err != nil {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_invalid", message: "私有 JSON 输出目标不可用", code: 2})
+		return 2
+	}
+	file, temporary, err := createTemporaryFileNear(target)
+	if err != nil {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_unavailable", message: "无法创建私有 JSON 输出", code: 5})
+		return 5
+	}
+	remove := true
+	defer func() {
+		_ = file.Close()
+		if remove {
+			_ = os.Remove(temporary)
+		}
+	}()
+	code := mainWithPolicy(args, file, file, false)
+	if err := file.Sync(); err != nil {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_unavailable", message: "无法同步私有 JSON 输出", code: 5})
+		return 5
+	}
+	if err := file.Close(); err != nil {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_unavailable", message: "无法关闭私有 JSON 输出", code: 5})
+		return 5
+	}
+	if err := publishNewFile(temporary, target); err != nil {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_unavailable", message: "无法发布私有 JSON 输出", code: 5})
+		return 5
+	}
+	remove = false
+	return code
 }
 
 func mainWithPolicy(args []string, stdout, stderr io.Writer, immutableOnly bool) int {
@@ -208,6 +271,8 @@ func mainWithPolicy(args []string, stdout, stderr io.Writer, immutableOnly bool)
 		data, err = runExport(args[1:])
 	case "export-media":
 		data, err = runExportMedia(args[1:])
+	case "export-chat-image":
+		data, err = runExportChatImage(args[1:])
 	case "export-moment-media":
 		data, err = runExportMomentMedia(args[1:])
 	default:
@@ -241,7 +306,7 @@ func mainWithPolicy(args []string, stdout, stderr io.Writer, immutableOnly bool)
 	if _, found := meta["snapshot_age_seconds"]; !found {
 		meta["snapshot_age_seconds"] = nil
 	}
-	writeEnvelope(stdout, envelope{SchemaVersion: responseSchemaVersion, OK: true, Data: data, Meta: meta}, mode)
+	writeEnvelope(stdout, envelope{SchemaVersion: responseSchemaVersion, CommandStatus: "succeeded", Data: data, Meta: meta}, mode)
 	return 0
 }
 
@@ -271,35 +336,19 @@ func prepareFreshQuery(args []string) ([]string, bool, error) {
 		"official-accounts": true, "official-history": true, "official-search": true, "official-article": true,
 		"voice-status": true, "voice-transcribe": true, "voice-search": true,
 		"ocr-status": true, "ocr-recognize": true, "ocr-read": true, "ocr-search": true,
-		"export": true, "export-media": true, "export-moment-media": true,
+		"export": true, "export-media": true, "export-chat-image": true, "export-moment-media": true,
 	}
 	if !supported[args[0]] {
 		return filtered, false, invalidArguments("--fresh 只用于读取微信快照的查询、识别和导出命令")
 	}
 	if args[0] == "new-messages" {
 		for _, argument := range filtered[1:] {
-			if argument == "--status" || argument == "-status" || strings.HasPrefix(argument, "--status=") || strings.HasPrefix(argument, "-status=") ||
-				argument == "--delete" || argument == "-delete" || strings.HasPrefix(argument, "--delete=") || strings.HasPrefix(argument, "-delete=") ||
-				argument == "--ack" || argument == "-ack" || strings.HasPrefix(argument, "--ack=") || strings.HasPrefix(argument, "-ack=") {
+			if namedFlagArgument(argument, "status", "delete", "ack") {
 				return filtered, false, invalidArguments("new-messages 的 --fresh 只用于 poll，不能与 --ack、--status 或 --delete 合用")
 			}
 		}
 	}
-	selector := ""
-	for index := 1; index < len(filtered); index++ {
-		argument := filtered[index]
-		if strings.HasPrefix(argument, "--account=") || strings.HasPrefix(argument, "-account=") {
-			selector = strings.TrimSpace(strings.SplitN(argument, "=", 2)[1])
-			break
-		}
-		if argument == "--account" || argument == "-account" {
-			if index+1 < len(filtered) {
-				selector = filtered[index+1]
-			}
-			break
-		}
-	}
-	_, err := resolveQueryAccount(selector, true)
+	_, err := resolveQueryAccount(accountSelectorFromArgs(filtered[1:]), true)
 	return filtered, true, err
 }
 
@@ -312,8 +361,7 @@ func noExtraArguments(set *flag.FlagSet, args []string) error {
 
 func flagProvided(args []string, name string) bool {
 	for _, argument := range args {
-		if argument == "--"+name || argument == "-"+name ||
-			strings.HasPrefix(argument, "--"+name+"=") || strings.HasPrefix(argument, "-"+name+"=") {
+		if namedFlagArgument(argument, name) {
 			return true
 		}
 	}
@@ -431,6 +479,17 @@ func withGeneration(output commandOutput, value state.AccountState) commandOutpu
 	createdAt, age := snapshotAge(value)
 	output.meta["snapshot_created_at"] = createdAt
 	output.meta["snapshot_age_seconds"] = age
+	coverageStatus := "none"
+	if value.Database.Discovered > 0 && value.Database.Decrypted == value.Database.Discovered && value.Database.Skipped == 0 && value.Database.Failed == 0 {
+		coverageStatus = "complete"
+	} else if value.Database.Decrypted > 0 {
+		coverageStatus = "partial"
+	}
+	output.meta["database_coverage_status"] = coverageStatus
+	output.meta["database_coverage"] = map[string]any{
+		"status": coverageStatus, "discovered": value.Database.Discovered, "decrypted": value.Database.Decrypted,
+		"skipped": value.Database.Skipped, "failed": value.Database.Failed,
+	}
 	return output
 }
 
@@ -498,9 +557,10 @@ func publicAccountStates(values []state.AccountState, showPaths bool) []map[stri
 
 func publicProviderStatus(value provider.Status, showPaths bool) map[string]any {
 	result := map[string]any{
-		"available": value.Available, "source": value.Source, "name": value.Name,
+		"executable_present": value.Available, "resolution_status": map[bool]string{true: "resolved", false: "missing"}[value.Available],
+		"source": value.Source, "name": value.Name,
 		"platform": value.Platform, "protocol": value.Protocol, "integrity": value.Integrity,
-		"helper_required": value.HelperRequired, "helper_available": value.HelperAvailable,
+		"helper_required": value.HelperRequired, "helper_executable_present": value.HelperAvailable,
 		"helper_integrity": value.HelperIntegrity,
 	}
 	if showPaths && value.Path != "" {
@@ -513,6 +573,29 @@ func publicProviderStatus(value provider.Status, showPaths bool) map[string]any 
 		result["helper_path"] = value.HelperPath
 	}
 	return result
+}
+
+func publicExternalKeyWorkflows() ([]map[string]any, error) {
+	home, err := state.Home()
+	if err != nil {
+		return nil, err
+	}
+	values, err := provider.ListExternalCheckpoints(filepath.Join(home, "acquisition"))
+	if err != nil {
+		return nil, err
+	}
+	result := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		result = append(result, map[string]any{
+			"workflow_id": value.WorkflowID, "account_id": value.AccountID, "provider_id": value.ProviderID,
+			"scopes": value.Scopes, "revalidation_stage": value.RevalidationStage, "prior_requested_action": value.PriorRequestedAction,
+			"last_security_posture_status": value.LastSecurityPostureStatus,
+			"created_at":                   value.CreatedAt, "expires_at": value.ExpiresAt,
+			"machine_revalidation_required": value.MachineRevalidationRequired,
+			"session_resumable":             false, "authorization_carried_forward": false,
+		})
+	}
+	return result, nil
 }
 
 func runAccounts(args []string) (any, error) {
@@ -537,10 +620,15 @@ func runStatus(args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	externalWorkflows, err := publicExternalKeyWorkflows()
+	if err != nil {
+		return nil, &commandError{typeName: "external_workflow_state_invalid", message: "无法读取跨重启密钥工作流 checkpoint", hint: "checkpoint 不是授权凭据；对对应账号执行 setup --cancel-acquisition 清理后，从新 session 重新开始。", code: 5}
+	}
 	return map[string]any{
 		"platform": runtime.GOOS, "accounts": publicLocalAccounts(accounts, *showPaths),
 		"account_count": len(accounts), "no_accounts": len(accounts) == 0,
 		"initialized_accounts": publicAccountStates(initialized, *showPaths), "paths_included": *showPaths,
+		"external_key_workflows": externalWorkflows, "external_key_workflow_count": len(externalWorkflows),
 	}, nil
 }
 
@@ -596,19 +684,31 @@ func runDoctor(args []string) (any, error) {
 		return nil, invalidArguments("用法：v-local-cli doctor [--provider FILE] [--show-paths] [--bundle FILE] [--force]")
 	}
 	accounts := localplatform.Accounts()
-	initialized, err := state.List()
+	initialized, unreadable, err := state.ListWithUnreadable()
 	if err != nil {
 		return nil, err
 	}
+	externalWorkflows, err := publicExternalKeyWorkflows()
+	if err != nil {
+		return nil, &commandError{typeName: "external_workflow_state_invalid", message: "跨重启密钥工作流 checkpoint 无效", hint: "checkpoint 不是授权凭据；对对应账号执行 setup --cancel-acquisition 清理后，从新 session 重新开始。", code: 5}
+	}
+	providerStatus := provider.Current(*providerPath)
 	result := map[string]any{
 		"platform": runtime.GOOS, "arch": runtime.GOARCH,
 		"accounts": publicLocalAccounts(accounts, *showPaths), "account_count": len(accounts),
-		"initialized_accounts": publicAccountStates(initialized, *showPaths), "key_provider": publicProviderStatus(provider.Current(*providerPath), *showPaths),
-		"paths_included": *showPaths,
-		"checks":         map[string]bool{"single_go_binary": true, "readonly_snapshot": true, "immutable_generations": true},
+		"initialized_accounts": publicAccountStates(initialized, *showPaths), "key_provider": publicProviderStatus(providerStatus, *showPaths),
+		"external_key_workflows":    externalWorkflows,
+		"paths_included":            *showPaths,
+		"unreadable_account_states": unreadable,
+		"checks": map[string]any{
+			// account_state_readable 必须据实计算：List 会静默跳过读不出来的账号，
+			// 直接写 true 等于用「看不到故障」冒充「没有故障」。
+			"account_state_readable": len(unreadable) == 0, "external_workflow_state_valid": true,
+			"key_provider_executable_present": providerStatus.Available, "key_provider_integrity": providerStatus.Integrity,
+		},
 	}
 	if strings.TrimSpace(*bundlePath) != "" {
-		bundle, err := writeDiagnosticBundle(*bundlePath, *force, initialized, provider.Current(*providerPath))
+		bundle, err := writeDiagnosticBundle(*bundlePath, *force, initialized, providerStatus)
 		if err != nil {
 			return nil, err
 		}
@@ -631,17 +731,14 @@ func runCapabilities(args []string) (any, error) {
 		"cli_version": Version, "response_schema_version": responseSchemaVersion,
 		"runtime":       map[string]any{"language": "go", "os": runtime.GOOS, "arch": runtime.GOARCH, "cgo_required": false},
 		"build_targets": []string{"windows/amd64", "windows/arm64", "darwin/amd64", "darwin/arm64", "linux/amd64", "linux/arm64"},
-		"data_layout_validation": map[string]any{
-			"windows_amd64": "real_device_verified", "windows_arm64": "build_only",
-			"darwin_amd64": "real_device_verified", "darwin_arm64": "build_only",
-			"linux": "build_only_import_or_explicit_path",
+		"validation_evidence": map[string]any{
+			"status": "not_embedded", "release_manifest_required_for_real_device_claims": true,
+			"current_runtime_build_target_declared": true,
 		},
 		"provider": map[string]any{
 			"protocol": provider.Protocol, "separate_repository": true, "required_for_refresh": false,
-			"automatic_key_access_real_device_verified_targets": []string{"windows/amd64", "darwin/amd64"},
-			"darwin_amd64_setup_source":                         "automatic_or_user_supplied_candidate_file",
-			"darwin_arm64_setup_source":                         "user_supplied_candidate_file",
-			"darwin_arm64_automatic_helper":                     "experimental_build_only",
+			"automatic_key_access_validation": "requires_signed_live_release_evidence",
+			"user_supplied_candidate_file":    true,
 		},
 		"storage": map[string]any{
 			"immutable_generations": true, "manifest_schema_version": 1, "retained_rollback_generations": 1,
@@ -664,16 +761,16 @@ func runCapabilities(args []string) (any, error) {
 		},
 		"voice": map[string]any{
 			"preferred_source": "wechat_existing_index", "silk_decoder_bundled": true, "fallback_asr_engine": "optional_whisper_cpp_or_v-local-cli-asr_provider", "network": false,
-			"wechat_private_api": false, "existing_index_layout_real_device_verified_targets": []string{"windows/amd64"}, "existing_index_row_real_device_verified_targets": []string{},
+			"wechat_private_api": false, "existing_index_validation": "requires_release_evidence",
 			"fallback_pipeline_fixture_verified": true, "sensevoice_adapter_separate_repository": true,
-			"sensevoice_adapter_windows_amd64_real_voice_verified": true,
+			"sensevoice_adapter_validation": "requires_release_evidence",
 		},
 		"ocr": map[string]any{
 			"preferred_source": "wechat_existing_index", "native_experimental": "installed_wechat_package",
 			"external_dependency": false, "repository_bundles_wechat_files": false,
 			"wechat_private_ipc_default": false, "network_requested_by_cli": false,
-			"existing_index_layout_real_device_verified_targets": []string{"windows/amd64"}, "existing_index_row_real_device_verified_targets": []string{},
-			"native_backend_supported_targets": []string{"windows/amd64"}, "native_backend_real_device_verified_targets": []string{"windows/amd64"},
+			"existing_index_validation":             "requires_release_evidence",
+			"native_backend_implementation_targets": []string{"windows/amd64"}, "native_backend_validation": "requires_release_evidence",
 		},
 		"official_article": map[string]any{
 			"network_default": false, "destination": "mp.weixin.qq.com", "fixture_verified": true, "real_network_verified": false,
@@ -742,6 +839,14 @@ func selectLocalAccount(selector string) (localplatform.Account, error) {
 	if len(accounts) == 0 {
 		return localplatform.Account{}, &commandError{typeName: "no_accounts", message: "未发现本地微信账号", hint: "请重新登录微信/打开新消息后重试；也可设置 V_LOCAL_CLI_DATA_ROOT 或 V_LOCAL_CLI_ACCOUNT_DIR。", code: 5}
 	}
+	// accounts 返回的稳定 account_id 必须能原样用于后续 --account，且不能退化为名称子串猜测。
+	if selector != "" {
+		for _, account := range accounts {
+			if state.AccountID(account.Path) == selector {
+				return account, nil
+			}
+		}
+	}
 	account, selected, ambiguous := localplatform.Select(accounts, selector)
 	if selected {
 		return account, nil
@@ -757,14 +862,30 @@ func loadCandidateFile(path string) (provider.CandidateBundle, error) {
 	if err != nil {
 		return provider.CandidateBundle{}, err
 	}
-	var bundle provider.CandidateBundle
-	if err := json.Unmarshal(payload, &bundle); err != nil {
+	// 用户提供的候选文件有意采用比 Provider 响应更受限的结构，尤其不能声明
+	// catalog 证明、诊断信息或结构化凭据来源；CLI 会先针对当前数据库 generation
+	// 重新验证这些原始候选，再持久化各数据库密钥。
+	var candidate struct {
+		DatabaseKeys map[string]string   `json:"database_keys"`
+		ImageKeys    *provider.ImageKeys `json:"image_keys,omitempty"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&candidate); err != nil {
 		return provider.CandidateBundle{}, errors.New("候选文件不是有效 JSON")
 	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return provider.CandidateBundle{}, errors.New("候选文件只能包含一个 JSON 对象")
+	}
+	bundle := provider.CandidateBundle{DatabaseKeys: candidate.DatabaseKeys, ImageKeys: candidate.ImageKeys}
 	if err := provider.ValidateBundle(&bundle); err != nil {
 		return provider.CandidateBundle{}, err
 	}
 	return bundle, nil
+}
+
+func isLiveProviderSecurityPostureRevalidation(credentialSource string, bundle provider.CandidateBundle) bool {
+	return credentialSource == "provider" && provider.IsSecurityPostureRevalidation(bundle)
 }
 
 type snapshotPublishOptions struct {
@@ -778,7 +899,49 @@ type snapshotPublishOptions struct {
 	BuildIndex                bool
 }
 
+func snapshotCatalogEntries(entries []provider.CatalogEntry) []snapshot.CatalogEntry {
+	result := make([]snapshot.CatalogEntry, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, snapshot.CatalogEntry{
+			DatabaseID: entry.DatabaseID, RelativePath: entry.RelativePath,
+			CanonicalFileID: entry.CanonicalFileID, Size: entry.Size, MTimeNS: entry.MTimeNS,
+			FirstPageSHA256: entry.FirstPageSHA256, Classification: entry.Classification,
+			RequiredForKeyCoverage: entry.RequiredForKeyCoverage, ProfileID: entry.ProfileID,
+		})
+	}
+	return result
+}
+
+func persistedSecretFlags(bundle provider.CandidateBundle, structuredCredentialMinimized bool) (bool, bool, bool) {
+	databaseKeysPersisted := len(bundle.DatabaseKeys) > 0
+	if structuredCredentialMinimized && bundle.DatabaseCredential != nil {
+		databaseKeysPersisted = false
+	}
+	databaseCredentialPersisted := databaseKeysPersisted || bundle.DatabaseCredential != nil
+	return databaseKeysPersisted, databaseCredentialPersisted, bundle.ImageKeys != nil
+}
+
 func publishAccountSnapshot(account localplatform.Account, bundle provider.CandidateBundle, options snapshotPublishOptions) (any, error) {
+	savedKeychainDatabaseKeysPersisted, savedKeychainDatabaseCredentialPersisted, savedKeychainImageKeysPersisted :=
+		persistedSecretFlags(bundle, false)
+	if options.CredentialSource != "provider" {
+		// 只有当前受控 Provider 交换返回的 proof 可以绑定获取时的 catalog。保存的
+		// credential 和用户候选文件都必须针对眼前文件重新生成机器密钥化 catalog。
+		bundle.CatalogID = ""
+		bundle.CatalogEntries = nil
+	}
+	acquisitionRoot, rootErr := state.AcquisitionRoot()
+	if rootErr != nil {
+		return nil, &commandError{
+			typeName: "private_state_unavailable", message: "无法访问 catalog 标识的私有状态目录",
+			hint: privateStateError(rootErr), code: 5,
+		}
+	}
+	expanded, credentialCoverage, credentialErr := provider.ExpandCredentialWithPrivateRoot(bundle, account.DBDir, acquisitionRoot)
+	if credentialErr != nil {
+		return nil, &commandError{typeName: "database_credential_invalid", message: "结构化数据库凭据无法派生当前 catalog", hint: "重新运行 setup 获取与当前账号匹配的凭据。", code: 5}
+	}
+	bundle = expanded
 	media := snapshot.ValidateMedia(account.Path, bundle.ImageKeys)
 	if options.RequireMedia && media.Status != "verified" {
 		return nil, &commandError{typeName: "media_key_unverified", message: "图片 AES/XOR 候选未通过真实 DAT 样本验真", hint: "请打开一条含图片的新消息后重试；只有明确只处理文本时才传 --database-only。", code: 5}
@@ -788,7 +951,9 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 	if err != nil {
 		return nil, err
 	}
-	previousState, previousErr := state.Load(accountID)
+	// setup 可以用已通过账号和路径安全校验的旧版本状态作为一次性替换基线；旧状态
+	// 仍不会被普通查询或 refresh 当成已初始化，且会一直保留到新 v1 状态原子提交。
+	previousState, previousErr := state.LoadReplacementBaseline(accountID)
 	if previousErr != nil && !os.IsNotExist(previousErr) {
 		return nil, &commandError{
 			typeName: "state_recovery_failed", message: "现有账号状态无法安全恢复",
@@ -802,8 +967,17 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 	report, generation, err := snapshot.BuildGeneration(account.DBDir, generationsRoot, bundle.DatabaseKeys, snapshot.BuildOptions{
 		PreventCoverageRegression: options.PreventCoverageRegression,
 		PreviousSnapshot:          previousSnapshot, CreatorVersion: Version,
+		CatalogID: bundle.CatalogID, CatalogEntries: snapshotCatalogEntries(bundle.CatalogEntries), DatabaseProfiles: bundle.DatabaseProfiles,
 	})
 	if err != nil {
+		var catalogDrift *snapshot.CatalogDriftError
+		if errors.As(err, &catalogDrift) {
+			return nil, &commandError{
+				typeName: "key_provider_catalog_drift", message: "数据库在密钥验真后发生变化，已取消本次发布",
+				hint: "重新运行 setup/refresh 生成新 catalog；CLI 未使用旧 catalog 的密钥继续发布。", code: 5,
+				details: map[string]any{"reason": catalogDrift.Reason},
+			}
+		}
 		var regression *snapshot.CoverageRegressionError
 		if errors.As(err, &regression) {
 			return nil, &commandError{
@@ -816,24 +990,55 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 	}
 	effectiveStorage := options.Storage
 	warnings := []string{}
+	if diagnosticResult, _ := bundle.Diagnostics["result_code"].(string); diagnosticResult == "deadline_exhausted" {
+		warnings = append(warnings, "密钥获取预算已耗尽；本次只发布 deadline 前逐库验真的 partial，并继续执行覆盖率回退保护")
+	}
 	secretsPersisted := false
 	databaseKeysPersisted := false
+	databaseCredentialPersisted := false
 	imageKeysPersisted := false
+	keychainStatePersisted := options.CredentialSource == "saved_keychain"
 	previousSecrets := provider.CandidateBundle{}
 	previousSecretsExist := false
 	secretsStateKnown := false
 	secretsChanged := false
+	unreadableSecretsReplaced := false
 	if options.PersistSecrets {
 		previousSecrets, previousSecretsExist, err = state.LoadSecretsOptional(accountID)
 		if err == nil {
 			secretsStateKnown = true
+		} else if errors.Is(err, state.ErrSavedSecretsInvalid) && options.CredentialSource == "provider" &&
+			diagnosticStringValue(bundle.Diagnostics, "result_code") == "complete" &&
+			report.Summary.Decrypted == report.Summary.Discovered && report.Summary.Failed == 0 && report.Summary.Skipped == 0 &&
+			(!options.RequireMedia || media.Status == "verified") {
+			// 旧条目内容确定无效时，只有本轮 Provider 与全部请求 scope 都完整验真，才允许
+			// 用新凭据替换。系统凭据库不可访问等瞬态错误仍保持不写入。
+			secretsStateKnown = true
+			unreadableSecretsReplaced = true
 		} else {
 			warnings = append(warnings, "系统凭据库当前不可读；未修改已有凭据")
 		}
 	}
 	if options.PersistSecrets && options.Storage == "keychain" {
 		verifiedBundle := provider.CandidateBundle{
-			DatabaseKeys: snapshot.VerifiedKeys(bundle.DatabaseKeys, report),
+			CatalogID: bundle.CatalogID, DatabaseKeys: snapshot.VerifiedKeys(bundle.DatabaseKeys, report),
+			Profiles: bundle.Profiles,
+		}
+		verifiedBundle.DatabaseProfiles = map[string]string{}
+		for path := range verifiedBundle.DatabaseKeys {
+			if profileID := bundle.DatabaseProfiles[path]; profileID != "" {
+				verifiedBundle.DatabaseProfiles[path] = profileID
+			}
+		}
+		fullDatabaseCoverage := report.Summary.Decrypted == report.Summary.Discovered && report.Summary.Skipped == 0 && report.Summary.Failed == 0
+		if fullDatabaseCoverage {
+			verifiedBundle.DatabaseCredential = provider.BindVerifiedCredential(bundle.DatabaseCredential, accountID, verifiedBundle.DatabaseKeys)
+		} else if bundle.DatabaseCredential != nil {
+			verifiedBundle.DatabaseCredential = provider.BindPartialVerifiedCredential(
+				bundle.DatabaseCredential, accountID, verifiedBundle.DatabaseKeys,
+				verifiedBundle.DatabaseProfiles, bundle.CatalogEntries,
+			)
+			warnings = append(warnings, "当前 catalog 未完整验真；已移除根 passphrase，并将本次验真的 effective key 保存为逐库 override")
 		}
 		if media.Status == "verified" {
 			verifiedBundle.ImageKeys = bundle.ImageKeys
@@ -842,18 +1047,31 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 		}
 		if !secretsStateKnown {
 			effectiveStorage = "snapshot-only"
-		} else if err := state.SaveSecrets(accountID, verifiedBundle); err != nil {
+		} else if saveErr := state.SaveSecrets(accountID, verifiedBundle); saveErr != nil && !state.SavedSecretsCommitted(saveErr) {
 			effectiveStorage = "snapshot-only"
 			warnings = append(warnings, "系统凭据库写入失败；已保留可查询快照，但刷新和图片导出需要重新 setup")
 		} else {
-			secretsPersisted = true
-			databaseKeysPersisted = len(verifiedBundle.DatabaseKeys) > 0
-			imageKeysPersisted = verifiedBundle.ImageKeys != nil
+			keychainStatePersisted = true
+			// SaveSecrets 在存在结构化 credential 时只保存可重新派生的根或逐库 override，
+			// 不重复保存刚刚派生出的 DatabaseKeys。
+			databaseKeysPersisted, databaseCredentialPersisted, imageKeysPersisted = persistedSecretFlags(verifiedBundle, true)
+			secretsPersisted = databaseCredentialPersisted || imageKeysPersisted
 			secretsChanged = true
+			if saveErr != nil {
+				warnings = append(warnings, "新凭据已写入系统凭据库，但旧分片未完整清理；后续 setup 或 forget 会再次清理")
+			}
 		}
+	}
+	if options.CredentialSource == "saved_keychain" {
+		databaseKeysPersisted = savedKeychainDatabaseKeysPersisted
+		databaseCredentialPersisted = savedKeychainDatabaseCredentialPersisted
+		imageKeysPersisted = savedKeychainImageKeysPersisted
 	}
 	if report.Summary.Skipped > 0 && options.CredentialSource == "saved_keychain" {
 		warnings = append(warnings, "部分数据库没有已保存的验真密钥；已发布可解密范围，需要完整覆盖时重新 setup")
+	}
+	if credentialCoverage.DatabaseCount > credentialCoverage.MatchedDatabaseCount {
+		warnings = append(warnings, "结构化凭据未覆盖当前 catalog 的全部加密数据库；已保留 missing 列表并阻止覆盖率回退")
 	}
 	accountState := state.AccountState{
 		AccountID: accountID, AccountName: account.Name, AccountPath: account.Path,
@@ -876,20 +1094,28 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 		}
 	}
 	if err := state.Save(&accountState); err != nil {
+		keychainRollbackIncomplete := false
 		if secretsChanged {
-			if previousSecretsExist {
-				_ = state.SaveSecrets(accountID, previousSecrets)
+			if unreadableSecretsReplaced {
+				// 无效旧条目无法作为可信回滚目标；保留已经完整验真的新凭据，后续 setup
+				// 可以继续完成状态提交，且不会恢复已知无效的数据。
+			} else if previousSecretsExist {
+				keychainRollbackIncomplete = state.SaveSecrets(accountID, previousSecrets) != nil
 			} else {
-				_ = state.DeleteSecrets(accountID)
+				keychainRollbackIncomplete = state.DeleteSecrets(accountID) != nil
 			}
 		}
 		if derived, derivedErr := messageindex.GenerationDir(accountID, generation.ID); derivedErr == nil {
 			_ = os.RemoveAll(derived)
 		}
 		_ = os.RemoveAll(generation.Path)
+		hint := "上一代快照保持不变；运行 v-local-cli doctor 后重试。"
+		if keychainRollbackIncomplete {
+			hint = "上一代快照保持不变，但系统凭据库回滚未完整完成；先运行 v-local-cli doctor，再用 setup 重试或用 forget 精确清理。"
+		}
 		return nil, &commandError{
 			typeName: "state_commit_failed", message: "快照状态提交失败，已回滚新代际",
-			hint: "上一代快照保持不变；运行 v-local-cli doctor 后重试。", code: 5,
+			hint: hint, code: 5,
 		}
 	}
 	if options.PersistSecrets && options.Storage == "snapshot-only" && secretsStateKnown && previousSecretsExist {
@@ -911,17 +1137,59 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 	if report.Summary.Failed > 0 || report.Summary.Skipped > 0 || (!options.DatabaseOnly && media.Status != "verified") || len(warnings) > 0 {
 		status = "partial"
 	}
+	requiresDatabaseCredential := false
+	for _, database := range report.Results {
+		if database.SourceClassification == "encrypted_eligible" || database.ProfileID != "" {
+			requiresDatabaseCredential = true
+			break
+		}
+	}
+	databaseCredentialStatus := "not_required_plaintext_only"
+	if requiresDatabaseCredential {
+		databaseCredentialStatus = "not_persisted"
+		if databaseCredentialPersisted {
+			databaseCredentialStatus = "persisted"
+		} else if options.Storage == "snapshot-only" {
+			databaseCredentialStatus = "not_persisted_by_policy"
+		}
+	}
+	acquisitionResultCode := diagnosticStringValue(bundle.Diagnostics, "result_code")
+	securityPostureStatus := diagnosticStringValue(bundle.Diagnostics, "security_posture_status")
+	nextAction := diagnosticStringValue(bundle.Diagnostics, "next_action")
+	externalCheckpointStatus := diagnosticStringValue(bundle.Diagnostics, "external_checkpoint_status")
+	externalWorkflowID := diagnosticStringValue(bundle.Diagnostics, "external_workflow_id")
+	nextStep := "v-local-cli contacts"
+	if securityPostureStatus == "restoration_required" && nextAction == "reenable_sip" {
+		status = "security_restoration_required"
+		nextStep = "reenable_sip_then_run_setup_allow_key_access_without_old_confirmation"
+	}
 	return map[string]any{
 		"status": status, "account": publicAccountState(accountState, false), "database": report,
 		"media": media, "index": indexReport, "storage": effectiveStorage, "warnings": warnings,
-		"database_only":            options.DatabaseOnly,
-		"credential_source":        options.CredentialSource,
-		"process_access_performed": options.ProcessAccessPerformed,
-		"secrets_persisted":        secretsPersisted,
-		"database_keys_persisted":  databaseKeysPersisted,
-		"image_keys_persisted":     imageKeysPersisted,
-		"next":                     "v-local-cli contacts",
+		"database_only":                 options.DatabaseOnly,
+		"credential_source":             options.CredentialSource,
+		"process_access_performed":      options.ProcessAccessPerformed,
+		"secrets_persisted":             secretsPersisted,
+		"keychain_state_persisted":      keychainStatePersisted,
+		"database_keys_persisted":       databaseKeysPersisted,
+		"database_credential_persisted": databaseCredentialPersisted,
+		"database_credential_status":    databaseCredentialStatus,
+		"image_keys_persisted":          imageKeysPersisted,
+		"unreadable_keychain_replaced":  unreadableSecretsReplaced,
+		"acquisition_result_code":       acquisitionResultCode,
+		"security_posture_status":       securityPostureStatus,
+		"next_action":                   nextAction,
+		"external_checkpoint_status":    externalCheckpointStatus,
+		"external_workflow_id":          externalWorkflowID,
+		"machine_revalidation_required": securityPostureStatus == "restoration_required",
+		"authorization_carried_forward": false,
+		"next":                          nextStep,
 	}, nil
+}
+
+func diagnosticStringValue(values map[string]any, name string) string {
+	value, _ := values[name].(string)
+	return value
 }
 
 func coverageRegressionDetails(report snapshot.Report, comparison snapshot.CoverageComparison) map[string]any {
@@ -967,75 +1235,186 @@ func acquireSnapshotTransaction(accountID string) (*state.AccountLock, error) {
 	return lock, nil
 }
 
+func acquisitionCommandError(acquisition *provider.AcquisitionError, typeName, message, hint string) *commandError {
+	details := map[string]any{
+		"result_code": acquisition.ResultCode, "workflow_status": acquisition.WorkflowStatus,
+		"requested_scopes":         acquisition.RequestedScopes,
+		"database_target_status":   acquisition.DatabaseTargetStatus,
+		"database_coverage_status": acquisition.DatabaseCoverageStatus,
+		"media_coverage_status":    acquisition.MediaCoverageStatus,
+		"security_posture_status":  acquisition.SecurityPostureStatus,
+		"next_action":              acquisition.NextAction,
+		"blocking_reasons":         acquisition.BlockingReasons, "target_binding_status": acquisition.TargetBindingStatus,
+		"session_account_status": acquisition.SessionAccountStatus,
+	}
+	if acquisition.SessionID != "" {
+		details["session_id"] = acquisition.SessionID
+	}
+	if acquisition.CatalogID != "" {
+		details["catalog_id"] = acquisition.CatalogID
+	}
+	if acquisition.ProcessInstanceID != "" {
+		details["process_instance_id"] = acquisition.ProcessInstanceID
+	}
+	if acquisition.ActionStage != "" {
+		details["action_stage"] = acquisition.ActionStage
+	}
+	if acquisition.RouteSelected != "" {
+		details["route_selected"] = acquisition.RouteSelected
+	}
+	if acquisition.ShadowRouteStatus != "" {
+		details["shadow_route_status"] = acquisition.ShadowRouteStatus
+	}
+	if len(acquisition.RoutePriority) > 0 {
+		details["route_priority"] = acquisition.RoutePriority
+	}
+	for name, value := range map[string]string{
+		"wechat_version": acquisition.WeChatVersion, "wechat_build": acquisition.WeChatBuild,
+		"executable_sha256": acquisition.ExecutableSHA256, "binary_fingerprint_status": acquisition.BinaryFingerprintStatus,
+		"binary_signing_status": acquisition.BinarySigningStatus, "binary_signer_sha256": acquisition.BinarySignerSHA256,
+		"binary_product_identity": acquisition.BinaryProductIdentity, "signing_team_id": acquisition.SigningTeamID,
+		"designated_requirement_sha256": acquisition.DesignatedRequirementSHA256,
+		"process_architecture":          acquisition.ProcessArchitecture, "process_architecture_status": acquisition.ProcessArchitectureStatus,
+		"process_translation_status": acquisition.ProcessTranslationStatus, "macos_version": acquisition.MacOSVersion,
+		"compatibility_registry_status": acquisition.CompatibilityRegistryStatus, "standard_route_status": acquisition.StandardRouteStatus,
+		"config_cipher_route_status": acquisition.ConfigCipherRouteStatus,
+	} {
+		if value != "" {
+			details[name] = value
+		}
+	}
+	if len(acquisition.StandardRouteEvidence) > 0 {
+		details["standard_route_evidence"] = acquisition.StandardRouteEvidence
+	}
+	if len(acquisition.WindowsRouteEvidence) > 0 {
+		details["windows_route_evidence"] = acquisition.WindowsRouteEvidence
+	}
+	if acquisition.Platform == "windows" {
+		details["process_count"] = acquisition.ProcessCount
+		details["selected_process_count"] = acquisition.SelectedProcessCount
+		details["target_bound_process_count"] = acquisition.TargetBoundProcessCount
+		details["other_account_process_count"] = acquisition.OtherAccountProcessCount
+		details["unknown_account_process_count"] = acquisition.UnknownAccountProcessCount
+		details["opened_process_count"] = acquisition.OpenedProcessCount
+		details["access_denied_count"] = acquisition.AccessDeniedCount
+		details["per_process_collector_count"] = acquisition.PerProcessCollectorCount
+		details["config_cipher_structure_count"] = acquisition.ConfigCipherStructureCount
+		details["config_cipher_invalid_structure_count"] = acquisition.ConfigCipherInvalidCount
+		details["config_cipher_candidate_count"] = acquisition.ConfigCipherCandidateCount
+		details["config_cipher_verified_candidate_count"] = acquisition.ConfigCipherVerifiedCount
+		details["fallback_candidate_count"] = acquisition.FallbackCandidateCount
+		details["fallback_stage_counts"] = acquisition.FallbackStageCounts
+	}
+	if acquisition.ExternalCheckpointStatus != "" {
+		details["external_checkpoint_status"] = acquisition.ExternalCheckpointStatus
+	}
+	if acquisition.ExternalWorkflowID != "" {
+		details["external_workflow_id"] = acquisition.ExternalWorkflowID
+	}
+	return &commandError{typeName: typeName, message: message, hint: hint, details: details, code: 5}
+}
+
 func keyProviderCommandError(err error) *commandError {
 	var acquisition *provider.AcquisitionError
 	if !errors.As(err, &acquisition) {
+		var contract *provider.ProtocolContractError
+		if errors.As(err, &contract) {
+			details := map[string]any{"stage": "protocol_contract_validation", "stderr_included": false, "path_included": false}
+			if contract.Stage != "" {
+				details["contract_stage"] = contract.Stage
+			}
+			return &commandError{
+				typeName: "key_provider_failed", message: "密钥提供器未能返回有效候选",
+				hint:    "Provider v1 响应未通过 CLI 契约验证；原始响应、路径和候选均未包含在错误中。",
+				details: details, code: 5,
+			}
+		}
+		var execution *provider.ExecutionError
+		if errors.As(err, &execution) {
+			details := map[string]any{"stage": execution.Stage, "stderr_included": false, "path_included": false}
+			if execution.ExitCode >= 0 {
+				details["exit_code"] = execution.ExitCode
+			}
+			return &commandError{
+				typeName: "key_provider_failed", message: "密钥提供器未能返回有效候选",
+				hint: "根据 details.stage 区分子进程启动失败和 Provider 非零退出；原始 stderr 已隐藏。", details: details, code: 5,
+			}
+		}
 		return &commandError{
 			typeName: "key_provider_failed", message: "密钥提供器未能返回有效候选",
 			hint: "请保持微信登录并打开一条新消息后重试。", code: 5,
 		}
 	}
+	if (acquisition.NextAction == "approve_shadow_mode" || acquisition.NextAction == "disable_sip" || acquisition.NextAction == "reenable_sip") &&
+		acquisition.ExternalCheckpointStatus == "unavailable" {
+		return acquisitionCommandError(acquisition, "key_provider_external_checkpoint_failed", "无法安全保存跨重启密钥工作流 checkpoint",
+			"停止当前外部动作；checkpoint 不携带授权，但它必须先成功写入当前用户私有状态目录。检查目录权限和空间后重新开始。若 SIP 已经关闭，请先恢复 SIP。")
+	}
 	switch acquisition.Reason {
+	case "external_workflow_scope_mismatch":
+		return acquisitionCommandError(acquisition, "key_provider_external_workflow_scope_mismatch", "当前 setup scope 与跨重启密钥工作流不一致",
+			"使用 checkpoint 中原来的 database/media scope 重新运行 setup；若明确放弃该流程，先用 setup --cancel-acquisition 清理当前账号 checkpoint，再创建新流程。")
 	case "wechat_not_running":
-		return &commandError{
-			typeName: "wechat_not_running", message: "没有发现正在运行的微信主进程",
-			hint: "请手动启动并登录微信，然后重新运行同一条 setup 命令。CLI/Provider 不会自动启动微信。", code: 5,
-		}
+		return acquisitionCommandError(acquisition, "wechat_not_running", "没有发现正在运行的微信主进程",
+			"请手动启动并登录微信，然后重新运行同一条 setup 命令。CLI/Provider 不会自动启动微信。")
 	case "process_list_unavailable":
-		return &commandError{
-			typeName: "key_provider_process_list_unavailable",
-			message:  "当前环境无法枚举 macOS 进程，无法确认或读取微信进程",
-			hint:     "请在普通 macOS Terminal 中重试，或确认当前运行环境允许读取进程列表；这不等同于微信未运行。",
-			code:     5,
-		}
+		return acquisitionCommandError(acquisition, "key_provider_process_list_unavailable",
+			"当前环境无法枚举 macOS 进程，无法确认或读取微信进程",
+			"请在普通 macOS Terminal 中重试，或确认当前运行环境允许读取进程列表；这不等同于微信未运行。")
 	case "process_access_denied":
 		if acquisition.Platform != "darwin" {
-			return &commandError{
-				typeName: "key_provider_permission_denied", message: "密钥提供器无法读取目标进程",
-				hint: "请确认当前用户有权读取微信进程，并重新运行 setup。", code: 5,
-			}
+			return acquisitionCommandError(acquisition, "key_provider_permission_denied", "密钥提供器无法读取目标进程",
+				"请确认当前用户有权读取微信进程，并重新运行 setup。")
 		}
 		if acquisition.HelperStatus == "not_installed" {
-			return &commandError{
-				typeName: "key_provider_helper_missing", message: "macOS 未允许直接读取微信，且自动 helper 未安装",
-				hint: "运行一次 npx @zanescope/v-local-key-provider@latest install；安装器会同时配置 helper，然后重新运行 setup。", code: 5,
-			}
+			return acquisitionCommandError(acquisition, "key_provider_helper_missing", "macOS 未允许直接读取微信，且自动 helper 未安装",
+				"运行一次 npx @zanescope/v-local-key-provider@latest install；安装器会同时配置 helper，然后重新运行 setup。")
 		}
 		if acquisition.HelperStatus == "launch_failed" || acquisition.HelperStatus == "response_failed" {
-			return &commandError{
-				typeName: "key_provider_helper_failed", message: "macOS 自动 helper 未能正常启动",
-				hint: "重新运行一次 npx @zanescope/v-local-key-provider@latest install，然后重新运行 setup。", code: 5,
-			}
+			return acquisitionCommandError(acquisition, "key_provider_helper_failed", "macOS 自动 helper 未能正常启动",
+				"重新运行一次 npx @zanescope/v-local-key-provider@latest install，然后重新运行 setup。")
 		}
-		return &commandError{
-			typeName: "key_provider_permission_denied", message: "macOS 未允许已安装的 helper 读取微信进程",
-			hint: "保持微信登录；Provider 会自动尝试普通 helper，失败时再请求一次管理员授权，无需手工运行 helper 或处理候选文件。", code: 5,
-		}
+		return acquisitionCommandError(acquisition, "key_provider_permission_denied", "macOS 未允许已安装的 helper 读取微信进程",
+			"保持微信登录；Provider 会自动尝试普通 helper，失败时再请求一次管理员授权，无需手工运行 helper 或处理候选文件。")
 	case "sip_required":
-		return &commandError{
-			typeName: "key_provider_sip_required", message: "macOS 的 SIP 仍开启，未能以兼容模式读取微信进程",
-			hint: "无 Developer ID 的兼容模式需要你在恢复模式临时关闭 SIP；回到桌面后先运行本次 setup，保持终端窗口运行，看到命令尚未返回提示符时，从“应用程序”打开微信并完成登录。CLI/Provider 不会自动修改 SIP，也不会自动启动、退出或重启微信。如果不希望更改系统安全设置，请改用 --keys FILE 导入已取得的候选。", code: 5,
-		}
+		return acquisitionCommandError(acquisition, "key_provider_sip_required", "标准路线不可用，更高优先级的 Shadow 路线已到达不可用终态，可选择 macOS SIP fallback",
+			"当前 Shadow 状态必须是未在本构建实现、目标不支持或已经实际失败之一；未实现状态绝不能伪装成实际运行失败。若接受风险，按提示在恢复模式临时关闭 SIP。CLI/Provider 不会自动修改 SIP，也不会自动启动、退出或重启微信。当前 daemon session 已结束；重启后先运行 v-local-cli status，再重新运行 setup --allow-key-access（不要携带旧 --confirm-key-action）。新 session 会重新验证 SIP、进程、账号、Catalog 和二进制。若不接受该变更，请停止流程或改用 --keys FILE。")
+	case "shadow_approval_required":
+		return acquisitionCommandError(acquisition, "key_provider_shadow_approval_required", "标准路径不可用，Provider 请求用户决定是否进入 Shadow 模式",
+			"阅读风险说明并手工完成 Shadow 准备；旧 daemon session 已结束。完成后重新运行 setup --allow-key-access，不要把旧确认参数带入新 session。")
+	case "sip_restoration_required":
+		return acquisitionCommandError(acquisition, "key_provider_sip_restoration_required", "密钥流程已要求恢复 macOS SIP",
+			"立即进入恢复环境重新开启 SIP 并重启；随后运行 v-local-cli status 查看 checkpoint，再重新运行 setup --allow-key-access，且不要携带旧 --confirm-key-action。CLI 将只请求一次系统姿态复核，不会再次启动 helper、hook 或进程扫描；机器证据确认 SIP 已恢复后工作流才整体完成。")
 	case "hook_trigger_required":
-		return &commandError{
-			typeName: "key_provider_hook_trigger_required", message: "动态捕获已安装，但微信尚未触发数据库调用",
-			hint: "当前数据库已经打开，普通切换会话不一定重新触发。请先完全退出微信，再启动下一次 setup；保持终端窗口运行，看到命令尚未返回提示符时，从“应用程序”重新打开微信并完成账号登录。CLI/Provider 不会自动启动或重启微信，也不需要手工运行 helper 或 lldb。", code: 5,
-		}
+		return acquisitionCommandError(acquisition, "key_provider_hook_trigger_required", "动态捕获已安装，但微信尚未触发数据库调用",
+			"按 next_action 打开一条只读数据库页面，然后在 15 分钟 session 内重新运行 setup，并显式传入 --confirm-key-action trigger_database；若拒绝该动作但要保留已验真的 partial，传 --confirm-key-action stop_and_report。")
 	case "hook_restart_required":
-		return &commandError{
-			typeName: "key_provider_hook_restart_required", message: "微信需要在动态捕获前重新打开数据库",
-			hint: "请先完全退出微信，再启动下一次 setup；保持终端窗口运行，看到命令尚未返回提示符时，从“应用程序”重新打开微信并完成账号登录。CLI/Provider 不会自动启动或重启微信，也不需要手工运行 helper 或 lldb。", code: 5,
-		}
+		return acquisitionCommandError(acquisition, "key_provider_hook_restart_required", "微信需要在动态捕获前重新打开数据库",
+			"保存前台工作并确认影响后，只重启绑定的微信进程，再在 15 分钟 session 内重新运行 setup，并显式传入 --confirm-key-action restart_wechat；CLI 不会自动终止进程。若拒绝该动作但要保留已验真的 partial，传 --confirm-key-action stop_and_report。")
+	case "action_confirmation_mismatch":
+		return acquisitionCommandError(acquisition, "key_provider_action_confirmation_mismatch", "确认的 acquisition 动作与 Provider 当前待处理状态不匹配",
+			"只确认错误详情 next_action 指定的动作；不要复用旧 session 的确认参数，也不要用该参数确认 Shadow 或 SIP 变更。")
 	case "deadline_exhausted":
-		return &commandError{
-			typeName: "key_provider_timeout", message: "密钥候选扫描在时限内未完成",
-			hint: "保持微信登录并打开一条新消息后重新运行同一条 setup 命令。", code: 5,
-		}
+		return acquisitionCommandError(acquisition, "key_provider_timeout", "密钥候选扫描在时限内未完成",
+			"保持微信登录并打开一条新消息后重新运行同一条 setup 命令。")
+	case "account_mismatch":
+		return acquisitionCommandError(acquisition, "key_provider_account_mismatch", "当前微信会话不是目标数据库所属账号",
+			"切换到目标账号后按 Provider 指示显式确认 switch_to_target_account；在机器证据验证前不要保存或合并当前进程返回的候选。")
+	case "relogin_required":
+		return acquisitionCommandError(acquisition, "key_provider_relogin_required", "目标版本只在登录阶段触发所需派生",
+			"确认扫码/MFA 和会话影响后，按 Provider 指示重新登录目标账号并显式确认 relogin_wechat；拒绝该动作但要保留已验真的 partial 时传 stop_and_report。")
+	case "ambiguous":
+		return acquisitionCommandError(acquisition, "key_provider_ambiguous", "多个候选或 profile 形成歧义，无法安全自动选择",
+			"停止自动重试并保留诊断；确认微信版本、账号和 catalog 没有变化后再重新获取。")
+	case "validator_conflict":
+		return acquisitionCommandError(acquisition, "key_provider_validator_conflict", "同一数据库和 profile 出现多个不同 key 通过 HMAC，验证结果不可信",
+			"停止重试且不要发布本次候选；保留脱敏诊断，检查文件是否漂移、profile registry 和首页 HMAC 实现后再继续。")
+	case "unsupported":
+		return acquisitionCommandError(acquisition, "key_provider_unsupported", "当前微信版本、架构或二进制指纹没有受支持的获取路径",
+			"查看 provider status 和版本诊断；不要自动降级微信或扩大内存扫描范围。")
 	default:
-		return &commandError{
-			typeName: "key_provider_no_candidates", message: "没有找到通过本地样本验证的密钥候选",
-			hint: "保持微信登录并打开一条新消息后重新运行同一条 setup 命令。", code: 5,
-		}
+		return acquisitionCommandError(acquisition, "key_provider_no_candidates", "没有找到通过本地样本验证的密钥候选",
+			"保持微信登录并打开一条新消息后重新运行同一条 setup 命令。")
 	}
 }
 
@@ -1043,9 +1422,12 @@ func runSetup(args []string) (any, error) {
 	set := flag.NewFlagSet("setup", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
 	dryRun := set.Bool("dry-run", false, "只运行预检")
-	accountName := set.String("account", "", "账号目录名或唯一子串")
+	cancelAcquisition := set.Bool("cancel-acquisition", false, "取消当前账号未完成的密钥获取会话")
+	cancelAllExternalWorkflows := set.Bool("cancel-all-external-workflows", false, "只清理全部跨重启密钥工作流 checkpoint")
+	accountName := set.String("account", "", "account_id、账号目录名或唯一子串")
 	providerPath := set.String("provider", "", "显式指定密钥提供器路径")
 	allowKeyAccess := set.Bool("allow-key-access", false, "明确授权调用独立密钥提供器")
+	confirmKeyAction := set.String("confirm-key-action", "", "明确确认 Provider 当前请求的动作；stop_and_report 结束并保留已验真的 partial")
 	keysFile := set.String("keys", "", "读取用户已有的候选 JSON 文件")
 	storage := set.String("storage", "keychain", "keychain 或 snapshot-only")
 	databaseOnly := set.Bool("database-only", false, "明确只获取和保存数据库密钥，不启用图片能力")
@@ -1064,16 +1446,67 @@ func runSetup(args []string) (any, error) {
 	if *keysFile != "" && *allowKeyAccess {
 		return nil, invalidArguments("--keys 与 --allow-key-access 不能同时使用")
 	}
+	if *confirmKeyAction != "" && (!*allowKeyAccess || *keysFile != "" || *dryRun || *cancelAcquisition) {
+		return nil, invalidArguments("--confirm-key-action 只能与 --allow-key-access 的 acquisition 恢复流程一起使用")
+	}
+	if *cancelAcquisition && (*dryRun || *keysFile != "" || *allowKeyAccess || *databaseOnly || *requireMedia || *allowCoverageRegression || *confirmKeyAction != "") {
+		return nil, invalidArguments("--cancel-acquisition 不能与 dry-run、候选获取或快照发布选项同时使用")
+	}
+	if *cancelAllExternalWorkflows {
+		if *dryRun || *cancelAcquisition || *accountName != "" || *providerPath != "" || *keysFile != "" || *allowKeyAccess || *databaseOnly ||
+			*requireMedia || *allowCoverageRegression || *confirmKeyAction != "" || *showPaths || *storage != "keychain" {
+			return nil, invalidArguments("--cancel-all-external-workflows 必须单独使用")
+		}
+		acquisitionRoot, rootErr := state.AcquisitionRoot()
+		if rootErr != nil {
+			return nil, &commandError{typeName: "private_state_unavailable", message: "无法访问跨重启密钥工作流私有目录", hint: privateStateError(rootErr), code: 5}
+		}
+		removed, clearErr := provider.ClearExternalCheckpoints(acquisitionRoot)
+		if clearErr != nil {
+			return nil, &commandError{typeName: "external_workflow_cleanup_failed", message: "无法清理跨重启密钥工作流 checkpoint", hint: "检查当前用户私有状态目录的权限后重试。", code: 5}
+		}
+		return map[string]any{"status": "cancelled", "external_checkpoint_files_removed": removed, "other_private_state_preserved": true}, nil
+	}
 	account, err := selectLocalAccount(*accountName)
 	if err != nil {
 		return nil, err
 	}
+	if *cancelAcquisition {
+		acquisitionRoot, rootErr := state.AcquisitionRoot()
+		if rootErr != nil {
+			return nil, &commandError{typeName: "private_state_unavailable", message: "无法访问密钥获取会话的私有状态目录", hint: privateStateError(rootErr), code: 5}
+		}
+		cancelled, cancelErr := provider.CancelAcquisition(context.Background(), *providerPath, account, acquisitionRoot)
+		if errors.Is(cancelErr, provider.ErrComponentMissing) {
+			return nil, &commandError{typeName: "key_acquisition_component_missing", message: "未安装可选的密钥获取组件", hint: "安装 Provider 后再管理 acquisition session。", code: 4}
+		}
+		if cancelErr != nil {
+			return nil, &commandError{typeName: "key_provider_cancel_failed", message: "无法清理密钥获取会话", hint: "检查当前用户私有状态目录后重试。", code: 5}
+		}
+		status := "no_active_session"
+		if cancelled {
+			status = "cancelled"
+		}
+		return map[string]any{"status": status, "account_id": state.AccountID(account.Path), "secrets_persisted": false}, nil
+	}
 	if *dryRun {
+		externalWorkflows, workflowErr := publicExternalKeyWorkflows()
+		if workflowErr != nil {
+			return nil, &commandError{typeName: "external_workflow_state_invalid", message: "无法读取跨重启密钥工作流 checkpoint", hint: "checkpoint 不是动作授权；对当前账号执行 setup --cancel-acquisition 清理后，从新 session 重新开始。", code: 5}
+		}
+		accountID := state.AccountID(account.Path)
+		pendingForAccount := make([]map[string]any, 0)
+		for _, workflow := range externalWorkflows {
+			if workflow["account_id"] == accountID {
+				pendingForAccount = append(pendingForAccount, workflow)
+			}
+		}
 		return map[string]any{
 			"status": "planned", "account": publicLocalAccount(account, *showPaths), "key_provider": publicProviderStatus(provider.Current(*providerPath), *showPaths),
 			"key_access_authorized": false, "process_access_performed": false,
 			"secrets_persisted": false, "storage": *storage, "database_only": *databaseOnly, "media_required": !*databaseOnly, "paths_included": *showPaths,
 			"prevents_coverage_regression": !*allowCoverageRegression,
+			"external_key_workflows":       pendingForAccount,
 		}, nil
 	}
 	lock, err := acquireSnapshotTransaction(state.AccountID(account.Path))
@@ -1093,11 +1526,18 @@ func runSetup(args []string) (any, error) {
 		if !*allowKeyAccess {
 			return nil, &commandError{typeName: "key_access_not_authorized", message: "尚未授权读取本机微信进程中的密钥候选", hint: "确认风险后传入 --allow-key-access，或使用 --keys FILE。", code: 3}
 		}
-		scopes := []string{"database", "image"}
+		scopes := []string{"database", "media"}
 		if *databaseOnly {
 			scopes = []string{"database"}
 		}
-		bundle, err = provider.AcquireScopes(context.Background(), *providerPath, account, scopes)
+		acquisitionRoot, rootErr := state.AcquisitionRoot()
+		if rootErr != nil {
+			return nil, &commandError{
+				typeName: "private_state_unavailable", message: "无法创建密钥获取会话的私有状态目录",
+				hint: privateStateError(rootErr), code: 5,
+			}
+		}
+		bundle, err = provider.AcquireScopesWithRootAndAction(context.Background(), *providerPath, account, scopes, acquisitionRoot, *confirmKeyAction)
 		if errors.Is(err, provider.ErrComponentMissing) {
 			return nil, &commandError{
 				typeName: "key_acquisition_component_missing",
@@ -1106,9 +1546,30 @@ func runSetup(args []string) (any, error) {
 				code:     4,
 			}
 		}
+		if errors.Is(err, provider.ErrComponentUntrusted) {
+			return nil, &commandError{
+				typeName: "key_acquisition_component_untrusted",
+				message:  "密钥获取组件未通过发行版路径或签名验证",
+				hint:     "重新运行官方 @zanescope/v-local-key-provider 安装器；发行版不接受 --provider、V_LOCAL_CLI_KEY_PROVIDER 或未签名替代文件。也可用 setup --keys FILE 导入自备候选。",
+				code:     4,
+			}
+		}
 		if err != nil {
 			return nil, keyProviderCommandError(err)
 		}
+	}
+	if isLiveProviderSecurityPostureRevalidation(credentialSource, bundle) {
+		return map[string]any{
+			"status":                              "security_restored",
+			"account_id":                          state.AccountID(account.Path),
+			"security_posture_status":             "sip_enabled_verified",
+			"external_checkpoint_status":          "cleared",
+			"machine_revalidation_completed":      true,
+			"acquisition_repeated":                false,
+			"process_access_performed":            false,
+			"secrets_written_this_run":            false,
+			"existing_verified_results_preserved": true,
+		}, nil
 	}
 	if *databaseOnly {
 		bundle.ImageKeys = nil
@@ -1390,12 +1851,13 @@ func runSearch(args []string, immutableOnly bool) (any, error) {
 		return nil, indexErr
 	}
 	items := indexed.Items
-	coverage := indexed.Coverage
-	if available, _ := coverage["available"].(bool); !available {
+	searchBackendStatus := indexed.Coverage
+	if present, _ := searchBackendStatus["index_present"].(bool); !present {
 		items, err = store.SearchWindow(value.SnapshotPath, set.Args()[0], resolvedChat, window.StartTimestamp, window.EndTimestamp, effectiveLimit)
-		coverage = map[string]any{
-			"source": "local_plaintext_snapshot", "backend": "decoded_scan", "complete": false,
-			"generation_index": indexed.Coverage,
+		searchBackendStatus = map[string]any{
+			"source": "local_plaintext_snapshot", "backend": "decoded_scan",
+			"index_present": false, "index_valid": false, "message_coverage_status": "partial",
+			"message_scan_status": "fallback", "generation_index_status": indexed.Coverage,
 		}
 	}
 	if err == nil {
@@ -1403,7 +1865,7 @@ func runSearch(args []string, immutableOnly bool) (any, error) {
 	}
 	data := map[string]any{
 		"account": value.AccountName, "query": set.Args()[0], "chat": resolvedChat,
-		"items": items, "count": len(items), "coverage": coverage,
+		"items": items, "count": len(items), "search_backend_status": searchBackendStatus,
 	}
 	return withGeneration(outputWithQueryMetadata(data, window, true, effectiveLimit, limitExplicit), value), err
 }
@@ -1512,7 +1974,7 @@ func runMoments(args []string) (any, error) {
 		return nil, err
 	}
 	attachMomentMedia(&report, value, *resolveMedia)
-	data := map[string]any{"account": value.AccountName, "contact": username, "items": report.Items, "count": len(report.Items), "coverage": report.Coverage}
+	data := map[string]any{"account": value.AccountName, "contact": username, "items": report.Items, "count": len(report.Items), "moment_source_coverage": report.Coverage}
 	return withGeneration(outputWithQueryMetadata(data, window, true, effectiveLimit, limitExplicit), value), nil
 }
 
@@ -1551,7 +2013,7 @@ func runMomentSearch(args []string) (any, error) {
 	attachMomentMedia(&report, value, *resolveMedia)
 	data := map[string]any{
 		"account": value.AccountName, "query": set.Args()[0], "contact": *contact,
-		"items": report.Items, "count": len(report.Items), "coverage": report.Coverage,
+		"items": report.Items, "count": len(report.Items), "moment_source_coverage": report.Coverage,
 	}
 	return withGeneration(outputWithQueryMetadata(data, window, true, effectiveLimit, limitExplicit), value), nil
 }
@@ -1606,7 +2068,7 @@ func runOfficialHistory(args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	data := map[string]any{"account": value.AccountName, "publisher": publisher, "items": report.Items, "count": len(report.Items), "coverage": report.Coverage}
+	data := map[string]any{"account": value.AccountName, "publisher": publisher, "items": report.Items, "count": len(report.Items), "official_source_coverage": report.Coverage}
 	return withGeneration(outputWithQueryMetadata(data, window, true, effectiveLimit, limitExplicit), value), nil
 }
 
@@ -1643,7 +2105,7 @@ func runOfficialSearch(args []string) (any, error) {
 	}
 	data := map[string]any{
 		"account": value.AccountName, "query": set.Args()[0], "publisher": *publisher,
-		"items": report.Items, "count": len(report.Items), "coverage": report.Coverage,
+		"items": report.Items, "count": len(report.Items), "official_source_coverage": report.Coverage,
 	}
 	return withGeneration(outputWithQueryMetadata(data, window, true, effectiveLimit, limitExplicit), value), nil
 }
@@ -1700,6 +2162,63 @@ func runExportMedia(args []string) (any, error) {
 		return nil, err
 	}
 	return outputWithGeneration(map[string]any{"input": set.Args()[0], "output": target, "format": format, "bytes": len(plain)}, value), nil
+}
+
+func runExportChatImage(args []string) (any, error) {
+	set := flag.NewFlagSet("export-chat-image", flag.ContinueOnError)
+	set.SetOutput(io.Discard)
+	account := set.String("account", "", "已初始化账号")
+	output := set.String("output", "", "输出文件")
+	force := set.Bool("force", false, "覆盖已存在的输出文件")
+	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *output == "" {
+		return nil, invalidArguments("用法：v-local-cli export-chat-image --output FILE [--account NAME] [--force] <image_evidence_id>")
+	}
+	value, err := resolveInitializedAccount(*account)
+	if err != nil {
+		return nil, err
+	}
+	target, err := prepareOutputTarget(*output, *force)
+	if err != nil {
+		return nil, err
+	}
+	bundle, _, err := state.LoadSecretsOptional(value.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	aesKey, xorKey := "", 0
+	if bundle.ImageKeys != nil {
+		aesKey, xorKey = bundle.ImageKeys.AES, bundle.ImageKeys.XOR
+	}
+	image, err := store.ResolveChatImage(value.SnapshotPath, value.AccountPath, set.Args()[0], aesKey, xorKey)
+	if err != nil {
+		return nil, &commandError{
+			typeName: "chat_image_unavailable", message: "无法从本地资源中验真这条聊天图片",
+			hint:    "先在微信中打开原图，运行 refresh --require-media 后，使用当前 generation 的 image evidence_id 重试。",
+			details: map[string]any{"reason": err.Error(), "network_access_performed": false}, code: 5,
+		}
+	}
+	defer clear(image.Data)
+	temporary, err := writeTemporaryFileNear(target, image.Data)
+	if err != nil {
+		return nil, err
+	}
+	if *force {
+		err = publishFile(temporary, target)
+	} else {
+		err = publishNewFile(temporary, target)
+	}
+	if err != nil {
+		if !*force && os.IsExist(err) {
+			return nil, outputExistsError()
+		}
+		return nil, err
+	}
+	return outputWithGeneration(map[string]any{
+		"evidence_id": image.EvidenceID, "output": target, "format": image.Format,
+		"bytes": image.Bytes, "width": image.Width, "height": image.Height, "sha256": image.SHA256,
+		"verified_by": image.VerifiedBy, "container_validation": "full_decode",
+		"source": "verified_local_chat_image", "network_access_performed": false,
+	}, value), nil
 }
 
 func momentMediaCommandError(err error) error {
@@ -2072,8 +2591,8 @@ func commandSchemas() map[string]any {
 		"provider":          map[string]any{"usage": "v-local-cli provider status [--path FILE] [--show-paths]", "read_only": true, "paths_default": "redacted"},
 		"install":           map[string]any{"usage": "v-local-cli install [--dry-run] [--skip-skill] [--show-paths]", "installs_bundled_skill": true, "external_installer": false},
 		"doctor":            map[string]any{"usage": "v-local-cli doctor [--provider FILE] [--show-paths] [--bundle FILE] [--force]", "read_only_without_bundle": true, "paths_default": "redacted", "bundle_sanitized": true},
-		"capabilities":      map[string]any{"usage": "v-local-cli capabilities", "read_only": true, "separates_build_and_data_layout_validation": true},
-		"setup":             map[string]any{"usage": setupUsage, "reads_process_only_with_authorization": true, "account_lock": true, "prevents_coverage_regression": true, "storage_values": []string{"keychain", "snapshot-only"}, "media_validation_default_required": true, "database_only_opt_out": true, "paths_default": "redacted"},
+		"capabilities":      map[string]any{"usage": "v-local-cli capabilities", "read_only": true, "real_device_claims_require_embedded_evidence": true},
+		"setup":             map[string]any{"usage": setupUsage, "reads_process_only_with_authorization": true, "explicit_action_confirmation": true, "action_confirmation_option": "--confirm-key-action", "partial_finalize_action": "stop_and_report", "account_lock": true, "prevents_coverage_regression": true, "storage_values": []string{"keychain", "snapshot-only"}, "media_validation_default_required": true, "database_only_opt_out": true, "paths_default": "redacted", "external_workflow_cleanup_option": "--cancel-all-external-workflows", "external_workflow_cleanup_scope": "checkpoint_files_only"},
 		"refresh":           map[string]any{"usage": "v-local-cli refresh [--account NAME] [--require-media]", "reads_saved_keychain": true, "reads_process": false, "network": false, "writes_snapshot": true, "modifies_saved_secrets": false, "account_lock": true, "prevents_coverage_regression": true},
 		"forget":            map[string]any{"usage": "v-local-cli forget --account NAME [--dry-run | --yes]", "destructive": true, "requires_confirmation": true},
 		"gc":                map[string]any{"usage": "v-local-cli gc [--account NAME] [--dry-run]", "retains_current_and_previous_generation": true},
@@ -2106,6 +2625,7 @@ func commandSchemas() map[string]any {
 		"official-article":  map[string]any{"usage": "v-local-cli official-article [--account NAME] [--fresh] [--allow-network] <publication_evidence_id>", "read_only": true, "fresh_snapshot": true, "network_default": false, "network_requires_flag": "allow-network", "destination": "mp.weixin.qq.com", "redirects": false, "cookies": false, "tun_fake_ip_dns_fallback": false, "content_level": "remote_article_plain_text"},
 		"export":            map[string]any{"usage": "v-local-cli export --output FILE [--format json|jsonl] [--account NAME] [--fresh] [--chat USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--force] <history|search> <值>", "fresh_snapshot": true, "writes_output": true, "output_exists_default": "reject", "all_without_limit": "unbounded"},
 		"export-media":      map[string]any{"usage": "v-local-cli export-media --output FILE [--account NAME] [--fresh] [--force] <input.dat>", "fresh_snapshot": true, "writes_output": true, "output_exists_default": "reject"},
+		"export-chat-image": map[string]any{"usage": "v-local-cli export-chat-image --output FILE [--account NAME] [--fresh] [--force] <image_evidence_id>", "fresh_snapshot": true, "writes_output": true, "output_exists_default": "reject", "evidence_binding": "message_resource_stem+hardlink_map", "container_validation": "full_decode", "network": false},
 		"export-moment-media": map[string]any{
 			"usage":                 "v-local-cli export-moment-media --output FILE [--account NAME] [--fresh] [--allow-network] [--force] <media_evidence_id>",
 			"fresh_snapshot":        true,
@@ -2164,7 +2684,7 @@ func writeHelp(writer io.Writer) {
 		"history", "search", "voice-status", "voice-transcribe", "voice-search", "ocr-status", "ocr-file",
 		"ocr-recognize", "ocr-read", "ocr-search", "stats", "moments-contacts", "moments", "moments-search",
 		"official-accounts", "official-history", "official-search", "official-article", "export", "export-media",
-		"export-moment-media", "schema",
+		"export-chat-image", "export-moment-media", "schema",
 	}
 	commands := commandSchemas()
 	for _, name := range order {

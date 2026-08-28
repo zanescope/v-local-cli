@@ -33,7 +33,7 @@ func TestSessionsUnreadAndStructuredSummary(t *testing.T) {
 	if report.Items[0].Username != "alice" || report.Items[0].Display != "阿丽" || report.Items[0].UnreadCount != 2 || report.Items[0].LastSummary != "你好" {
 		t.Fatalf("session 字段异常：%+v", report.Items[0])
 	}
-	if report.Coverage["complete"] != true {
+	if report.Coverage["status"] != "complete" {
 		t.Fatalf("session coverage 异常：%v", report.Coverage)
 	}
 	official, err := Sessions(root, false, "official", 20)
@@ -59,7 +59,7 @@ func TestMembersPreferNormalizedTable(t *testing.T) {
 	if err != nil || len(report.Items) != 2 {
 		t.Fatalf("members 异常：report=%+v err=%v", report, err)
 	}
-	if report.Coverage["complete"] != true || report.Coverage["method"] != "chatroom_member_table" || !report.Items[0].IsOwner || report.Items[0].Username != "alice" {
+	if report.Coverage["status"] != "complete" || report.Coverage["method"] != "chatroom_member_table" || !report.Items[0].IsOwner || report.Items[0].Username != "alice" {
 		t.Fatalf("members coverage/owner 异常：%+v", report)
 	}
 }

@@ -21,7 +21,7 @@ type GroupMember struct {
 type MemberReport struct {
 	Chat     string         `json:"chat"`
 	Items    []GroupMember  `json:"items"`
-	Coverage map[string]any `json:"coverage"`
+	Coverage map[string]any `json:"member_source_coverage"`
 }
 
 type protoGroupMember struct {
@@ -184,7 +184,7 @@ func Members(root, chat string) (MemberReport, error) {
 		if values, ok := normalizedMembers(database, roomID, owner, groupNames); ok {
 			_ = database.Close()
 			report.Items = values
-			report.Coverage = map[string]any{"complete": true, "method": "chatroom_member_table", "observed_only": false}
+			report.Coverage = map[string]any{"status": "complete", "method": "chatroom_member_table", "observed_only": false}
 			sortMembers(report.Items)
 			return report, nil
 		}
@@ -197,7 +197,7 @@ func Members(root, chat string) (MemberReport, error) {
 				}
 				report.Items = append(report.Items, memberValue(contact, raw.Display, owner, false))
 			}
-			report.Coverage = map[string]any{"complete": true, "method": "chat_room_ext_buffer", "observed_only": false}
+			report.Coverage = map[string]any{"status": "complete", "method": "chat_room_ext_buffer", "observed_only": false}
 			sortMembers(report.Items)
 			return report, nil
 		}
@@ -219,7 +219,7 @@ func Members(root, chat string) (MemberReport, error) {
 		}
 		report.Items = append(report.Items, memberValue(contact, message.SenderGroupNickname, "", true))
 	}
-	report.Coverage = map[string]any{"complete": false, "method": "observed_message_senders", "observed_only": true}
+	report.Coverage = map[string]any{"status": "partial", "method": "observed_message_senders", "observed_only": true}
 	sortMembers(report.Items)
 	return report, nil
 }

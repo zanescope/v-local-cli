@@ -16,6 +16,7 @@ async function main() {
   assert.ok(fs.statSync(binary).isFile());
   skillStager.stageSkill();
   process.env.V_LOCAL_CLI_BINARY_PATH = binary;
+  process.env.V_LOCAL_CLI_DEVELOPMENT = '1';
   process.env.V_LOCAL_CLI_ALLOW_UNVERIFIED_LOCAL_BINARY = '1';
   process.env.V_LOCAL_CLI_AGENT_SKILL_HOME = path.join(installationRoot, 'agents');
   process.env.V_LOCAL_CLI_SKILL_HOME = path.join(installationRoot, 'codex');

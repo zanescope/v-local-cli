@@ -9,7 +9,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	// 用内存钥匙串，避免依赖 CI runner（尤其 Linux）上不存在的系统凭据服务。
+	// 使用内存钥匙串，避免依赖 CI 运行环境（尤其是 Linux）中不存在的系统凭据服务。
 	keyring.MockInit()
 	os.Exit(m.Run())
 }

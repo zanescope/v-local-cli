@@ -14,7 +14,7 @@ async function main() {
     packageRoot, 'bin', `${selected.platform}-${selected.arch}`, selected.binary,
   );
   if (!fs.existsSync(binary)) await installer.install();
-  if (process.env.V_LOCAL_CLI_ALLOW_UNVERIFIED_LOCAL_BINARY !== '1') {
+  if (!installer.allowUnverifiedLocalBinary()) {
     installer.verifyHash(binary, installer.expectedChecksum(selected));
   }
   const result = spawnSync(binary, process.argv.slice(2), {

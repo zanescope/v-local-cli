@@ -180,3 +180,138 @@ func TestCommitStateFileRestoresOldStateWhenPublishFails(t *testing.T) {
 		t.Fatalf("rollback backup should have returned to current path: %v", statErr)
 	}
 }
+
+func TestDaemonControlLockIDDoesNotDependOnWorkingDirectory(t *testing.T) {
+	first := DaemonControlLockID()
+	if !validAccountID(first) {
+		t.Fatalf("daemon 控制锁标识不是合法的锁标识：%q", first)
+	}
+	t.Chdir(t.TempDir())
+	if second := DaemonControlLockID(); second != first {
+		t.Fatalf("daemon 控制锁标识随工作目录变化：%q != %q", first, second)
+	}
+}
+
+// 状态文件因版本不符或损坏读不出来时，账号目录、快照和系统凭据其实都还在。List 会
+// 静默跳过这类账号，doctor 据此断言 account_state_readable，因此必须有独立信号。
+func TestListWithUnreadableReportsAccountsThisBuildCannotRead(t *testing.T) {
+	home := testHome(t)
+	t.Setenv("V_LOCAL_CLI_HOME", home)
+	save := func(name string) string {
+		t.Helper()
+		accountID := AccountID(name)
+		snapshot := filepath.Join(home, "accounts", accountID, "snapshots", "generation")
+		if err := os.MkdirAll(snapshot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		value := AccountState{
+			AccountID: accountID, AccountName: name, SnapshotPath: snapshot,
+			GenerationID: "generation", Storage: "snapshot-only",
+		}
+		if err := Save(&value); err != nil {
+			t.Fatal(err)
+		}
+		return accountID
+	}
+	readableID := save("readable-account")
+	staleID := save("stale-account")
+
+	// 模拟上一版本写下的状态文件。
+	stalePath, err := StatePath(staleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(stalePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["version"] = stateVersion + 1
+	bumped, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stalePath, bumped, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(stalePath + ".old"); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+
+	values, unreadable, err := ListWithUnreadable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values[0].AccountID != readableID {
+		t.Fatalf("可读账号没有被正常列出：%+v", values)
+	}
+	if len(unreadable) != 1 || unreadable[0] != staleID {
+		t.Fatalf("当前构建读不出来的账号没有被报告：%v", unreadable)
+	}
+}
+
+func TestLoadReplacementBaselineAcceptsOnlySecureVersionMismatch(t *testing.T) {
+	home := testHome(t)
+	t.Setenv("V_LOCAL_CLI_HOME", home)
+	accountID := AccountID("replacement-account")
+	snapshot := filepath.Join(home, "accounts", accountID, "snapshots", "generation")
+	if err := os.MkdirAll(snapshot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	value := AccountState{
+		AccountID: accountID, AccountName: "replacement", SnapshotPath: snapshot,
+		GenerationID: "generation", Storage: "snapshot-only",
+	}
+	if err := Save(&value); err != nil {
+		t.Fatal(err)
+	}
+	path, err := StatePath(accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["version"] = stateVersion + 1
+	write := func() {
+		t.Helper()
+		encoded, encodeErr := json.Marshal(raw)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		if writeErr := os.WriteFile(path, encoded, 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	write()
+	if err := os.Remove(path + ".old"); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if _, err := Load(accountID); err == nil {
+		t.Fatal("严格状态加载接受了版本不匹配状态")
+	}
+	baseline, err := LoadReplacementBaseline(accountID)
+	if err != nil || baseline.SnapshotPath != snapshot {
+		t.Fatalf("安全的替换基线未被接受：state=%+v err=%v", baseline, err)
+	}
+
+	raw["account_id"] = AccountID("other-account")
+	write()
+	if _, err := LoadReplacementBaseline(accountID); err == nil {
+		t.Fatal("替换基线接受了账号绑定不匹配状态")
+	}
+	raw["account_id"] = accountID
+	raw["snapshot_path"] = filepath.Join(home, "outside")
+	write()
+	if _, err := LoadReplacementBaseline(accountID); err == nil {
+		t.Fatal("替换基线接受了越界快照路径")
+	}
+}

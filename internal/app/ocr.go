@@ -73,8 +73,8 @@ func runOCRStatus(args []string) (any, error) {
 	}
 	return outputWithGeneration(map[string]any{
 		"account": value.AccountName, "backend": "wechat_index_probe+v-local-cli_private_cache",
-		"available":          cacheRows > 0 || status.ImageIndexedRows > 0,
-		"private_cache_rows": cacheRows, "wechat_index_probe_rows": status.ImageIndexedRows,
+		"cached_text_present": cacheRows > 0 || status.ImageIndexedRows > 0,
+		"private_cache_rows":  cacheRows, "wechat_index_probe_rows": status.ImageIndexedRows,
 		"wechat_index_tables": status.ImageIndexTables, "external_dependency": false,
 		"engine_invoked": false, "private_ipc_invoked": false, "network_performed": false,
 		"can_generate_new_results": native.Available, "native_experimental": native,
@@ -424,7 +424,7 @@ func runOCRSearch(args []string) (any, error) {
 	}
 	data := map[string]any{
 		"account": value.AccountName, "query": set.Args()[0], "chat": *chat, "items": items, "count": len(items),
-		"coverage": map[string]any{
+		"ocr_source_coverage": map[string]any{
 			"scope": "private_cache_first+wechat_index_probe", "private_cache_candidates": len(cached),
 			"private_cache_hits": len(items) - wechatHits, "stale_cache_removed": staleRemoved,
 			"wechat_probe_rows": status.ImageIndexedRows, "wechat_candidate_images_scanned": wechatCandidates,

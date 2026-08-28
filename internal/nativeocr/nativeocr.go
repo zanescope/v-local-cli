@@ -5,7 +5,7 @@ import "errors"
 var ErrUnsupported = errors.New("当前平台或微信版本不支持原生 OCR")
 
 type Status struct {
-	Available           bool   `json:"available"`
+	Available           bool   `json:"backend_ready"`
 	Platform            string `json:"platform"`
 	Architecture        string `json:"architecture"`
 	WeChatVersion       string `json:"wechat_version,omitempty"`

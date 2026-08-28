@@ -19,8 +19,8 @@ func craftWALWithCommitSize(page []byte, pageNumber, claimedPages uint32) []byte
 	binary.BigEndian.PutUint32(header[4:8], 3007000)
 	binary.BigEndian.PutUint32(header[8:12], SQLCipherPageSize)
 	binary.BigEndian.PutUint32(header[12:16], 1)
-	binary.BigEndian.PutUint32(header[16:20], 0x11223344) // salt-1
-	binary.BigEndian.PutUint32(header[20:24], 0x55667788) // salt-2
+	binary.BigEndian.PutUint32(header[16:20], 0x11223344) // 盐值 1
+	binary.BigEndian.PutUint32(header[20:24], 0x55667788) // 盐值 2
 	first, second, _ := walChecksum(header[:24], false, 0, 0)
 	binary.BigEndian.PutUint32(header[24:28], first)
 	binary.BigEndian.PutUint32(header[28:32], second)

@@ -1,10 +1,10 @@
 # v-local-cli
 
-> 面向 Agent 的本地微信（WeChat）只读查询工具。
+> 在自己电脑上查阅和导出微信数据的工具，也可以接入智能助手自动查询。
 
-单个 Go 二进制即可完成账号发现、密钥验证、只读快照、会话/未读/群成员/收藏、generation 全文索引、原子增量消息、联系人/聊天/搜索、语音转写与 OCR 读取、朋友圈与公众号查询、图片解密与导出，并可启动只服务 immutable generation 的本机查询 daemon。
+安装后只需一个程序，就能读取本机的微信聊天记录、联系人、群信息、收藏和未读消息，搜索历史聊天，转写语音，识别图片文字，浏览朋友圈和公众号文章，导出聊天记录和解密图片。
 
-项目仅供处理**本人拥有或已获明确授权访问**的数据。CLI 只读，不操作微信界面、不发送消息，普通查询不联网。
+**只读取、不修改**——不会操作微信界面、不会代发消息，普通查询不需要联网。仅供处理**自己拥有或已获得明确授权访问**的数据。
 
 ## 能做什么
 
@@ -20,11 +20,19 @@
 - **公众号** — 账号发现、图文历史、标题/摘要搜索；文章正文可以逐次授权访问 `mp.weixin.qq.com`。
 - **导出与解密** — 聊天导出为 JSON/JSONL，DAT 图片解密（v1/v2/v3）。
 
-**平台**：Windows、macOS、Linux 均可构建。微信桌面数据的验证目标目前是 Windows amd64 与 macOS amd64（Intel），两者都有真机真实数据证据。
+**平台**：Windows、macOS、Linux 均有构建目标。构建成功不等于微信版本、架构、Provider、OCR 或索引已通过真机验收；普通 `capabilities` 不内嵌签名 live evidence，因此会返回 `validation_evidence.status=not_embedded`。发布能力声明必须另附对应架构、版本和签名构建的真机证据，不能从其他架构或 mock 外推。
 
-macOS 上的 Provider 会自动使用同包安装的 companion helper，必要时走管理员授权兼容路径；访问微信进程可能需要用户临时关闭 SIP。Intel 真机上的自动获取密钥、快照与查询已完整走通，`darwin/amd64` 标记为 `real_device_verified`。
+Windows Provider 响应会由 CLI 再次校验目标进程实际架构、目标可执行文件/签名者摘要、
+精确兼容 registry、`Config.Cipher` 状态、账号路径分类、逐进程 collector 和 ordered fallback
+计数。未登记 fingerprint 不能宣称固定结构可用；不同进程的未经验证候选不能合并；Provider
+返回的结构化凭据还必须以本次 catalog key 对当前账号真实路径做 HMAC 绑定。当前 Windows
+amd64/arm64 都保持 `build_only`，直到对应架构的签名候选件和真实微信构建分别完成验收。
+候选 Provider 只可报告 `registry_candidate_entry + registry_exact_match` 供受控 live regression
+生成 evidence；发行 CLI 只接受额外带有 `real_device_evidence_present + release_promotion_verified`
+的精确匹配，因而未 promotion 的候选件不能冒充正式兼容声明。
+具体门禁见 [Windows 密钥获取真机与发布回归](references/windows-key-provider-acceptance.md)；本机 `windows/amd64` 的密钥、凭据复用、指定联系人历史/高清图、收藏和朋友圈端到端步骤见 [Windows amd64 本机真机验收](references/windows-amd64-local-acceptance.md)。
 
-Apple Silicon 与 Intel macOS 使用同一套授权流程，动态 Hook 会按实际微信进程选择 `arm64` 或 `x86_64` ABI：Apple Silicon 上的原生 arm64 微信，与通过 Rosetta 运行的 x86_64 微信，会走不同的寄存器路径。正因为寄存器路径不同，Intel 的验证结论不能外推到原生 arm64——`darwin/arm64` 在完成[真机验收](references/macos-acceptance.md)之前仍标记为 `build_only`，在该架构上导入候选文件是保留的可靠路径。微信原生 OCR 与微信已有的语音/OCR 文字索引在两种 macOS 架构上都仍不可用，只有 `windows/amd64` 有布局证据。
+macOS 上的 Provider 会自动使用同包安装的 companion helper。路由优先级固定为 `standard -> shadow -> sip_disabled`，但未实现的 Shadow 不是硬阻塞：当前 Provider 如实返回 `shadow_route_status=unavailable_in_build`，标准访问有机器失败证据且 SIP 已验证时，可以向用户提供较低优先级的 SIP fallback。候选 standard route 只以 `registry_candidate_entry` 标记用于 live regression；签名发行版还必须带外部 promotion 验证标记并命中内容寻址真机证据支持的精确 registry 条目。未知构建的通用符号路径只供 development 受控试验。未来 Shadow 通过签名和分架构真机验收后必须优先进入 `available/awaiting_approval`。SIP/Shadow 不能作为 daemon receipt 自动推进。Apple Silicon、Intel 与 Rosetta x86_64 必须按目标进程实际架构独立验收。具体门禁见 [macOS 真机验收](references/macos-acceptance.md)；候选文件导入路径不受影响。
 
 ## 安装
 
@@ -35,6 +43,8 @@ npx @zanescope/v-local-cli@latest install
 ```
 
 npm 包没有运行时依赖，只负责识别平台、从限定的 GitHub Release 下载 Go 二进制并校验 SHA-256，同时安装包内的 Agent Skill bundle（该 bundle 自带摘要清单）。
+
+正式密钥 Provider 由其独立 npm 安装器落到当前用户固定目录，而不是从 PATH 或任意 `--provider` 路径启动。发行 CLI 会在每次使用前复核 Provider/helper 的规范路径和平台签名，并把 acquisition daemon 的实际 PID image 绑定到同一组件；Windows 还要求 CLI 与 Provider 匹配编译期固定的 Authenticode 叶证书 SHA-256，macOS 要求固定 code identifier、Developer ID 和同一 Team ID。开发构建仍可显式覆盖组件路径，但发行构建会拒绝这些 override。
 
 源码构建只需要 Go——SQLite、zstd、SILK 解码与系统凭据库适配都在编译期进入二进制：
 
@@ -56,13 +66,16 @@ v-local-cli setup --allow-key-access --storage keychain
 #   没有安装外部密钥组件时，导入自己合法取得的候选文件（格式见 references/key-provider.md）：
 v-local-cli setup --keys keys.json --storage keychain
 #   完整初始化应确认 data.status=ready、data.media.status=verified、
-#   data.database_keys_persisted=true 且 data.image_keys_persisted=true。
+#   data.database_credential_status=persisted（plaintext-only 为 not_required_plaintext_only）
+#   且 data.image_keys_persisted=true。
 #   只有明确的纯文本任务才使用下面的 database-only 例外：
 #   v-local-cli setup --allow-key-access --storage keychain --database-only
 
 # 3. 查询
 v-local-cli contacts --limit 50 "张三"
 v-local-cli history --start 2026-08-01 --limit 200 <chat_username>
+# 使用 history 返回的 kind=image evidence_id 导出与该消息强绑定的完整本地图片
+v-local-cli export-chat-image --account <account> --output <image-file> <image_evidence_id>
 v-local-cli search --chat <chat_username> "关键词"
 v-local-cli sessions --limit 100
 v-local-cli unread --limit 100
@@ -98,7 +111,7 @@ v-local-cli history --fresh --limit 200 <chat_username>
 | OCR | `ocr-status` · `ocr-read` · `ocr-search` · `ocr-recognize` · `ocr-file` |
 | 朋友圈 | `moments-contacts` · `moments` · `moments-search` · `export-moment-media` |
 | 公众号 | `official-accounts` · `official-history` · `official-search` · `official-article` |
-| 导出 | `export` · `export-media` |
+| 导出 | `export` · `export-chat-image` · `export-media` |
 
 要彻底删除某个账号：先用 `forget --account <account> --dry-run` 确认范围，再加 `--yes` 执行（不可恢复）。
 
@@ -106,16 +119,18 @@ v-local-cli history --fresh --limit 200 <chat_username>
 
 - **时间窗口** — `history`、`search`、`stats` 以及朋友圈与公众号历史，默认按本地时区限定范围：指定联系人或公众号时取当前自然月，群聊和跨会话搜索取当前自然日。显式传入 `--start` 或 `--end` 就会关闭这个默认，传入 `--all` 则取消整个默认日期范围。
 - **条数** — 传入 `--all` 且没有同时显式传 `--limit` 时不设条数上限；其余情况一律按 `--limit` 取值，默认按命令为 100 条或 200 条。
-- **覆盖保护** — `export`、`export-media`、`export-moment-media`、`doctor --bundle` 默认拒绝覆盖已有输出（返回 `output_exists`），只有显式传入 `--force` 才会覆盖；符号链接、junction 等重解析点即使传了 `--force` 也一律拒绝。
+- **覆盖保护** — `export`、`export-chat-image`、`export-media`、`export-moment-media`、`doctor --bundle` 默认拒绝覆盖已有输出（返回 `output_exists`），只有显式传入 `--force` 才会覆盖；符号链接、junction 等重解析点即使传了 `--force` 也一律拒绝。
 
 ## 输出约定
 
 成功结果写入 stdout；失败写入 stderr，并以非零退出码结束。默认 JSON 是 Agent 与 daemon 的稳定协议，所有 JSON 都带顶层 `schema_version`：
 
 ```json
-{"schema_version":1,"ok":true,"data":{},"meta":{"version":"0.1.0-dev.1","runtime":"go"}}
-{"schema_version":1,"ok":false,"error":{"type":"...","message":"...","hint":"..."}}
+{"schema_version":1,"command_status":"succeeded","data":{},"meta":{"version":"0.1.0-dev.1","runtime":"go"}}
+{"schema_version":1,"command_status":"failed","error":{"type":"...","message":"...","hint":"..."}}
 ```
+
+`command_status` 只表示命令执行，不表示数据完整。快照数据库范围统一读取 `meta.database_coverage_status` 和 `meta.database_coverage`；成员、搜索、朋友圈、公众号、语音与 OCR 使用各自限定的 source/backend coverage 字段，不再输出容易误解的裸 `coverage` 或 `available`。
 
 直接给人阅读时可把全局选项放在命令前：`v-local-cli --output yaml sessions` 或 `v-local-cli --output table unread`。table 会截断长单元格，不适合作为无损导出。运行 `v-local-cli daemon serve` 后，白名单查询可用 `v-local-cli --daemon search ...` 复用本机服务；`--fresh`、联网、导出、索引构建和游标写入不会交给 daemon。
 

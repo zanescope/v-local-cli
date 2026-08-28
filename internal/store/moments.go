@@ -146,7 +146,7 @@ type Moment struct {
 
 type MomentContactReport struct {
 	Items                     []MomentContact `json:"items"`
-	Available                 bool            `json:"available"`
+	Available                 bool            `json:"source_present"`
 	Reason                    string          `json:"reason,omitempty"`
 	Returned                  int             `json:"returned"`
 	MatchingContacts          int             `json:"matching_contacts"`
@@ -156,7 +156,7 @@ type MomentContactReport struct {
 
 type MomentReport struct {
 	Items    []Moment       `json:"items"`
-	Coverage map[string]any `json:"coverage"`
+	Coverage map[string]any `json:"moment_source_coverage"`
 }
 
 func findTableCI(database *sql.DB, table string) string {
@@ -740,7 +740,7 @@ func Moments(root, username string, start, end *int64, limit int) (MomentReport,
 	items := []Moment{}
 	seen := map[string]bool{}
 	coverage := map[string]any{
-		"available": false, "adapter": "sns-timeline-xml-v1", "author_username": username,
+		"source_present": false, "adapter": "sns-timeline-xml-v1", "author_username": username,
 		"source_databases": 0, "local_rows_for_author": 0, "rows_inspected": 0,
 		"parsed": 0, "identity_conflicts": 0, "unparsed": 0,
 		"time_unresolved_in_inspected_rows": 0, "logical_media": 0,
@@ -766,7 +766,7 @@ func Moments(root, username string, start, end *int64, limit int) (MomentReport,
 			_ = database.Close()
 			continue
 		}
-		coverage["available"] = true
+		coverage["source_present"] = true
 		availableColumns := columns(database, table)
 		tidColumn := columnCI(availableColumns, "tid")
 		usernameColumn := columnCI(availableColumns, "user_name")
@@ -947,7 +947,7 @@ func SearchMoments(root, keyword, contact string, start, end *int64, limit int) 
 	}
 	items := []Moment{}
 	coverage := map[string]any{
-		"available": false, "contacts_inspected": 0, "rows_inspected": 0,
+		"source_present": false, "contacts_inspected": 0, "rows_inspected": 0,
 		"scope": "locally_retained_only", "complete_remote_history": false,
 		"remote_fetch_attempted": false, "interaction_scope": "locally_retained_visible_only",
 		"complete_interaction_history": false, "logical_media": 0,
@@ -963,8 +963,8 @@ func SearchMoments(root, keyword, contact string, start, end *int64, limit int) 
 		if err != nil {
 			return MomentReport{}, err
 		}
-		if available, _ := report.Coverage["available"].(bool); available {
-			coverage["available"] = true
+		if present, _ := report.Coverage["source_present"].(bool); present {
+			coverage["source_present"] = true
 		}
 		coverage["contacts_inspected"] = coverage["contacts_inspected"].(int) + 1
 		if inspected, ok := report.Coverage["rows_inspected"].(int); ok {

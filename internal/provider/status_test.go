@@ -29,9 +29,118 @@ func TestCurrentUsesExplicitProvider(t *testing.T) {
 
 func TestCurrentReportsMissingProvider(t *testing.T) {
 	t.Setenv(EnvironmentVariable, "")
+	t.Setenv(DevelopmentBinaryPathVariable, "")
+	t.Setenv(DevelopmentModeVariable, "")
+	t.Setenv(DevelopmentUnverifiedVariable, "")
 	status := Current(filepath.Join(t.TempDir(), "missing-provider"))
 	if status.Available {
 		t.Fatalf("不存在的 Provider 不应标记为可用：%+v", status)
+	}
+}
+
+func TestGuardedDevelopmentProviderOverrideRequiresAllThreeValues(t *testing.T) {
+	name := "v-local-key-provider"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	providerPath := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(providerPath, []byte("test"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvironmentVariable, "")
+	for _, test := range []struct {
+		path, mode, allow string
+	}{
+		{path: providerPath},
+		{path: providerPath, mode: "1"},
+		{path: providerPath, allow: "1"},
+		{mode: "1", allow: "1"},
+	} {
+		t.Setenv(DevelopmentBinaryPathVariable, test.path)
+		t.Setenv(DevelopmentModeVariable, test.mode)
+		t.Setenv(DevelopmentUnverifiedVariable, test.allow)
+		if path, source := resolveCandidate(""); path != "" || source != "override_rejected" {
+			t.Fatalf("incomplete guarded override was accepted: path=%q source=%q", path, source)
+		}
+	}
+	t.Setenv(DevelopmentBinaryPathVariable, providerPath)
+	t.Setenv(DevelopmentModeVariable, "1")
+	t.Setenv(DevelopmentUnverifiedVariable, "1")
+	if path, source := resolveCandidate(""); path == "" || source != "guarded_environment" {
+		t.Fatalf("complete guarded override was rejected: path=%q source=%q", path, source)
+	}
+}
+
+func TestCanonicalExecutableRejectsLinkedAncestor(t *testing.T) {
+	root := t.TempDir()
+	realDirectory := filepath.Join(root, "real")
+	linkedDirectory := filepath.Join(root, "linked")
+	if err := os.Mkdir(realDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name := "v-local-key-provider"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	realProvider := filepath.Join(realDirectory, name)
+	if err := os.WriteFile(realProvider, []byte("test"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := canonicalExecutable(realProvider); !ok {
+		t.Fatal("direct executable was rejected")
+	}
+	if err := os.Symlink(realDirectory, linkedDirectory); err != nil {
+		t.Skipf("directory symlink is unavailable on this host: %v", err)
+	}
+	if resolved, ok := canonicalExecutable(filepath.Join(linkedDirectory, name)); ok {
+		t.Fatalf("executable beneath a linked ancestor was accepted as %q", resolved)
+	}
+}
+
+func TestSameCanonicalPathTextFoldsDarwinSystemAlias(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("系统别名折叠只适用于 macOS")
+	}
+	if !sameCanonicalPathText("/private/var/folders/test/provider", "/var/folders/test/provider") {
+		t.Fatal("同一固定安装路径的两种系统别名写法被判为不同")
+	}
+	if sameCanonicalPathText("/private/variable/provider", "/variable/provider") {
+		t.Fatal("非系统别名前缀被当成别名折叠")
+	}
+}
+
+func TestFixedProviderInstallPathIsArchitectureScoped(t *testing.T) {
+	windows := fixedProviderInstallPathFor("windows", "arm64", filepath.Join("C:", "Users", "test", "AppData", "Local"))
+	if filepath.Base(windows) != "v-local-key-provider.exe" || filepath.Base(filepath.Dir(windows)) != "windows-arm64" {
+		t.Fatalf("Windows fixed Provider path is not architecture scoped: %q", windows)
+	}
+	darwin := fixedProviderInstallPathFor("darwin", "amd64", filepath.Join(string(filepath.Separator), "Users", "test", "Library", "Application Support"))
+	if filepath.Base(darwin) != "v-local-key-provider" || filepath.Base(filepath.Dir(darwin)) != "darwin-amd64" {
+		t.Fatalf("Darwin fixed Provider path is not architecture scoped: %q", darwin)
+	}
+	if path := fixedProviderInstallPathFor("linux", "amd64", t.TempDir()); path != "" {
+		t.Fatalf("unsupported platform received a fixed Provider path: %q", path)
+	}
+}
+
+func TestReleaseBuildRejectsExplicitAndEnvironmentProviderOverrides(t *testing.T) {
+	previous := buildMode
+	buildMode = "release"
+	t.Cleanup(func() { buildMode = previous })
+	t.Setenv(EnvironmentVariable, "")
+	if path, source := resolveCandidate(filepath.Join(t.TempDir(), "provider")); path != "" || source != "override_rejected" {
+		t.Fatalf("release explicit override was not rejected: path=%q source=%q", path, source)
+	}
+	t.Setenv(EnvironmentVariable, filepath.Join(t.TempDir(), "provider"))
+	if path, source := resolveCandidate(""); path != "" || source != "override_rejected" {
+		t.Fatalf("release environment override was not rejected: path=%q source=%q", path, source)
+	}
+	t.Setenv(EnvironmentVariable, "")
+	t.Setenv(DevelopmentBinaryPathVariable, filepath.Join(t.TempDir(), "provider"))
+	t.Setenv(DevelopmentModeVariable, "1")
+	t.Setenv(DevelopmentUnverifiedVariable, "1")
+	if path, source := resolveCandidate(""); path != "" || source != "override_rejected" {
+		t.Fatalf("release guarded development override was not rejected: path=%q source=%q", path, source)
 	}
 }
 

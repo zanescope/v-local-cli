@@ -14,7 +14,7 @@ const maxXMLBytes = 4 * 1024 * 1024
 // maxXMLDepth 限制嵌套层数。encoding/xml 自带 maxUnmarshalDepth 守卫，但
 // DecodeElement 每次都以深度 0 重新进入 unmarshal，自定义 UnmarshalXML 里的递归
 // 因此完全绕过它；不自己计数的话，4 MB 以内即可构造出耗尽 goroutine 栈的深度，
-// 触发 recover 无法捕获的 fatal error。真实微信 XML 只有十几层。
+// 触发 recover 无法捕获的致命错误。真实微信 XML 只有十几层。
 const maxXMLDepth = 256
 
 var errXMLTooDeep = errors.New("XML 嵌套层数超过上限")

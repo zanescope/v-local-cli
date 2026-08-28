@@ -40,6 +40,37 @@ func runForTest(args ...string) (int, map[string]any, map[string]any) {
 	return code, output, errors
 }
 
+func TestSecurityPostureRevalidationRequiresLiveProviderProvenance(t *testing.T) {
+	bundle := provider.CandidateBundle{Diagnostics: map[string]any{
+		"platform": "darwin", "action_stage": "security_posture_revalidation",
+		"requested_scopes": []any{"database"}, "database_target_status": "not_requested",
+		"database_coverage_status": "not_requested", "media_coverage_status": "not_requested",
+		"routes_attempted": []any{}, "candidate_mode": "none", "candidate_sources": []any{},
+		"security_posture_status": "sip_enabled_verified", "result_code": "complete",
+		"workflow_status": "terminal", "next_action": "none",
+	}}
+	if !isLiveProviderSecurityPostureRevalidation("provider", bundle) {
+		t.Fatal("live Provider posture revalidation was not recognized")
+	}
+	if isLiveProviderSecurityPostureRevalidation("candidate_file", bundle) {
+		t.Fatal("candidate file was allowed to claim machine posture revalidation")
+	}
+}
+
+func TestCandidateFileRejectsProviderOnlyCredentialProvenance(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys.json")
+	payload := `{
+		"database_keys":{"message.db":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		"database_credential":{"mode":"global_passphrase"}
+	}`
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadCandidateFile(path); err == nil {
+		t.Fatal("user candidate file was allowed to assert Provider-only credential provenance")
+	}
+}
+
 func TestKeyProviderCommandErrorKeepsMacOSHelperRecoverySimple(t *testing.T) {
 	err := keyProviderCommandError(&provider.AcquisitionError{
 		Reason: "process_access_denied", Platform: "darwin", HelperStatus: "not_installed",
@@ -70,24 +101,50 @@ func TestKeyProviderCommandErrorKeepsMacOSHelperRecoverySimple(t *testing.T) {
 	}
 
 	err = keyProviderCommandError(&provider.AcquisitionError{
-		Reason: "sip_required", Platform: "darwin", HelperStatus: "sip_enabled",
+		Reason: "sip_required", Platform: "darwin", HelperStatus: "sip_enabled", NextAction: "disable_sip",
+		ShadowRouteStatus: "unavailable_in_build", RoutePriority: []string{"standard", "shadow", "sip_disabled"}, ExternalCheckpointStatus: "persisted",
 	})
-	if err.typeName != "key_provider_sip_required" || !strings.Contains(err.hint, "恢复模式") || !strings.Contains(err.hint, "不会自动启动、退出或重启微信") {
+	details, detailsOK := err.details.(map[string]any)
+	if err.typeName != "key_provider_sip_required" || !strings.Contains(err.hint, "恢复模式") || !strings.Contains(err.hint, "不会自动启动、退出或重启微信") ||
+		!detailsOK || details["shadow_route_status"] != "unavailable_in_build" {
 		t.Fatalf("unexpected SIP recovery: %+v", err)
+	}
+
+	err = keyProviderCommandError(&provider.AcquisitionError{
+		Reason: "sip_required", Platform: "darwin", NextAction: "disable_sip", ExternalCheckpointStatus: "unavailable",
+	})
+	if err.typeName != "key_provider_external_checkpoint_failed" || !strings.Contains(err.hint, "先恢复 SIP") {
+		t.Fatalf("external action proceeded without a durable checkpoint: %+v", err)
 	}
 
 	err = keyProviderCommandError(&provider.AcquisitionError{
 		Reason: "hook_trigger_required", Platform: "darwin", VersionSupport: "commoncrypto_dynamic",
 	})
-	if err.typeName != "key_provider_hook_trigger_required" || !strings.Contains(err.hint, "完成账号登录") {
+	if err.typeName != "key_provider_hook_trigger_required" || !strings.Contains(err.hint, "只读数据库页面") || !strings.Contains(err.hint, "15 分钟") {
 		t.Fatalf("unexpected hook recovery: %+v", err)
 	}
 
 	err = keyProviderCommandError(&provider.AcquisitionError{
 		Reason: "hook_restart_required", Platform: "darwin",
 	})
-	if err.typeName != "key_provider_hook_restart_required" || !strings.Contains(err.hint, "完成账号登录") {
+	if err.typeName != "key_provider_hook_restart_required" || !strings.Contains(err.hint, "15 分钟") || !strings.Contains(err.hint, "不会自动终止") {
 		t.Fatalf("unexpected hook restart recovery: %+v", err)
+	}
+
+	err = keyProviderCommandError(&provider.AcquisitionError{
+		Reason: "action_confirmation_mismatch", Platform: "darwin", NextAction: "reenable_sip",
+		ExternalCheckpointStatus: "persisted", ExternalWorkflowID: strings.Repeat("a", 32),
+	})
+	if err.typeName != "key_provider_action_confirmation_mismatch" || !strings.Contains(err.hint, "不要用该参数确认 Shadow 或 SIP") {
+		t.Fatalf("cross-reboot SIP action rejection was misreported: %+v", err)
+	}
+
+	err = keyProviderCommandError(&provider.AcquisitionError{
+		Reason: "external_workflow_scope_mismatch", NextAction: "disable_sip",
+		RequestedScopes: []string{"database", "media"}, ExternalCheckpointStatus: "persisted",
+	})
+	if err.typeName != "key_provider_external_workflow_scope_mismatch" || !strings.Contains(err.hint, "原来的") {
+		t.Fatalf("external workflow scope drift used an unrelated recovery: %+v", err)
 	}
 
 	err = keyProviderCommandError(&provider.AcquisitionError{
@@ -95,6 +152,101 @@ func TestKeyProviderCommandErrorKeepsMacOSHelperRecoverySimple(t *testing.T) {
 	})
 	if err.typeName != "key_provider_process_list_unavailable" || !strings.Contains(err.hint, "不等同于微信未运行") {
 		t.Fatalf("unexpected process discovery recovery: %+v", err)
+	}
+}
+
+func TestAcquisitionCommandErrorExposesScopeQualifiedCoverage(t *testing.T) {
+	err := acquisitionCommandError(&provider.AcquisitionError{
+		ResultCode: "partial", WorkflowStatus: "terminal", RequestedScopes: []string{"database", "media"},
+		DatabaseCoverageStatus: "complete", MediaCoverageStatus: "none",
+	}, "key_provider_failed", "failed", "retry")
+	details, ok := err.details.(map[string]any)
+	if !ok || details["database_coverage_status"] != "complete" || details["media_coverage_status"] != "none" ||
+		details["coverage_status"] != nil || details["media_status"] != nil {
+		t.Fatalf("Agent error details did not preserve scope-qualified coverage: %#v", err.details)
+	}
+	requested, ok := details["requested_scopes"].([]string)
+	if !ok || len(requested) != 2 || requested[0] != "database" || requested[1] != "media" {
+		t.Fatalf("Agent error details lost requested scope order: %#v", err.details)
+	}
+}
+
+func TestPersistedSecretFlagsDistinguishDerivedKeysFromStoredCredential(t *testing.T) {
+	bundle := provider.CandidateBundle{
+		DatabaseKeys:       map[string]string{"message.db": strings.Repeat("a", 64)},
+		DatabaseCredential: &provider.DatabaseCredential{Mode: "per_database"},
+		ImageKeys:          &provider.ImageKeys{AES: "0123456789abcdef", XOR: 90},
+	}
+	keys, credential, image := persistedSecretFlags(bundle, true)
+	if keys || !credential || !image {
+		t.Fatalf("结构化凭据最小化后的持久化状态误报：keys=%t credential=%t image=%t", keys, credential, image)
+	}
+	keys, credential, image = persistedSecretFlags(bundle, false)
+	if !keys || !credential || !image {
+		t.Fatalf("旧 keychain bundle 的实际逐库 key 状态丢失：keys=%t credential=%t image=%t", keys, credential, image)
+	}
+}
+
+func TestProviderExecutionErrorExposesOnlySafeProcessClassification(t *testing.T) {
+	err := keyProviderCommandError(&provider.ExecutionError{Stage: "process_exit", ExitCode: 3})
+	details := err.details.(map[string]any)
+	if err.typeName != "key_provider_failed" || details["stage"] != "process_exit" || details["exit_code"] != 3 ||
+		details["stderr_included"] != false || details["path_included"] != false {
+		t.Fatalf("Provider 子进程失败分类泄漏或缺失：%v", details)
+	}
+}
+
+func TestProviderProtocolContractErrorExposesOnlySafeClassification(t *testing.T) {
+	err := keyProviderCommandError(&provider.ProtocolContractError{Cause: errors.New("包含私有路径或候选的原始原因")})
+	details := err.details.(map[string]any)
+	if err.typeName != "key_provider_failed" || details["stage"] != "protocol_contract_validation" ||
+		details["stderr_included"] != false || details["path_included"] != false ||
+		strings.Contains(err.hint, "私有路径") || strings.Contains(err.hint, "原始原因") {
+		t.Fatalf("Provider 契约错误分类泄漏或缺失：%v", details)
+	}
+}
+
+func TestAcquisitionCommandErrorExposesSafeWindowsEvidence(t *testing.T) {
+	err := acquisitionCommandError(&provider.AcquisitionError{
+		Platform: "windows", ConfigCipherRouteStatus: "unavailable_unregistered",
+		WindowsRouteEvidence: []string{"registry_no_exact_match"},
+		ProcessCount:         3, SelectedProcessCount: 2, TargetBoundProcessCount: 1,
+		OtherAccountProcessCount: 1, UnknownAccountProcessCount: 1,
+		OpenedProcessCount: 1, AccessDeniedCount: 1, PerProcessCollectorCount: 2,
+		FallbackStageCounts: map[string]int{"structured_key_object": 2},
+	}, "key_provider_failed", "failed", "retry")
+	details, ok := err.details.(map[string]any)
+	if !ok || details["config_cipher_route_status"] != "unavailable_unregistered" ||
+		details["selected_process_count"] != 2 || details["other_account_process_count"] != 1 {
+		t.Fatalf("Agent error details lost Windows Phase 4 state: %#v", err.details)
+	}
+	evidence, ok := details["windows_route_evidence"].([]string)
+	if !ok || len(evidence) != 1 || evidence[0] != "registry_no_exact_match" {
+		t.Fatalf("Agent error details lost redacted Windows route evidence: %#v", err.details)
+	}
+}
+
+func TestStatusFailsClosedOnInvalidExternalWorkflowCheckpoint(t *testing.T) {
+	t.Setenv("V_LOCAL_CLI_HOME", t.TempDir())
+	root, err := state.AcquisitionRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "external-aaaaaaaaaaaaaaaa.checkpoint.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"authorization":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, failure := runForTest("status")
+	errorValue, _ := failure["error"].(map[string]any)
+	if code == 0 || errorValue["type"] != "external_workflow_state_invalid" {
+		t.Fatalf("invalid external checkpoint was not surfaced explicitly: code=%d failure=%v", code, failure)
+	}
+	code, output, failure := runForTest("setup", "--cancel-all-external-workflows")
+	if code != 0 || output["data"].(map[string]any)["other_private_state_preserved"] != true {
+		t.Fatalf("explicit malformed-checkpoint recovery failed: code=%d output=%v failure=%v", code, output, failure)
+	}
+	if code, _, failure := runForTest("status"); code != 0 {
+		t.Fatalf("status remained blocked after narrow checkpoint cleanup: code=%d failure=%v", code, failure)
 	}
 }
 
@@ -129,28 +281,23 @@ func TestVersion(t *testing.T) {
 	}
 }
 
-func TestCapabilitiesKeepMacOSAtBuildOnlyBoundary(t *testing.T) {
+func TestCapabilitiesDoNotPromoteBuildTargetsWithoutEmbeddedEvidence(t *testing.T) {
 	result, err := runCapabilities(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	capabilities := result.(map[string]any)
-	validation := capabilities["data_layout_validation"].(map[string]any)
-	if validation["darwin_arm64"] != "build_only" {
-		t.Fatalf("darwin/arm64 数据布局在真机验收前不得标记为已验证：%v", validation)
-	}
-	if validation["darwin_amd64"] != "real_device_verified" {
-		t.Fatalf("darwin/amd64 已完成真机验收，能力声明未同步：%v", validation)
+	validation := capabilities["validation_evidence"].(map[string]any)
+	if validation["status"] != "not_embedded" || validation["release_manifest_required_for_real_device_claims"] != true ||
+		validation["current_runtime_build_target_declared"] != true || validation["current_runtime_build_supported"] != nil {
+		t.Fatalf("capabilities promoted an unauthenticated real-device claim: %v", validation)
 	}
 	providerCapabilities := capabilities["provider"].(map[string]any)
-	if providerCapabilities["darwin_arm64_setup_source"] != "user_supplied_candidate_file" {
-		t.Fatalf("darwin/arm64 setup 来源边界不明确：%v", providerCapabilities)
-	}
-	if providerCapabilities["darwin_arm64_automatic_helper"] != "experimental_build_only" {
-		t.Fatalf("darwin/arm64 自动 helper 边界被扩大：%v", providerCapabilities)
+	if providerCapabilities["automatic_key_access_validation"] != "requires_signed_live_release_evidence" || providerCapabilities["user_supplied_candidate_file"] != true {
+		t.Fatalf("provider validation boundary is ambiguous: %v", providerCapabilities)
 	}
 	ocrCapabilities := capabilities["ocr"].(map[string]any)
-	targets, ok := ocrCapabilities["native_backend_supported_targets"].([]string)
+	targets, ok := ocrCapabilities["native_backend_implementation_targets"].([]string)
 	if !ok || len(targets) != 1 || targets[0] != "windows/amd64" {
 		t.Fatalf("原生 OCR 支持平台声明扩大：%v", ocrCapabilities)
 	}
@@ -180,14 +327,23 @@ func TestSchemaOnlyListsImplementedCommands(t *testing.T) {
 	if momentMedia["container_validation"] != "strict" || !kindsOK || len(mediaKinds) != 2 || momentMedia["max_video_bytes"] != float64(512*1024*1024) {
 		t.Fatalf("schema 缺少朋友圈媒体严格校验边界：%v", momentMedia)
 	}
+	chatImage := commands["export-chat-image"].(map[string]any)
+	if chatImage["evidence_binding"] != "message_resource_stem+hardlink_map" || chatImage["container_validation"] != "full_decode" || chatImage["network"] != false {
+		t.Fatalf("schema 缺少聊天图片强绑定与离线校验边界：%v", chatImage)
+	}
 	refresh := commands["refresh"].(map[string]any)
 	if refresh["reads_saved_keychain"] != true || refresh["reads_process"] != false || refresh["network"] != false || refresh["writes_snapshot"] != true || refresh["modifies_saved_secrets"] != false || refresh["account_lock"] != true || refresh["prevents_coverage_regression"] != true {
 		t.Fatalf("schema 缺少 refresh 安全边界：%v", refresh)
 	}
+	setup := commands["setup"].(map[string]any)
+	if setup["reads_process_only_with_authorization"] != true || setup["explicit_action_confirmation"] != true || setup["action_confirmation_option"] != "--confirm-key-action" ||
+		setup["external_workflow_cleanup_scope"] != "checkpoint_files_only" {
+		t.Fatalf("schema 缺少 acquisition 授权与动作确认分离边界：%v", setup)
+	}
 	if commands["forget"].(map[string]any)["requires_confirmation"] != true || commands["install"].(map[string]any)["external_installer"] != false {
 		t.Fatalf("schema 缺少删除确认或本地 Skill 安装边界")
 	}
-	if commands["capabilities"].(map[string]any)["separates_build_and_data_layout_validation"] != true {
+	if commands["capabilities"].(map[string]any)["real_device_claims_require_embedded_evidence"] != true {
 		t.Fatal("schema 缺少平台验证边界")
 	}
 	if commands["voice-search"].(map[string]any)["writes_private_cache_unless_cached_only"] != true ||
@@ -200,7 +356,7 @@ func TestSchemaOnlyListsImplementedCommands(t *testing.T) {
 		commands["ocr-search"].(map[string]any)["source"] != "wechat_index_probe+v-local-cli_private_cache" {
 		t.Fatal("schema 缺少 OCR 私有缓存或原生 OCR 授权边界")
 	}
-	if len(commands) != 41 {
+	if len(commands) != 42 {
 		t.Fatalf("schema 命令数量异常：%d", len(commands))
 	}
 }
@@ -417,7 +573,7 @@ func TestVoiceStatusDoesNotInstallDependency(t *testing.T) {
 		t.Fatalf("voice-status 异常：code=%d error=%v", code, errorOutput)
 	}
 	data := output["data"].(map[string]any)
-	if data["available"] != false || data["automatic_download"] != false || data["install_consent_required"] != true {
+	if data["transcription_backend_ready"] != false || data["automatic_download"] != false || data["install_consent_required"] != true {
 		t.Fatalf("voice-status 未保留用户安装选择权：%v", data)
 	}
 	if _, found := data["engine_path"]; found {
@@ -554,7 +710,7 @@ func TestVoiceAndOCRPreferWeChatExistingIndexes(t *testing.T) {
 	if code != 0 || output["data"].(map[string]any)["count"].(float64) != 1 {
 		t.Fatalf("语音搜索没有优先复用微信索引：code=%d output=%v error=%v", code, output, errorOutput)
 	}
-	voiceCoverage := output["data"].(map[string]any)["coverage"].(map[string]any)
+	voiceCoverage := output["data"].(map[string]any)["transcript_source_coverage"].(map[string]any)
 	if voiceCoverage["wechat_existing_index"].(float64) != 1 || voiceCoverage["wechat_private_ipc_invoked"] != false {
 		t.Fatalf("语音索引来源标记异常：%v", voiceCoverage)
 	}
@@ -662,7 +818,7 @@ func TestMomentsAndOfficialCommands(t *testing.T) {
 	}
 	data := output["data"].(map[string]any)
 	meta := output["meta"].(map[string]any)
-	coverage := data["coverage"].(map[string]any)
+	coverage := data["moment_source_coverage"].(map[string]any)
 	resolution := coverage["media_resolution"].(map[string]any)
 	if data["count"].(float64) != 1 || resolution["verified_local_media"].(float64) != 1 || coverage["visible_likes"].(float64) != 1 || coverage["visible_comments"].(float64) != 1 || meta["unbounded_by_limit"] != true || meta["result_limit"] != nil {
 		t.Fatalf("朋友圈命令结果异常：%v", data)
@@ -917,6 +1073,10 @@ func TestAllWithoutExplicitLimitIsUnbounded(t *testing.T) {
 	if data["count"].(float64) != 1005 {
 		t.Fatalf("search --all 未全量返回：%v", data)
 	}
+	searchStatus := data["search_backend_status"].(map[string]any)
+	if searchStatus["message_coverage_status"] != "partial" || searchStatus["index_present"] != false {
+		t.Fatalf("search fallback 没有明确领域覆盖状态：%v", searchStatus)
+	}
 
 	exportPath := filepath.Join(t.TempDir(), "all.jsonl")
 	if err := os.WriteFile(exportPath, []byte("existing-output"), 0o600); err != nil {
@@ -958,6 +1118,62 @@ func TestSetupRequiresAuthorization(t *testing.T) {
 	}
 }
 
+func TestSetupDryRunAcceptsStableAccountID(t *testing.T) {
+	account := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(account, "db_storage"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("V_LOCAL_CLI_ACCOUNT_DIR", account)
+	t.Setenv("V_LOCAL_CLI_HOME", testHome(t))
+	accountID := state.AccountID(account)
+	code, output, errorOutput := runForTest("setup", "--account", accountID, "--dry-run")
+	if code != 0 {
+		t.Fatalf("setup dry-run 拒绝 accounts 返回的 account_id：code=%d error=%v", code, errorOutput)
+	}
+	data := output["data"].(map[string]any)
+	selected := data["account"].(map[string]any)
+	if selected["account_id"] != accountID || data["status"] != "planned" ||
+		data["process_access_performed"] != false || data["secrets_persisted"] != false {
+		t.Fatalf("setup dry-run 的 account_id 或无副作用契约异常：%v", data)
+	}
+}
+
+func TestPrivateOutputPathCapturesOneSchemaV1Response(t *testing.T) {
+	account := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(account, "db_storage"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("V_LOCAL_CLI_ACCOUNT_DIR", account)
+	home := testHome(t)
+	t.Setenv("V_LOCAL_CLI_HOME", home)
+	privateDirectory, err := state.DaemonRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(privateDirectory, "dry-run.json")
+	t.Setenv(privateOutputPathEnv, outputPath)
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"setup", "--account", state.AccountID(account), "--dry-run"}, &stdout, &stderr)
+	if code != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("私有输出通道泄漏到标准流：code=%d stdout=%d stderr=%d", code, stdout.Len(), stderr.Len())
+	}
+	payload, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(payload, &result); err != nil {
+		t.Fatal(err)
+	}
+	data := result["data"].(map[string]any)
+	if result["schema_version"].(float64) != 1 || result["command_status"] != "succeeded" || data["status"] != "planned" {
+		t.Fatalf("私有输出没有保留 schema v1 响应：%v", result)
+	}
+	if code := Main([]string{"setup", "--dry-run"}, &stdout, &stderr); code == 0 {
+		t.Fatal("私有输出目标被静默覆盖")
+	}
+}
+
 func TestSetupSnapshotOnlyAndContacts(t *testing.T) {
 	account := t.TempDir()
 	databaseDirectory := filepath.Join(account, "db_storage", "contact")
@@ -994,7 +1210,7 @@ func TestSetupSnapshotOnlyAndContacts(t *testing.T) {
 		t.Fatalf("database-only setup 状态不明确：%v", setupData)
 	}
 	accountData := setupData["account"].(map[string]any)
-	if accountData["version"].(float64) != 2 || accountData["updated_at"] == "" || accountData["generation_id"] == "" || accountData["snapshot_manifest_sha256"] == "" {
+	if accountData["version"].(float64) != 1 || accountData["updated_at"] == "" || accountData["generation_id"] == "" || accountData["snapshot_manifest_sha256"] == "" {
 		t.Fatalf("setup 状态元数据未同步：%v", accountData)
 	}
 	code, output, errors = runForTest("contacts", "阿丽")

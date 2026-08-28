@@ -18,6 +18,8 @@
 - `mentions`、`voice_duration_ms`、`voice_transcript`、`voice_transcript_source`、`media_md5`；
 - `sender_username`、`sender_nickname`、`sender_remark`、`sender_contact_display`、`sender_group_nickname`、`sender_identity` 和 `is_from_me`。`sender` 按「群昵称 → 联系人显示名 → 微信昵称 → username」选择；`sender_identity` 是基于本地状态字段的 `self`、`contact` 或 `unknown` 兼容性判定，不是服务器身份凭证。
 
+每条消息的 `evidence_id` 绑定会话 username 与服务端/本地主键。对 `kind=image`，使用该标识调用 `export-chat-image`，由 CLI 重新结合 `message_resource.db` 和 `hardlink.db` 强绑定并完整解码本地图片；不要从 `media_md5`、时间邻近或目录位置自行猜测图片路径。
+
 专属结构：
 
 - 微信名片：`details.username`、`nickname`、`alias`、地区、签名、头像、认证及品牌名片字段；`content` 使用 `[微信名片] 昵称｜username`。
