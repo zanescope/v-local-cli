@@ -15,7 +15,7 @@
 2. 需要创建可下载版本时，设置 `publish_unsigned_preview=true`，并把确认值精确填写为
    `PUBLISH_UNSIGNED_PREVIEW`。工作流只允许从 `main` 发布与 `npm/package.json` 完全一致的
    `-dev.N` 版本。
-3. 发布作业会先通过 GitHub API 确认同一 `main` 提交存在成功的 `Audit gates`。工作流再以 `buildMode=candidate` 构建六个平台资产，生成校验和和 tgz，并为全部资产生成
+3. 发布作业会先通过 GitHub API 确认同一 `main` 提交存在成功的 `Audit gates`。工作流再以 `buildMode=candidate` 构建 Windows amd64、macOS amd64 和 macOS arm64 三个首发目标，生成校验和和 tgz，并为全部资产生成
    GitHub artifact attestation。发布作业会重新验证二进制摘要、tgz 内校验和与 attestation，
    随后创建明确标记为 unsigned early access 的 GitHub prerelease；已有标签或 Release
    一律拒绝覆盖。
@@ -42,7 +42,7 @@ early-access 的用户，不能提升为 `latest` 或替代正式签名件验收
 - `MACOS_CODESIGN_IDENTITY`
 - `APPLE_NOTARY_APPLE_ID`、`APPLE_NOTARY_TEAM_ID`、`APPLE_NOTARY_APP_PASSWORD`
 
-为该 environment 配置 required reviewer；批准前必须核对候选提交、六个平台摘要、
+为该 environment 配置 required reviewer；批准前必须核对候选提交、三个首发目标摘要、
 真机验收记录和当前能力声明。没有 ARM64 真机时保持 `darwin_arm64=build_only`，不得用
 GitHub runner、签名成功或 notarization 成功代替真实微信数据验收。
 

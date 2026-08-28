@@ -23,11 +23,13 @@ func requireCLIReleaseFragments(t *testing.T, relative string, fragments ...stri
 	return text
 }
 
-func TestCLIReleaseKeepsAllArchitectureSigningAndPublishingGates(t *testing.T) {
+func TestCLIReleaseKeepsInitialTargetSigningAndPublishingGates(t *testing.T) {
 	release := requireCLIReleaseFragments(t, ".github/workflows/release.yml",
 		"persist-credentials: false",
 		"!v*-dev.*",
-		"arch: [amd64, arm64]",
+		"arch: [amd64]",
+		"name: darwin-amd64",
+		"name: darwin-arm64",
 		// 签名与发布必须以 Audit gates 为前置条件：只在 push 时并行触发它，失败也
 		// 拦不住发布。
 		"uses: ./.github/workflows/audit-gates.yml",
@@ -50,12 +52,19 @@ func TestCLIReleaseKeepsAllArchitectureSigningAndPublishingGates(t *testing.T) {
 		"npm stage publish",
 	)
 	for _, asset := range []string{
-		"v-local-cli-windows-amd64.exe", "v-local-cli-windows-arm64.exe",
+		"v-local-cli-windows-amd64.exe",
 		"v-local-cli-darwin-amd64", "v-local-cli-darwin-arm64",
-		"v-local-cli-linux-amd64", "v-local-cli-linux-arm64",
 	} {
 		if !strings.Contains(release, asset) {
 			t.Errorf("signed CLI release does not bind required asset %q", asset)
+		}
+	}
+	for _, forbidden := range []string{
+		"v-local-cli-windows-arm64.exe", "v-local-cli-linux-amd64", "v-local-cli-linux-arm64",
+		"name: Build Linux", "needs: [validate, windows, macos, linux]",
+	} {
+		if strings.Contains(release, forbidden) {
+			t.Errorf("signed CLI release contains unsupported initial target %q", forbidden)
 		}
 	}
 	requireCLIReleaseFragments(t, "references/macos-acceptance.md",
@@ -102,6 +111,13 @@ func TestCLIReleaseKeepsAllArchitectureSigningAndPublishingGates(t *testing.T) {
 		"refs/heads/main", "actions/workflows/audit-gates.yml/runs?head_sha=", ".conclusion == \"success\"",
 		"gh attestation verify", "--source-digest", "gh release create", "--prerelease",
 	)
+	for _, forbidden := range []string{
+		"v-local-cli-windows-arm64.exe", "v-local-cli-linux-amd64", "v-local-cli-linux-arm64",
+	} {
+		if strings.Contains(candidate, forbidden) {
+			t.Errorf("unsigned CLI preview contains unsupported initial target %q", forbidden)
+		}
+	}
 	if strings.Contains(candidate, "internal/provider.buildMode=release") {
 		t.Fatal("unsigned release-candidate assets must not enable release trust claims")
 	}

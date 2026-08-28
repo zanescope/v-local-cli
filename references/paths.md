@@ -25,7 +25,7 @@ CLI 只把包含 `db_storage` 目录的父目录识别为微信账号目录。�
 
 npm 安装层还保留仅供本仓库构建、测试或受管镜像使用的变量：`V_LOCAL_CLI_SKIP_BINARY_INSTALL` 跳过 postinstall 二进制安装；`V_LOCAL_CLI_BINARY_PATH` 指向本地测试二进制，但只有同时设置 `V_LOCAL_CLI_DEVELOPMENT=1` 与 `V_LOCAL_CLI_ALLOW_UNVERIFIED_LOCAL_BINARY=1` 才生效。路径、development 和 allow 三者缺一即拒绝；这些变量会绕过发布摘要链，只能用于明确隔离的开发环境，不得写入普通用户配置、生产镜像或发布说明中的推荐流程。
 
-正式 Provider 不位于 CLI 包目录或 PATH。其独立安装器使用当前用户固定路径：Windows `%LOCALAPPDATA%\v-local\key-provider\windows-<arch>\v-local-key-provider.exe`；macOS `~/Library/Application Support/v-local/key-provider/darwin-<arch>/v-local-key-provider`，helper 是同目录的 `v-local-key-provider-helper`。发行 CLI 会把该位置、架构、canonical file identity 和签名作为运行时门禁。
+正式 Provider 不位于 CLI 包目录或 PATH。其独立安装器使用当前用户固定路径：首发 Windows `%LOCALAPPDATA%\v-local\key-provider\windows-amd64\v-local-key-provider.exe`；macOS `~/Library/Application Support/v-local/key-provider/darwin-<arch>/v-local-key-provider`，helper 是同目录的 `v-local-key-provider-helper`。发行 CLI 会把该位置、架构、canonical file identity 和签名作为运行时门禁。
 
 默认状态位于系统用户缓存目录的 `v-local-cli/`：
 

@@ -60,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        arch: [amd64]
     steps:
       - name: 检出源码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -259,41 +259,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  linux:
-    name: Build Linux ${{ matrix.arch }}
-    needs: [validate, audit]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    steps:
-      - name: 检出源码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: 配置 Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - name: 构建 Linux 发布件
-        shell: bash
-        run: |
-          mkdir -p dist
-          GOOS=linux GOARCH='${{ matrix.arch }}' CGO_ENABLED=0 go build -trimpath -ldflags '-s -w -X github.com/zanescope/v-local-cli/internal/provider.buildMode=release' -o 'dist/v-local-cli-linux-${{ matrix.arch }}' ./cmd/v-local-cli
-      - name: 保存 Linux 资产
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-cli-linux-${{ matrix.arch }}
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 14
-
   publish:
     name: Publish GitHub Release and npm package
-    needs: [validate, windows, macos, linux]
+    needs: [validate, windows, macos]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: release
@@ -329,20 +297,17 @@ jobs:
         run: |
           expected=(
             v-local-cli-windows-amd64.exe
-            v-local-cli-windows-arm64.exe
             v-local-cli-darwin-amd64
             v-local-cli-darwin-arm64
-            v-local-cli-linux-amd64
-            v-local-cli-linux-arm64
           )
           : > dist/checksums.txt
           for file in "${expected[@]}"; do
             test -f "dist/${file}"
             (cd dist && sha256sum "${file}") >> dist/checksums.txt
           done
+          test -f "dist/signature-manifest-windows-amd64.json"
           for arch in amd64 arm64; do
             test -f "dist/v-local-cli-darwin-${arch}.dmg"
-            test -f "dist/signature-manifest-windows-${arch}.json"
             test -f "dist/signature-manifest-darwin-${arch}.json"
             test -f "dist/notary-log-darwin-${arch}.json"
           done
