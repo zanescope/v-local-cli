@@ -18,6 +18,7 @@
 | `external_workflow_state_invalid` | 跨重启 checkpoint 已损坏、过期或包含协议不允许的字段。它不是授权凭据；停止自动继续。账号仍可选时用 `setup --cancel-acquisition --account NAME` 精确清理；账号已不可选或记录无法识别时，取得用户对“仅清理全部跨重启 checkpoint”的明确确认后运行 `setup --cancel-all-external-workflows`。该命令保留 daemon resume、快照和凭据。`doctor` 同样会 fail-closed，不能修复该记录。 |
 | `external_workflow_cleanup_failed` | 全局 checkpoint 清理没有完成；不要手工递归删除私有状态目录。检查当前用户对私有 acquisition 目录的权限与剩余空间后重试；快照、凭据和 daemon resume 均不在该命令删除范围内。 |
 | `key_provider_failed` | 运行 `v-local-cli provider status`；确认 Provider 是单独安装的正确平台版本。重新登录微信或打开新消息后再试。 |
+| `provider status` 显示 `candidate_unverified` | 当前是明确选择的 unsigned early-access；固定安装路径和包内摘要不等于 Authenticode/Developer ID。只在接受候选通道风险时继续，不得据此声称 signed release 或 `latest` 信任。 |
 | `key_acquisition_component_untrusted` | 重新运行官方 `@zanescope/v-local-key-provider` 安装器并检查 `provider status` 的 `integrity`。发行构建只接受当前用户固定安装目录中的签名 Provider/helper，不接受 `--provider`、`V_LOCAL_CLI_KEY_PROVIDER`、PATH 同名替代或重签文件；需要自备候选时改用 `setup --keys FILE`。 |
 | `key_provider_cancel_failed` | 检查当前用户私有状态目录后重试 `setup --cancel-acquisition --account NAME`；取消只清理 session，不删除已发布 generation。 |
 | `key_provider_helper_missing` | 运行一次 `npx @zanescope/v-local-key-provider@latest install`；macOS 安装器会同时配置 helper，无需手工运行或传路径。 |

@@ -160,7 +160,7 @@ func darwinIdentity(path, expectedIdentifier string) (darwinCodeIdentity, error)
 
 func validateProviderExecutableTrust(path string) (string, error) {
 	if !releaseBuild() {
-		return "development_unverified", nil
+		return unverifiedBuildIntegrity(), nil
 	}
 	expected := fixedProviderInstallPath()
 	if expected == "" || !sameCanonicalPathText(path, expected) {
@@ -214,7 +214,7 @@ func sameDarwinTeamID(actual, expected string) bool {
 
 func validateProviderHelperTrust(providerPath, helperPath string) (string, error) {
 	if !releaseBuild() {
-		return "development_unverified", nil
+		return unverifiedBuildIntegrity(), nil
 	}
 	provider, err := darwinTrustedExecutable(providerPath, "v-local-key-provider")
 	if err != nil {
