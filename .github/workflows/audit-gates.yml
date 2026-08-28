@@ -58,6 +58,8 @@ jobs:
       - name: Run Windows filesystem and plaintext failure injection
         if: runner.os == 'Windows'
         run: |
+          pwsh -NoProfile -File scripts/inspect-windows-chat-cdn-static-evidence.ps1 -SelfTest
+          pwsh -NoProfile -File scripts/accept-windows-chat-image-recovery.ps1 -SelfTest
           go test ./internal/app -run 'Test(NoForcePublishingRejectsConcurrentTargetCreation|ForcePublishingBreaksHardlinkWithoutMutatingPeer|PrepareOutputTargetRejectsSymbolicLink|PublishFilePreservesLockedWindowsTarget|RunLocalASRProviderCleansTemporaryAudioWhenCommandCannotStart|RunLocalWhisperCleansTemporaryPlaintextWhenCommandFails|RecognizeTemporaryChatImageCleansPlaintextAfterRecognitionFailure|RecognizeTemporaryChatImageReportsLockedWindowsPlaintext)$' -count=1
           go test ./internal/state -run 'Test(LoadRecoversAfterProcessExitBetweenBackupAndPublish|CommitStateFileRestoresOldStateWhenPublishFails)$' -count=1
       - name: Run macOS path, Unix security, and publication failure injection
@@ -68,6 +70,8 @@ jobs:
           go test ./internal/app -run 'Test(NoForcePublishingRejectsConcurrentTargetCreation|ForcePublishingBreaksHardlinkWithoutMutatingPeer|PrepareOutputTargetRejectsSymbolicLink|CapabilitiesKeepMacOSAtBuildOnlyBoundary)$' -count=1
       - name: 运行竞态检查
         if: runner.os == 'Linux'
+        env:
+          CGO_ENABLED: '1'
         run: go test -race ./...
       - name: 运行解析器模糊测试烟测
         if: runner.os == 'Linux'
@@ -131,7 +135,7 @@ jobs:
         run: |
           test -f SKILL.md
           test -f agents/openai.yaml
-          go test ./internal/app -run 'Test(SkillContractMatchesCommandSchema|ImplementedFlagsMatchCommandSchema|DocumentationCommandOptionsMatchSchema|ExternalCommandErrorsHaveRecoveryDocumentation|PackageVersionMatchesRuntimeVersion|DocumentationRelativeLinksResolve|OfficialArticleDNSFallbackDocumentationMatchesImplementation|NativeOCRSandboxBoundaryIsDocumented|MacOSAcceptanceBoundaryMatchesCapabilities|DocumentedEnvironmentVariablesMatchImplementation)$'
+          go test ./internal/app -run 'Test(SkillContractMatchesCommandSchema|ChatImageAgentRecoveryContract|ImplementedFlagsMatchCommandSchema|DocumentationCommandOptionsMatchSchema|ExternalCommandErrorsHaveRecoveryDocumentation|PackageVersionMatchesRuntimeVersion|DocumentationRelativeLinksResolve|OfficialArticleDNSFallbackDocumentationMatchesImplementation|NativeOCRSandboxBoundaryIsDocumented|MacOSAcceptanceBoundaryMatchesCapabilities|DocumentedEnvironmentVariablesMatchImplementation)$'
 
   dependency-inventory:
     name: Go dependency inventory

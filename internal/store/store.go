@@ -65,10 +65,12 @@ type Message struct {
 }
 
 type MessageReply struct {
-	ToName   string `json:"to_name,omitempty"`
-	Quoted   string `json:"quoted,omitempty"`
-	RefSvrID string `json:"ref_svrid,omitempty"`
-	RefMD5   string `json:"ref_md5,omitempty"`
+	ToUsername     string `json:"to_username,omitempty"`
+	ToName         string `json:"to_name,omitempty"`
+	IdentityStatus string `json:"identity_status,omitempty"`
+	Quoted         string `json:"quoted,omitempty"`
+	RefSvrID       string `json:"ref_svrid,omitempty"`
+	RefMD5         string `json:"ref_md5,omitempty"`
 }
 
 func sqliteFiles(root string) ([]string, error) {
@@ -423,14 +425,9 @@ func SearchWindow(root, keyword, chat string, start, end *int64, limit int) ([]M
 	if keyword == "" {
 		return nil, errors.New("搜索关键词不能为空")
 	}
-	historyLimit := 5000
-	perChatLimit := 1000
-	if limit == 0 {
-		historyLimit = 0
-		perChatLimit = 0
-	}
 	if chat != "" {
-		messages, err := HistoryWindow(root, chat, start, end, historyLimit)
+		// 先扫描完整时间窗再限制命中结果。预先截断最新消息会漏掉较早的匹配项。
+		messages, err := HistoryWindow(root, chat, start, end, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -448,14 +445,31 @@ func SearchWindow(root, keyword, chat string, start, end *int64, limit int) ([]M
 		if strings.HasSuffix(contact.Username, "@chatroom") {
 			identity.groupNicknames = loadGroupNicknames(root, contact.Username)
 		}
-		messages, historyErr := historyWindowWithIdentity(root, contact.Username, start, end, perChatLimit, identity)
+		messages, historyErr := historyWindowWithIdentity(root, contact.Username, start, end, 0, identity)
 		if historyErr != nil {
 			continue
 		}
 		enrichRedPacketMessages(messages, redPackets)
-		result = append(result, filterMessages(messages, keyword, 0)...)
+		// 每个会话最多保留全局还可能需要的前 N 个命中，再合并裁剪。
+		// 一个会话中第 N 个之后的命中不可能进入全局前 N，可避免有限搜索
+		// 因联系人很多而把所有匹配项同时保存在内存中。
+		result = append(result, filterMessages(messages, keyword, limit)...)
+		if limit > 0 && len(result) > limit {
+			sort.Slice(result, func(left, right int) bool {
+				if result[left].SortKey == result[right].SortKey {
+					return result[left].EvidenceID > result[right].EvidenceID
+				}
+				return result[left].SortKey > result[right].SortKey
+			})
+			result = result[:limit]
+		}
 	}
-	sort.Slice(result, func(left, right int) bool { return result[left].SortKey > result[right].SortKey })
+	sort.Slice(result, func(left, right int) bool {
+		if result[left].SortKey == result[right].SortKey {
+			return result[left].EvidenceID > result[right].EvidenceID
+		}
+		return result[left].SortKey > result[right].SortKey
+	})
 	if limit > 0 && len(result) > limit {
 		result = result[:limit]
 	}

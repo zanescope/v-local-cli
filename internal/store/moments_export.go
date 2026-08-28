@@ -816,9 +816,6 @@ func exportMomentMediaWithDownloader(ctx context.Context, root, evidenceID strin
 	if media.ResolutionStatus == "verified_local" {
 		return readLocalMomentMedia(*media, options.MomentMediaOptions)
 	}
-	if !options.AllowNetwork {
-		return MomentMediaArtifact{}, &MomentMediaExportError{Kind: "moment_media_network_authorization_required"}
-	}
 	variant, err := chooseRemoteMediaVariant(*media)
 	if err != nil {
 		return MomentMediaArtifact{}, err
@@ -826,6 +823,9 @@ func exportMomentMediaWithDownloader(ctx context.Context, root, evidenceID strin
 	target, err := buildMomentMediaURL(variant, media.Kind)
 	if err != nil {
 		return MomentMediaArtifact{}, err
+	}
+	if !options.AllowNetwork {
+		return MomentMediaArtifact{}, &MomentMediaExportError{Kind: "moment_media_network_authorization_required"}
 	}
 	if downloader == nil {
 		downloader = newSafeMomentDownloader(options.TemporaryDirectory)

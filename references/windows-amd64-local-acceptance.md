@@ -1,6 +1,6 @@
 # Windows amd64 本机端到端真机验收
 
-本流程用于在一台明确获授权的 Windows x64 真机上，验证 `v-local-cli` 与独立 Key Provider 的完整闭环：密钥获取、Windows Credential Manager 持久化、无进程访问的凭据复用、指定联系人 `username=dong_zzc` 的本地历史记录、聊天高清图、收藏、朋友圈及朋友圈本地媒体。
+本流程用于在一台明确获授权的 Windows x64 真机上，验证 `v-local-cli` 与独立 Key Provider 的完整闭环：密钥获取、Windows Credential Manager 持久化、无进程访问的凭据复用、指定联系人 `username=dong_zzc` 的本地历史记录、聊天图片 high 缓存档位、收藏、朋友圈及朋友圈本地媒体。
 
 当前 Provider registry 已包含一个完成本机 qualification 的精确 Windows amd64 条目，可供标准 development/candidate 构建按登记 route 验收；其他 fingerprint 和架构仍保持未登记。该条目尚未取得绑定 GitHub 候选的正式 live evidence、attestation 和 promotion，因此正式 release 仍只能通过 fail-closed 负向门禁，不能把 qualification-only 结果宣称为正式发布支持。不得用源码构建、mock、x64/ARM64 互推或手工关闭门禁替代正式证据。
 
@@ -25,7 +25,7 @@
 | W64-05 | 凭据复用 | 新 PowerShell 进程执行 `refresh --require-media`，只用 `saved_keychain`，不访问微信进程、不修改 secret |
 | W64-06 | 联系人绑定 | `resolve-contact` 唯一解析到区分大小写完全一致的 `dong_zzc` |
 | W64-07 | 历史记录 | 明确日期窗内达到预置最小条数，chat 精确为 `dong_zzc`，数据库 coverage complete，已知收发方向和图片消息存在 |
-| W64-08 | 聊天高清图 | 从该历史消息的 `image_evidence_id` 导出；资源 stem + hardlink 双绑定、完整解码、SHA-256 一致，达到夹具最低像素要求 |
+| W64-08 | 聊天图片恢复矩阵 | 从历史消息的 `image_evidence_id` 导出；覆盖可解码较低层级但更高层级缺失、可解码 high、本地 WXGF 强候选、远端描述符时效未知四类；只在用户确认后自动 refresh，并对每个确认的 evidence 最多重试一次 |
 | W64-09 | 收藏 | `favorite.db/fav_db_item` source complete；达到预置最小条数，已知类型过滤结果一致 |
 | W64-10 | 朋友圈 | 精确作者、本地行和显式时间窗一致；无 identity conflict/unparsed；已知帖子、互动和本地媒体计数达到预置值 |
 | W64-11 | 朋友圈媒体 | 使用具体 `media.evidence_id` 本地导出，`network_access_performed=false`，容器严格验证成功 |
@@ -40,7 +40,7 @@ W64-00 至 W64-13 全部通过才算本机端到端通过。因本地留存而�
 
 1. 本机登录的是待验收账号，且 `dong_zzc` 是该账号中的唯一稳定 username。
 2. 选择一个明确的 `$Start`/`$End` 日期窗。窗口内至少有一条已知收到的文本、一条已知发出的文本和一条图片消息。
-3. 在微信中打开该图片的原图，使完整本地资源已缓存。记录最低分辨率要求，例如长边至少 1920、短边至少 1080；不要只根据文件名或 UI 的“原图”标签判断。
+3. 为 W64-08 准备四个独立图片状态：可完整解码的 `medium|thumbnail` 层级存在但更高层级缺失；可完整解码的 high 缓存层级；本地强关联 WXGF 候选（它可能是较低层级旁路成功，也可能因没有可解码回退而返回预期错误）；一条较旧、带结构可解析但协议未验真的远端描述符，且一次人工打开后仍未落盘更高层级候选的消息。最后一类只能证明“远端可能过期或资源不可用”，不能在 CLI 未发出已验真请求时断言确切过期原因。不要设置固定像素门槛：源图本身可能分辨率很低，`quality_tier` 只证明微信缓存层级，`width`/`height` 只记录已解码结果尺寸。
 4. 准备至少一条已知收藏，并记录期望类型，例如 `article`、`image` 或 `text`。
 5. 确认当前本地可见范围中至少保留一条 `dong_zzc` 的朋友圈。若要验收朋友圈图片，先在微信中打开该媒体，使本地缓存存在。
 6. 记录预期最小计数，不把“命令退出成功但返回 0”当作通过。
@@ -56,8 +56,6 @@ $ExpectedHistoryMin = 3
 $ExpectedFavoritesMin = 1
 $ExpectedMomentsMin = 1
 $ExpectedLocalMomentMediaMin = 1
-$MinImageLongEdge = 1920
-$MinImageShortEdge = 1080
 ```
 
 这些值是本机私有验收输入，不写入可分享证据。
@@ -217,32 +215,107 @@ if ($imageItems.Count -eq 0) { throw 'known image fixture is missing' }
 
 人工核对已知时间、方向和消息类型。正文属于不可信且敏感数据，不把内容复制到可分享证据；只在本机界面确认夹具是否匹配。
 
-## 10. W64-08：按历史证据导出高清图
+## 10. W64-08：聊天图片恢复与 CDN 时效矩阵
 
-从 `$imageItems` 中选择预先准备的那一条，而不是盲目使用第一条。把其证据标识保存在当前 PowerShell 变量中：
+在进入图片夹具前，可先运行[当前客户端静态证据检查器](../scripts/inspect-windows-chat-cdn-static-evidence.ps1)。它只扫描本地安装二进制，不读取账号数据、进程内存或网络流量：
+
+```powershell
+pwsh -NoProfile -File .\scripts\inspect-windows-chat-cdn-static-evidence.ps1
+```
+
+完整观察的退出码为 `0`，并返回 `status=current_client_static_stack_present_unbound`；标志不完整时退出码为 `2`，不得把 partial 当成“不存在”；检查失败退出码为 `1`。无论观察结果如何，都必须保持 `descriptor_to_runtime_request_binding=not_observed`、`runtime_protocol_selection=not_observed`、`endpoint_qualification=not_qualified`、`network_access_performed=false` 和 `secrets_output=false`。报告默认只含版本、文件名、大小、SHA-256、布尔观察及边界枚举，不显示安装路径；只有本机排错时增加 `-ShowPaths`。该步骤只替代陈旧实现作为架构线索，不计入真实 CDN 协议或 W64-08 下载能力通过。
+
+优先使用仓库内的[半自动验收脚本](../scripts/accept-windows-chat-image-recovery.ps1)。脚本要求 PowerShell 7（`pwsh`）；它会先在同一 generation 采集四个初始夹具。WXGF 若返回预期的 `chat_image_unavailable/decoder_unavailable`，失败响应本身也必须带同一 `generation_id` 和 manifest，不能被伪装成导出成功。脚本只对 `lower_tier_missing` 和 `expiry_unknown_descriptor` 各询问一次，并在每次询问前用当前 generation 重新预检该 evidence；用户输入脚本显示的精确确认词后，脚本自动执行一次 `refresh --require-media` 和一次同 evidence 重试。所有恢复结束后，脚本会在最新 generation 上重新探测四个夹具，避免拼接不同快照的结果：
+
+```powershell
+pwsh -NoProfile -File .\scripts\accept-windows-chat-image-recovery.ps1 `
+  -Cli 'C:\path\to\v-local-cli.exe' `
+  -Account '<本机账号名或 account_id>' `
+  -LowerTierMissingEvidenceId '<medium 或 thumbnail 且更高层级缺失的 evidence_id>' `
+  -DecodableHighEvidenceId '<可解码 high 缓存档位 evidence_id>' `
+  -WxgfCandidateEvidenceId '<本地 WXGF 强候选 evidence_id>' `
+  -ExpiryUnknownDescriptorEvidenceId '<时效未知且疑似不可用 evidence_id>' `
+  -RecoveryMode Prompt
+```
+
+默认私有图片位于 `%LOCALAPPDATA%\v-local\acceptance-private\<run-id>`，脱敏报告位于 `%LOCALAPPDATA%\v-local\acceptance-evidence\<run-id>\w64-08-chat-image-recovery.json`；两个新目录都会移除继承 ACL，只保留当前用户、SYSTEM 和 Administrators。默认控制台结果不显示绝对路径，只有本机操作者明确增加 `-ShowPaths` 才显示。报告不包含账号、evidence ID、图片 SHA-256、微信源路径、CDN URL、token 或 key；私有图片不会自动上传或删除。
+
+退出码 `0` 表示四项与恢复结果全部通过；`1` 表示安全或契约检查失败；`2` 表示用户没有确认、仅使用了 `-RecoveryMode Skip`、较低层级恢复仍未得到可验真的 high 缓存档位，或时效未知描述符夹具实际仍能恢复，因此证据不足。预期的 WXGF 解码错误只有在格式、恢复动作、无网络边界和快照代际全部匹配时才算该夹具通过。`Skip` 只用于无交互诊断，绝不能标为通过。开发者可用 `-SelfTest` 在不读取微信数据的情况下检查脚本内置四状态契约。脚本不会传入或接受聊天图片 `--allow-network`。
+
+下面保留等价的人工步骤，供审阅脚本输出或定位失败阶段。
+
+从 `$imageItems` 中选择预先准备的夹具，而不是盲目使用第一条。所有 evidence ID 只保存在本机私有变量；首次诊断写入新的私有临时路径，避免恢复后的重试被 `output_exists` 阻断：
 
 ```powershell
 $imageItems | Select-Object timestamp,evidence_id,media_md5
+$FixtureId = '<lower-tier-missing|decodable-high|wxgf-candidate|expiry-unknown-descriptor>'
 $ImageEvidenceId = '<人工选中的已知夹具 evidence_id>'
 if (-not ($imageItems.evidence_id -ccontains $ImageEvidenceId)) { throw 'image evidence is outside the selected history result' }
-$ImageOutput = Join-Path $PrivateRoot 'dong-zzc-history-image.bin'
-$imageExport = (& $Cli export-chat-image --account $Account --output $ImageOutput $ImageEvidenceId | ConvertFrom-Json)
-if ($LASTEXITCODE -ne 0) { throw 'evidence-bound chat image export failed' }
+$recoveredImage = $null
+$recoveredExitCode = $null
+$ImageProbeOutput = Join-Path $PrivateRoot "$FixtureId-before-recovery.bin"
+$imageRaw = @(& $Cli export-chat-image --account $Account --output $ImageProbeOutput $ImageEvidenceId 2>&1)
+$imageExitCode = $LASTEXITCODE
+$imageExport = (($imageRaw | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine) | ConvertFrom-Json
+if ($FixtureId -eq 'wxgf-candidate' -and $imageExitCode -eq 5) {
+  if ($imageExport.command_status -cne 'failed' -or $imageExport.error.type -cne 'chat_image_unavailable' -or
+      $imageExport.error.details.local_resolution_status -cne 'decoder_unavailable' -or
+      $imageExport.error.details.detected_format -cne 'wxgf' -or
+      [string]::IsNullOrWhiteSpace([string]$imageExport.meta.generation_id)) { throw 'WXGF failure contract or generation binding failed' }
+} elseif ($imageExitCode -ne 0 -or $imageExport.command_status -cne 'succeeded') {
+  throw 'evidence-bound chat image export failed'
+}
 ```
 
-验证强绑定和真实像素，而非扩展名：
+固定验收矩阵如下。四项都要由独立夹具命中；不能把同一输出人工改字段后重复使用：
+
+| 场景 | 必须观察到的结果 |
+| --- | --- |
+| 可解码较低层级、更高层级缺失 | `quality_tier=medium|thumbnail`、`higher_quality_local_status=missing`、`higher_quality_recovery_action=ask_user_to_open_original_then_refresh_and_retry`；两种较低层级语义相同，无论是否有描述符都必须 `network_access_performed=false` |
+| 可解码 high 缓存层级 | 选择 `quality_tier=high`、`quality_claim_scope=wechat_cache_variant_only`、`source_original_dimensions_known=false`；不设置固定像素门槛；即使较低层级与 high 层级 SHA-256 不同也不构成冲突；同一 high 层级若出现不同内容才必须 `content_conflict` |
+| 本地 WXGF 强候选 | 若另有可解码较低层级，成功响应必须带 `higher_quality_local_status=decoder_unavailable`、`higher_quality_detected_format=wxgf`；若没有可解码回退，则必须以退出码 `5` 返回 `chat_image_unavailable`，并在 `error.details` 中给出 `local_resolution_status=decoder_unavailable`、`detected_format=wxgf`、`recovery_action=do_not_request_redownload_same_candidate`。两种形态都必须绑定 generation、保持无网络，且不得再次要求用户打开原图 |
+| 描述符时效未知/资源可能不可用 | 描述符存在且结构完整时返回 `remote_descriptor_status=present_expiry_unknown`、`remote_descriptor_parse_status=parsed_unverified_protocol`；后者不证明时效或协议。仍必须为 `remote_protocol_status=unverified_desktop_protocol`、`remote_acquisition_status=unavailable_unverified_protocol`；用户确认后只 refresh/重试一次，仍缺失就停止并报告“可能过期或不可用”，不得声称已经验证过期，也不得联网 |
+
+只有成功返回 `higher_quality_local_status=missing` 的场景（任一可解码较低层级，或用于验证时效未知描述符边界的夹具）允许进入询问流程。Agent 先在当前 generation 重新预检同一 evidence，再明确请用户只在微信中打开该条原图；没有用户确认就停在此处。用户确认后，Agent 自动执行下列步骤，不让用户复制命令：
 
 ```powershell
-if ($imageExport.data.verified_by -ne 'message_resource_stem+hardlink_map+full_decode') { throw 'image lacks strong binding' }
-if ($imageExport.data.container_validation -ne 'full_decode' -or $imageExport.data.network_access_performed -ne $false) { throw 'image validation boundary failed' }
-$longEdge = [Math]::Max([int]$imageExport.data.width,[int]$imageExport.data.height)
-$shortEdge = [Math]::Min([int]$imageExport.data.width,[int]$imageExport.data.height)
-if ($longEdge -lt $MinImageLongEdge -or $shortEdge -lt $MinImageShortEdge) { throw 'resolved image is below the known high-resolution fixture threshold' }
-$actualImageHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ImageOutput).Hash.ToLowerInvariant()
-if ($actualImageHash -cne $imageExport.data.sha256) { throw 'exported image digest mismatch' }
+$refresh = (& $Cli refresh --account $Account --require-media | ConvertFrom-Json)
+if ($LASTEXITCODE -ne 0 -or $refresh.data.credential_source -ne 'saved_keychain') { throw 'recovery refresh failed' }
+if ($refresh.data.process_access_performed -ne $false -or $refresh.data.secrets_persisted -ne $false) { throw 'recovery crossed the saved-credential boundary' }
+
+$RecoveredImageOutput = Join-Path $PrivateRoot "$FixtureId-after-single-refresh.bin"
+$recoveredRaw = @(& $Cli export-chat-image --account $Account --output $RecoveredImageOutput $ImageEvidenceId 2>&1)
+$recoveredExitCode = $LASTEXITCODE
+$recoveredImage = (($recoveredRaw | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine) | ConvertFrom-Json
+if ($recoveredImage.meta.generation_id -cne $refresh.data.account.generation_id) { throw 'recovery retry did not use refreshed generation' }
+if ($recoveredExitCode -eq 0) {
+  if ($recoveredImage.data.evidence_id -cne $ImageEvidenceId) { throw 'recovery changed evidence binding' }
+  if ($recoveredImage.data.network_access_performed -ne $false) { throw 'chat image recovery unexpectedly used network' }
+} elseif ($recoveredExitCode -eq 5 -and $recoveredImage.error.details.local_resolution_status -ceq 'decoder_unavailable' -and
+          $recoveredImage.error.details.recovery_action -ceq 'do_not_request_redownload_same_candidate' -and
+          $recoveredImage.error.details.network_access_performed -eq $false) {
+  # 本地 WXGF 等候选已经存在；停止，不再要求用户打开原图。
+} else {
+  throw 'single recovery retry failed'
+}
 ```
 
-输出文件扩展名不构成格式证据，以 `data.format` 为准。若命令报告不同强候选产生不同内容，必须停止，不能按文件大小、时间或目录邻近选择所谓“原图”。
+若成功响应中的 `$recoveredImage.data.higher_quality_local_status` 仍为 `missing`，本用例到此结束并记录 `stop_after_single_refresh`。描述符即使存在也可能在用户确认前、确认期间或首次落盘尝试时失效；不要第二次提示用户、不要循环 refresh，也不要把 `present_expiry_unknown` 改写成“可下载”或“已确认过期”。若成功响应中的更高层级或失败响应中的本地候选变为 `decoder_unavailable`，按 WXGF 分支处理，同样不再提示打开原图。
+
+对“可解码 high 缓存层级”夹具（包括一次恢复后取得 high 层级的情况），最终结果验证相对缓存层级、强绑定和完整解码。像素尺寸继续记录，但不参与通过判定：
+
+```powershell
+$FinalImage = if ($recoveredImage -and $recoveredExitCode -eq 0) { $recoveredImage } else { $imageExport }
+$FinalImageOutput = if ($recoveredImage -and $recoveredExitCode -eq 0) { $RecoveredImageOutput } else { $ImageProbeOutput }
+if ($FinalImage.data.quality_tier -ne 'high') { throw 'fixture did not resolve to the high cache tier' }
+if ($FinalImage.data.quality_claim_scope -ne 'wechat_cache_variant_only' -or $FinalImage.data.source_original_dimensions_known -ne $false) { throw 'image quality claim exceeds available evidence' }
+if ($FinalImage.data.verified_by -ne 'message_resource_stem+hardlink_map+full_decode') { throw 'image lacks strong binding' }
+if ($FinalImage.data.container_validation -ne 'full_decode' -or $FinalImage.data.network_access_performed -ne $false) { throw 'image validation boundary failed' }
+$actualImageHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $FinalImageOutput).Hash.ToLowerInvariant()
+if ($actualImageHash -cne $FinalImage.data.sha256) { throw 'exported image digest mismatch' }
+```
+
+输出文件扩展名不构成格式证据，以 `data.format` 为准。不同质量层级的不同摘要是正常现象；若命令报告同一最高质量层级内的不同强候选产生 `content_conflict`，必须停止，不能按文件大小、时间或目录邻近选择所谓“原图”。
 
 ## 11. W64-09：收藏
 
@@ -290,7 +363,7 @@ if ([string]::IsNullOrWhiteSpace([string]$momentMedia.data.container_validation)
 
 ## 13. W64-12/W64-13：代际、隐私与失败原子性
 
-比较 contact、history、image export、favorites、moments 和 moment media 的 `meta.generation_id` 与 `meta.snapshot_manifest_sha256`，必须全部等于 W64-05 refresh 发布的值。若其中任何命令使用了 `--fresh` 或 generation 变化，废弃该组结果并从一次新的 refresh 重新开始。
+比较 contact、history、最终 image export、favorites、moments 和 moment media 的 `meta.generation_id` 与 `meta.snapshot_manifest_sha256`，必须全部相同。通常它们等于 W64-05 refresh 发布的值；若 W64-08 经用户确认执行了恢复 refresh，则以该次新 generation 为唯一基线，废弃此前 W64-06/W64-07 的查询结果并重新执行，不能把恢复前后的证据拼在一起。除此之外若任何命令使用了 `--fresh` 或 generation 意外变化，废弃该组结果并从一次新的 refresh 重新开始。
 
 生成 CLI 自带的脱敏诊断包：
 
@@ -314,7 +387,7 @@ if ($LASTEXITCODE -ne 0 -or $doctorBundleResult.data.diagnostic_bundle.sanitized
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "run_status": "pass|fail|inconclusive",
   "environment": {
     "windows_build": null,
@@ -369,7 +442,15 @@ if ($LASTEXITCODE -ne 0 -or $doctorBundleResult.data.diagnostic_bundle.sanitized
     "digest_compared_locally": true,
     "content_digest_included": false,
     "verified_by": "message_resource_stem+hardlink_map+full_decode",
-    "network_access_performed": false
+    "network_access_performed": false,
+    "recovery_matrix": {
+      "lower_tier_missing": "pass|fail|inconclusive",
+      "distinct_decodable_high_selected": true,
+      "wxgf_candidate_not_misreported_missing": true,
+      "descriptor_freshness_not_overstated": true,
+      "maximum_automatic_retries": 1,
+      "still_missing_outcome": "stop_after_single_refresh"
+    }
   },
   "favorites": {
     "count": null,
@@ -398,4 +479,4 @@ if ($LASTEXITCODE -ne 0 -or $doctorBundleResult.data.diagnostic_bundle.sanitized
 }
 ```
 
-最终将 W64-00 至 W64-13 的状态逐项标为 pass/fail/inconclusive，并由操作者和审阅者分别签名确认。只要 registry、签名、完整 coverage、高清图强绑定、Credential Manager 复用或隐私检查任一项未通过，整体不得标记为 pass，也不得把平台状态从 `build_only` 晋级。
+最终将 W64-00 至 W64-13 的状态逐项标为 pass/fail/inconclusive，并由操作者和审阅者分别签名确认。只要 registry、签名、完整 coverage、聊天图片 high 缓存档位强绑定、Credential Manager 复用或隐私检查任一项未通过，整体不得标记为 pass，也不得把平台状态从 `build_only` 晋级。

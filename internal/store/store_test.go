@@ -171,6 +171,80 @@ func TestHistoryAndSearchTimeWindow(t *testing.T) {
 	}
 }
 
+func TestSearchWindowFiltersBeforeApplyingResultLimit(t *testing.T) {
+	root := t.TempDir()
+	messagePath := filepath.Join(root, "message", "message_0.db")
+	if err := ensureParent(messagePath); err != nil {
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", messagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table := messageTable("alice")
+	if _, err := database.Exec("CREATE TABLE [" + table + "](local_id INTEGER,server_id INTEGER,local_type INTEGER,sort_seq INTEGER,create_time INTEGER,message_content TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	transaction, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement, err := transaction.Prepare("INSERT INTO [" + table + "] VALUES(?,?,?,?,?,?)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := statement.Exec(1, 1, 1, 1, 1, "唯一 needle 命中"); err != nil {
+		t.Fatal(err)
+	}
+	for index := 2; index <= 5002; index++ {
+		if _, err := statement.Exec(index, index, 1, index, index, "较新的非命中消息"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := statement.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, err := SearchWindow(root, "needle", "alice", nil, nil, 10)
+	if err != nil || len(hits) != 1 || hits[0].ServerID != 1 {
+		t.Fatalf("搜索在过滤前截断了候选：items=%+v err=%v", hits, err)
+	}
+}
+
+func TestCrossChatSearchKeepsOnlyNewestGlobalMatchesWhileMerging(t *testing.T) {
+	root := t.TempDir()
+	contactPath := filepath.Join(root, "contact", "contact.db")
+	if err := ensureParent(contactPath); err != nil {
+		t.Fatal(err)
+	}
+	createTestDatabase(t, contactPath,
+		"CREATE TABLE contact(username TEXT, alias TEXT, remark TEXT, nick_name TEXT)",
+		"INSERT INTO contact VALUES('alice','','','Alice'),('bob','','','Bob')",
+	)
+	messagePath := filepath.Join(root, "message", "message_0.db")
+	if err := ensureParent(messagePath); err != nil {
+		t.Fatal(err)
+	}
+	aliceTable, bobTable := messageTable("alice"), messageTable("bob")
+	createTestDatabase(t, messagePath,
+		"CREATE TABLE ["+aliceTable+"](local_id INTEGER,server_id INTEGER,local_type INTEGER,sort_seq INTEGER,create_time INTEGER,message_content TEXT)",
+		"INSERT INTO ["+aliceTable+"] VALUES(1,101,1,100,100,'needle alice old'),(2,102,1,400,400,'needle alice new')",
+		"CREATE TABLE ["+bobTable+"](local_id INTEGER,server_id INTEGER,local_type INTEGER,sort_seq INTEGER,create_time INTEGER,message_content TEXT)",
+		"INSERT INTO ["+bobTable+"] VALUES(1,201,1,200,200,'needle bob old'),(2,202,1,500,500,'needle bob new')",
+	)
+
+	hits, err := SearchWindow(root, "needle", "", nil, nil, 2)
+	if err != nil || len(hits) != 2 || hits[0].ServerID != 202 || hits[1].ServerID != 102 {
+		t.Fatalf("跨会话有限搜索没有保留全局最新命中：items=%+v err=%v", hits, err)
+	}
+}
+
 func TestSearchMatchesStructuredCardDetails(t *testing.T) {
 	root := t.TempDir()
 	messagePath := filepath.Join(root, "message", "message_0.db")

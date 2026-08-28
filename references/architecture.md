@@ -20,7 +20,7 @@ Agent → SKILL.md → v-local-cli CLI
 
 外部密钥组件是可选且单独安装的程序。主仓库不包含外部密钥组件源码或二进制，也不会在 npm 安装阶段静默安装它。
 
-朋友圈图片和普通视频的可选远端路径不经过外部密钥组件：`export-moment-media` 先复用本地媒体验证；只有命令本次显式带 `--allow-network` 且本地未命中时，才把该媒体 XML 内的临时令牌发往按类型限制的腾讯 CDN。图片解密完整响应；普通视频使用同一条 XML 的外层 key，只解密前 131072 字节。普通查询、`--resolve-media`、公众号卡片和聊天导出都不会进入这条路径。
+朋友圈图片和普通视频的可选远端路径不经过外部密钥组件：`export-moment-media` 先复用本地媒体验证；只有命令本次显式带 `--allow-network` 且本地未命中时，才把该媒体 XML 内的临时令牌发往按类型限制的腾讯 CDN。描述符按临时能力处理，授权前时效未知，成功也只证明请求当时有效。图片解密完整响应；普通视频使用同一条 XML 的外层 key，只解密前 131072 字节。普通查询、`--resolve-media`、公众号卡片和聊天导出都不会进入这条路径；聊天图片仅识别并脱敏报告可能存在的远端层级，桌面协议未经真机验收前不联网。
 
 语音通过消息 `server_id` 精确关联快照 `media_*.db/VoiceInfo`，SILK 解码在 Go 二进制内完成。可选 whisper.cpp 由用户安装并显式配置，CLI 只把权限受限临时 WAV 交给本地子进程，成功或失败后删除；清理失败会使本次转写失败，成功文本才写入账号私有转写库。CLI 不自动下载模型，也不提供在线 ASR 回退。用户选择的外部密钥组件、whisper.cpp 和 ASR 适配器仍以当前桌面用户权限运行，结构化协议和自报离线状态不是操作系统沙箱。
 
@@ -58,7 +58,7 @@ Windows 实验 OCR 只从 Known Folder API 返回的 Program Files 根发现安�
 
 查询只连接已发布的明文快照，SQLite 连接同时使用 `mode=ro`、`immutable=1` 和 `query_only`。联系人按字段探测读取；消息表按 `Msg_<md5(username)>` 定位；zstd 压缩正文在内存中受限解码。
 
-聊天查询按本地时区解析共享时间窗：个人或公众号默认当前自然月，群聊和跨会话搜索默认当前自然日；显式日期或 `--all` 可以覆盖默认值，实际范围回显在 `meta.time_window`，证据版本回显在 `meta.generation_id` 与 manifest 摘要。
+聊天查询按本地时区解析共享时间窗：个人或公众号默认当前自然月，群聊和跨会话搜索默认当前自然日；显式日期或 `--all` 可以覆盖默认值，实际范围回显在 `meta.time_window`，证据版本回显在 `meta.generation_id` 与 manifest 摘要。日期与条数正交：`--all` 只取消日期边界，`--limit 0` 才取消结果上限。
 
 `stats` 直接扫描选定时间窗内的类型、发送者编号和时间字段，不加载正文；系统消息从发言统计中排除并单独计数。
 
@@ -68,13 +68,13 @@ Windows 实验 OCR 只从 Known Folder API 返回的 Program Files 根发现安�
 
 公众号卡片查询只扫描独立 `biz_message` 分片，解析本机留存的 `mmreader/category/item` 多图文卡片。它不打开卡片 URL，也不把卡片元数据声明为文章正文或完整发布历史。独立正文命令必须用同一快照证据重新定位文章，并经过逐篇网络授权、目标解析、响应限制和正文节点验证。
 
-结构化搜索优先使用当前 generation 的派生消息索引。索引逐表探测所有可识别消息表，保存稳定证据标识、内容摘要、发送者、提及、引用、语音转写和文本型详情；token、secret、key 一类字段排除在全文文本之外。FTS tokenizer 不可用时按 manifest 明确降级。索引缺失或绑定无效时，普通 `search` 可回退到原有已发现联系人扫描，并在 `search_backend_status` 说明其不完整范围；绝不把旧 generation 索引冒充当前结果。
+结构化搜索优先使用当前 generation 的派生消息索引。索引逐表探测所有可识别消息表，保存稳定证据标识、内容摘要、发送者、提及、引用、语音转写和文本型详情；token、secret、key 一类字段排除在全文文本之外。FTS tokenizer 不可用时按 manifest 明确降级。索引缺失或绑定无效时，普通 `search` 可回退到原有已发现联系人扫描，并在 `search_backend_status` 说明其不完整范围；回退扫描先在整个目标时间窗过滤关键词，再施加结果上限，不能先截断最新候选而漏掉较早命中。绝不把旧 generation 索引冒充当前结果。
 
 `new-messages` 通过稳定排序键比较两个不可变 generation，返回新增或内容摘要变化的证据。每个 consumer 固定 base/target generation 及对应 snapshot manifest 摘要，poll 先原子持久化 pending batch 再输出，只有相同 `batch_id` 被 ack 后才推进位置，因此是 at-least-once，不是实时监听。批次上限只切分结果，不会跳过尾部；绑定不符或覆盖不完整的 generation 不允许推进。
 
-可选查询 daemon 与 CLI 使用同一二进制，只绑定 IPv4 loopback，并用当前用户私有随机令牌认证。它只接受不刷新、不联网、不导出、不解析账号源媒体、不读取可变私有 ASR cache、不改变游标或索引的 immutable generation 查询。成功响应的有界缓存键包含账号、generation、snapshot manifest 摘要、派生索引身份、参数、本地日期和二进制版本；状态或索引可用性切换后旧缓存不会命中。客户端 YAML/table 只改变展示，daemon 协议仍为 JSON。
+可选查询 daemon 与 CLI 使用同一二进制，只绑定 IPv4 loopback，并用当前用户私有随机令牌认证。endpoint 记录 CLI 版本和启动时可执行文件 SHA-256，客户端在连接前复核两者；替换或升级二进制后查询会拒绝旧 daemon，应先执行 `daemon stop` 再重启。同一 endpoint 协议下，停止动作仍要求私有令牌，但专门允许关闭摘要不同的旧构建。它只接受不刷新、不联网、不导出、不解析账号源媒体、不读取可变私有 ASR cache、不改变游标或索引的 immutable generation 查询。成功响应的有界缓存键包含账号、generation、snapshot manifest 摘要、派生索引身份、参数、本地日期和二进制版本；状态或索引可用性切换后旧缓存不会命中。客户端 YAML/table 只改变展示，daemon 协议仍为 JSON。
 
-`--all` 且没有显式 `--limit` 时不设置结果条数上限；结果仍只代表当前 generation、`meta.database_coverage_status` 和命令回显的领域限定状态。全量 `export` 通过账号私有临时 SQLite 完成跨分片排序，再流式写最终 JSON/JSONL，避免把全部消息装入内存，结束后立即删除暂存库。
+`--all` 只改变时间窗口；默认结果上限仍生效。显式 `--limit 0` 才取消条数上限，并可与显式日期范围合用；结果仍只代表当前 generation、`meta.database_coverage_status` 和命令回显的领域限定状态。有限 `history`、`search` 与 `export` 多取一条探测并回显 `has_more`/`truncated`。无上限 `export` 通过账号私有临时 SQLite 完成跨分片排序，再流式写最终 JSON/JSONL，避免把全部消息装入内存，结束后立即删除暂存库。
 
 用户可见输出默认采用仅在目标不存在时发布的语义；`export`、`export-media`、`export-moment-media` 和诊断包只有显式 `--force` 才覆盖。输出目标是符号链接、Windows 重解析点或特殊文件时始终拒绝；硬链接覆盖通过发布新的普通文件打断链接关系，不修改其他名字指向的内容。写入与覆盖备份都使用目标目录内随机独占的兄弟临时文件，避免固定 PID、`.tmp` 或 `.old` 名称造成抢占和误删。
 

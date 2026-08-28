@@ -49,7 +49,7 @@ GitHub runner 的架构与临时虚拟机边界以 [GitHub-hosted runners refere
 5. 对联系人、会话、快照未读、群成员、收藏、私聊、群聊和结构化卡片分别运行受限 `contacts`、`resolve-contact`、`sessions`、`unread`、`members`、`favorites`、`history`、`search` 与 `stats`，再用人工已知样本核对时间、发送方、类型和条数。至少制造一次同名联系人，确认模糊名称返回 `ambiguous_contact` 而不是自动取第一项。
 6. 运行 `index status` 和 `index build`，确认 manifest 的账号、generation 和 snapshot 摘要与本次快照一致，document count 与 SQLite 行数一致；结构化搜索命中提及、引用和卡片文字，token/key 字段不会成为全文命中来源。破坏测试副本中的任一绑定后必须拒绝复用。
 7. 分别运行默认 JSON、命令前全局 `--output yaml` 和 `--output table`；JSON 契约保持不变，YAML 可解析，table 明确只供人工阅读且不泄露默认隐藏路径。
-8. 启动 `daemon serve`，确认只监听 `127.0.0.1`、无 token 请求被拒绝、白名单查询绑定当前 generation；`refresh`、`--fresh`、`index build`、`new-messages` 和联网/导出命令必须被拒绝。停止后 endpoint 文件删除。
+8. 启动 `daemon serve`，确认只监听 `127.0.0.1`、无 token 请求被拒绝、白名单查询绑定当前 generation，且 endpoint 的版本/可执行文件 SHA-256 与客户端不一致时查询在连接前拒绝；同协议旧构建仍可由持有私有 token 的 `daemon stop` 关闭。`refresh`、`--fresh`、`index build`、`new-messages` 和联网/导出命令必须被拒绝。停止后 endpoint 文件删除。
 9. 运行一次 JSON/JSONL 导出，验证默认拒绝覆盖、显式 `--force`、符号链接拒绝以及失败后无临时输出残留。
 
 通过条件：发现范围、解密报告和查询结果与人工样本一致；任何缺失分片、未知消息类型或时间差异都有明确覆盖说明。

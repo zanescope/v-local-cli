@@ -14,11 +14,11 @@
 
 - `base_type`、`sub_type`、`type_label` 和稳定英文 `kind`；
 - `details`：卡片标题、摘要、URL、来源、文件标识与大小、公众号多图文文章，或合并聊天记录的 `items[]`；
-- `reply_to`：引用对象、被引用文本、服务端标识和媒体 MD5；
+- `reply_to`：`to_username` 保留引用 XML 的稳定对象，`to_name` 保留或补全显示名，`identity_status=resolved|unresolved|display_only|not_retained` 明示解析程度，另有被引用文本、服务端标识和媒体 MD5。没有 `reply_to` 就不能从相邻顺序推断回复关系；
 - `mentions`、`voice_duration_ms`、`voice_transcript`、`voice_transcript_source`、`media_md5`；
-- `sender_username`、`sender_nickname`、`sender_remark`、`sender_contact_display`、`sender_group_nickname`、`sender_identity` 和 `is_from_me`。`sender` 按「群昵称 → 联系人显示名 → 微信昵称 → username」选择；`sender_identity` 是基于本地状态字段的 `self`、`contact` 或 `unknown` 兼容性判定，不是服务器身份凭证。
+- `sender_username`、`sender_nickname`、`sender_remark`、`sender_contact_display`、`sender_group_nickname`、`sender_identity` 和 `is_from_me`。普通消息的 `sender` 按「群昵称 → 联系人显示名 → 微信昵称 → username」选择；`sender_identity` 是基于本地状态字段的 `self`、`contact`、`unknown` 或 `system` 兼容性判定，不是服务器身份凭证。系统消息统一返回 `sender=系统`、`sender_identity=system`、`is_from_me=false`，同时把可用的原始发送者字段作为低层证据保留。
 
-每条消息的 `evidence_id` 绑定会话 username 与服务端/本地主键。对 `kind=image`，使用该标识调用 `export-chat-image`，由 CLI 重新结合 `message_resource.db` 和 `hardlink.db` 强绑定并完整解码本地图片；不要从 `media_md5`、时间邻近或目录位置自行猜测图片路径。
+每条消息的 `evidence_id` 绑定会话 username 与服务端/本地主键。对 `kind=image`，使用该标识调用 `export-chat-image`，由 CLI 重新结合 `message_resource.db` 和 `hardlink.db` 强绑定并完整解码本地图片；不要从 `media_md5`、时间邻近或目录位置自行猜测图片路径。返回的 `quality_tier` 只区分微信缓存的 high/medium/thumbnail/unknown 相对层级，不代表绝对分辨率；`width`/`height` 只是解码输出尺寸，源图原始尺寸当前未知，不能用固定像素门槛判定是否取得 high 层级。`remote_descriptor_parse_status` 只报告远端材料的本地结构完整性；即使为 `parsed_unverified_protocol` 也不代表尚未过期或可以下载。当前仅通过合成 loopback 加解密/绑定安全壳，桌面请求协议未验收且不会联网。
 
 专属结构：
 
@@ -30,6 +30,6 @@
 
 文本、引用文本、合并聊天记录摘要和已知的微信方括号表情会统一归一化为 Unicode；只转换白名单中的微信表情名，未知的 `[内容]` 原样保留，避免误改金额或普通括号文本。
 
-合并聊天记录最多展开 500 项，公众号多图文最多展开 100 项；超限会明确标记 `truncated`。应用消息原文超过 4 MB，或含 `DOCTYPE`/`ENTITY` 声明时拒绝 XML 解析。畸形 XML 只提取少量安全字段并标记回退状态。`search` 会匹配紧凑摘要、详情、引用文本和提及列表。
+合并聊天记录最多展开 500 项，公众号多图文最多展开 100 项；超限会明确标记 `truncated`。应用消息原文超过 4 MB，或含 `DOCTYPE`/`ENTITY` 声明时拒绝 XML 解析。畸形 XML 只提取少量安全字段并标记回退状态。`search` 会匹配紧凑摘要、详情、引用对象 username、引用文本和提及列表；有限 `history`/`search` 的顶层结果另用 `has_more`/`truncated` 明示是否还有命中。
 
 统计命令仍直接按数据库行及 `local_type` 计数，不加载消息正文。因此卡片解析失败不会改变总消息数，也不会把一张合并聊天记录按内部条数重复计入基础统计。

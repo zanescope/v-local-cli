@@ -190,11 +190,14 @@ func runOCRRecognize(args []string) (any, error) {
 	}
 	image, err := store.ResolveChatImage(value.SnapshotPath, value.AccountPath, message.EvidenceID, aesKey, xorKey)
 	if err != nil {
-		return nil, &commandError{
-			typeName: "chat_image_unavailable", message: "无法从本地资源中验真这条聊天图片",
-			hint:    "先在微信中打开该图片，运行 refresh 后重试；加密 DAT 还需要 setup 保存已验真的图片密钥。",
-			details: map[string]any{"reason": err.Error(), "private_ipc_invoked": false, "network_performed": false}, code: 5,
+		mapped := chatImageCommandError(err)
+		if commandErr, ok := mapped.(*commandError); ok {
+			if details, ok := commandErr.details.(map[string]any); ok {
+				details["private_ipc_invoked"] = false
+				details["network_performed"] = false
+			}
 		}
+		return nil, mapped
 	}
 	temporaryDirectory, err := state.EnsureExportTempPath(value.AccountID)
 	if err != nil {
@@ -346,15 +349,15 @@ func runOCRSearch(args []string) (any, error) {
 	start := set.String("start", "", "开始日期 YYYY-MM-DD")
 	end := set.String("end", "", "结束日期 YYYY-MM-DD")
 	all := set.Bool("all", false, "取消默认日期范围")
-	limit := set.Int("limit", 200, "最多扫描和返回的图片条数")
-	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || strings.TrimSpace(set.Args()[0]) == "" || *limit < 1 || *limit > 5000 {
+	limit := set.Int("limit", 200, "最多扫描和返回的图片条数；0 表示不设上限")
+	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || strings.TrimSpace(set.Args()[0]) == "" || *limit < 0 || *limit > 5000 {
 		return nil, invalidArguments("用法：v-local-cli ocr-search [--account NAME] [--chat USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <关键词>")
 	}
 	window, err := resolveTimeWindow(*chat, *start, *end, *all, time.Now())
 	if err != nil {
 		return nil, err
 	}
-	effectiveLimit := effectiveResultLimit(*all, limitExplicit, *limit)
+	effectiveLimit := *limit
 	value, err := resolveInitializedAccount(*account)
 	if err != nil {
 		return nil, err

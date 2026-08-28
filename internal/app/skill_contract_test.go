@@ -165,6 +165,173 @@ func TestSkillContractMatchesCommandSchema(t *testing.T) {
 	}
 }
 
+func TestChatImageAgentRecoveryContract(t *testing.T) {
+	definition := schemaCommands(t)["export-chat-image"].(map[string]any)
+	recovery := definition["agent_recovery"].(map[string]any)
+	if recovery["requires_user_confirmation"] != true || recovery["refresh_command"] != "refresh --require-media" ||
+		recovery["retry_evidence_binding"] != "same_image_evidence_id" || recovery["maximum_automatic_retries"] != 1 ||
+		recovery["network"] != false || recovery["still_missing_outcome"] != "stop_and_report_remote_may_be_expired_or_unavailable" {
+		t.Fatalf("聊天图片 Agent 恢复契约发生漂移：%v", recovery)
+	}
+	if definition["remote_descriptor_expiry"] != "unknown_without_verified_request; may_already_be_expired" ||
+		definition["remote_protocol_qualification"] != "not_qualified" || definition["remote_synthetic_harness_status"] != "crypto_binding_passed" ||
+		definition["remote_real_endpoint_enabled"] != false ||
+		definition["remote_synthetic_endpoint_scope"] != "literal_loopback_tls_only" ||
+		definition["remote_qualification_binding"] != "plaintext_md5_or_size_plus_dimensions" ||
+		definition["remote_descriptor_secrets_output"] != false || definition["remote_acquisition_implemented"] != false || definition["network"] != false {
+		t.Fatalf("聊天 CDN 时效或联网边界发生漂移：%v", definition)
+	}
+	parseStatuses := definition["remote_descriptor_parse_statuses"].([]string)
+	for _, expected := range []string{"parsed_unverified_protocol", "parsed_partial_unverified_protocol", "present_incomplete", "present_invalid", "not_applicable", "not_evaluated"} {
+		found := false
+		for _, actual := range parseStatuses {
+			if actual == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("聊天 CDN 描述符解析状态缺失：%s", expected)
+		}
+	}
+	if definition["quality_claim_scope"] != "wechat_cache_variant_only" ||
+		definition["source_original_dimensions_known"] != false ||
+		definition["dimensions_role"] != "decoded_output_observation_not_quality_gate" {
+		t.Fatalf("聊天图片质量声明超出可用证据：%v", definition)
+	}
+
+	root := repositoryRoot(t)
+	skill, err := os.ReadFile(filepath.Join(root, "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"用户确认后由 Agent 自动运行 `refresh --require-media`",
+		"仍使用同一个 `image_evidence_id`",
+		"最多自动重试一次",
+		"远端描述符可能已经过期或资源不可用",
+		"不要循环催促用户",
+		"synthetic_crypto_binding_harness_only",
+		"真实端点被代码禁止",
+	} {
+		if !bytes.Contains(skill, []byte(expected)) {
+			t.Errorf("SKILL.md 缺少聊天图片恢复边界：%s", expected)
+		}
+	}
+	script, err := os.ReadFile(filepath.Join(root, "scripts", "accept-windows-chat-image-recovery.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptText := string(script)
+	for _, expected := range []string{
+		"[ValidateSet('Prompt', 'Skip')]",
+		"[string]$LowerTierMissingEvidenceId",
+		"[string]$WxgfCandidateEvidenceId",
+		"[string]$ExpiryUnknownDescriptorEvidenceId",
+		"$ConfirmationToken = \"OPENED-$($Definition.Name)\"",
+		"@('refresh', '--account', $AccountName, '--require-media')",
+		"maximum_automatic_retries = 1",
+		"automatic_retry_attempts = 1",
+		"stop_after_single_refresh_remote_may_be_expired_or_unavailable",
+		"contains_evidence_ids = $false",
+		"contains_urls_tokens_or_keys = $false",
+		"generation_changed_by_recovery",
+		"recovery_database_coverage_regressed",
+		"recovery_preflight_generation_mismatch",
+		"recovery_did_not_publish_new_generation",
+		"powershell_7_required",
+		"if ($ShowPaths)",
+		"fixed_dimension_quality_gate = $false",
+		"-Width 320 -Height 240",
+		"dimensions_role = 'decoded_output_observation_not_quality_gate'",
+		"remote_descriptor_parse_status = $RemoteParseStatus",
+		"pass_expected_decoder_unavailable",
+		"quality_claim_scope = 'wechat_cache_variant_only'",
+	} {
+		if !strings.Contains(scriptText, expected) {
+			t.Errorf("Windows 图片验收脚本缺少恢复边界：%s", expected)
+		}
+	}
+	if strings.Contains(scriptText, "--allow-network") {
+		t.Fatal("Windows 图片验收脚本不得启用聊天图片联网")
+	}
+	for _, forbidden := range []string{"MinImageLongEdge", "MinImageShortEdge", "decodable_high_dimensions_failed", "recovered_high_dimensions_failed"} {
+		if strings.Contains(scriptText, forbidden) {
+			t.Errorf("Windows 图片验收脚本不得用固定边长判定 high 层级：%s", forbidden)
+		}
+	}
+	for _, obsolete := range []string{"ThumbnailOnlyEvidenceId", "thumbnail_only", "WxgfHighEvidenceId", "wxgf_high", "StaleDescriptorEvidenceId", "stale_descriptor"} {
+		if strings.Contains(scriptText, obsolete) {
+			t.Errorf("Windows 图片验收脚本保留了会扩大或误述夹具语义的旧名称：%s", obsolete)
+		}
+	}
+	if strings.Count(scriptText, "@('refresh', '--account', $AccountName, '--require-media')") != 1 {
+		t.Fatal("Windows 图片验收脚本必须只保留一个受控 refresh 调用点")
+	}
+	staticEvidenceScript, err := os.ReadFile(filepath.Join(root, "scripts", "inspect-windows-chat-cdn-static-evidence.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	staticEvidenceText := string(staticEvidenceScript)
+	for _, expected := range []string{
+		"v-local-cli/windows-chat-cdn-static-evidence/v1",
+		"current_client_static_stack_present_unbound",
+		"descriptor_to_runtime_request_binding = 'not_observed'",
+		"runtime_protocol_selection = 'not_observed'",
+		"endpoint_qualification = 'not_qualified'",
+		"network_access_performed = $false",
+		"process_memory_access_performed = $false",
+		"account_data_access_performed = $false",
+		"secrets_output = $false",
+		"binary_changed_during_scan",
+	} {
+		if !strings.Contains(staticEvidenceText, expected) {
+			t.Errorf("Windows 聊天 CDN 静态证据脚本缺少边界：%s", expected)
+		}
+	}
+	for _, forbidden := range []string{"Invoke-WebRequest", "Invoke-RestMethod", "Start-BitsTransfer", "Get-DnsClientCache", "Get-NetTCPConnection", "netstat", "OpenProcess", "ReadProcessMemory"} {
+		if strings.Contains(staticEvidenceText, forbidden) {
+			t.Errorf("Windows 聊天 CDN 静态证据脚本不得联网或读取进程内存：%s", forbidden)
+		}
+	}
+	acceptance, err := os.ReadFile(filepath.Join(root, "references", "windows-amd64-local-acceptance.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(acceptance, []byte("../scripts/accept-windows-chat-image-recovery.ps1")) ||
+		!bytes.Contains(acceptance, []byte("../scripts/inspect-windows-chat-cdn-static-evidence.ps1")) ||
+		!bytes.Contains(acceptance, []byte("current_client_static_stack_present_unbound")) ||
+		!bytes.Contains(acceptance, []byte("退出码 `0`")) || !bytes.Contains(acceptance, []byte("`1` 表示")) ||
+		!bytes.Contains(acceptance, []byte("`2` 表示")) ||
+		!bytes.Contains(acceptance, []byte("不要设置固定像素门槛")) ||
+		!bytes.Contains(acceptance, []byte("WXGF 若返回预期的 `chat_image_unavailable/decoder_unavailable`")) ||
+		!bytes.Contains(acceptance, []byte("每次询问前用当前 generation 重新预检")) {
+		t.Fatal("Windows 真机验收文档没有公开脚本入口或退出状态")
+	}
+	mediaReference, err := os.ReadFile(filepath.Join(root, "references", "media-decrypt.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"不能把字段值本身当作可直接请求的 HTTPS URL",
+		"不能据此断言桌面聊天描述符可复用",
+		"synthetic_crypto_binding_harness_only",
+		"仅作历史线索",
+		"不能证明 2026 年当前 Windows 桌面端",
+		"Weixin 4.1.12.55",
+		"current_client_static_stack_present_unbound",
+		"descriptor_to_runtime_request_binding=not_observed",
+		"不预设它属于 iLink 风格 HTTPS 或旧版二进制 CDN",
+		"任何非 loopback 端点都会在请求前拒绝",
+		"重新取得单次授权",
+		"`429` 只表示限流",
+	} {
+		if !bytes.Contains(mediaReference, []byte(expected)) {
+			t.Errorf("聊天 CDN 资格门禁文档缺少边界：%s", expected)
+		}
+	}
+}
+
 func TestImplementedFlagsMatchCommandSchema(t *testing.T) {
 	root := repositoryRoot(t)
 	commands := schemaCommands(t)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/tls"
+	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -174,6 +175,64 @@ func TestExportMomentMediaRequiresAuthorizationThenDecryptsRemoteImage(t *testin
 	_, err = exportMomentMediaWithDownloader(context.Background(), root, evidenceID, options, downloader)
 	if !errors.As(err, &exportErr) || exportErr.Kind != "moment_media_network_authorization_required" || downloader.calls != 1 {
 		t.Fatalf("联网授权被复用到后续调用：err=%v calls=%d", err, downloader.calls)
+	}
+}
+
+func TestExportMomentMediaValidatesDescriptorBeforeRequestingAuthorization(t *testing.T) {
+	root := t.TempDir()
+	payload := testPNG("missing-descriptor")
+	evidenceID := createMomentExportFixture(t, root, payload, "12345", "")
+	database, err := sql.Open("sqlite", filepath.Join(root, "sns", "sns.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content string
+	if err := database.QueryRow("SELECT content FROM SnsTimeLine WHERE tid=29").Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	content = strings.ReplaceAll(content, "token=embedded-token-value&amp;unused=public", "unused=public")
+	if _, err := database.Exec("UPDATE SnsTimeLine SET content=? WHERE tid=29", content); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	downloader := &fakeMomentDownloader{}
+	_, err = exportMomentMediaWithDownloader(context.Background(), root, evidenceID, MomentMediaExportOptions{
+		MomentMediaOptions: MomentMediaOptions{AccountPath: t.TempDir()},
+	}, downloader)
+	var exportErr *MomentMediaExportError
+	if !errors.As(err, &exportErr) || exportErr.Kind != "moment_media_remote_descriptor_missing" || downloader.calls != 0 {
+		t.Fatalf("不完整描述符不应先请求联网授权：%v", err)
+	}
+}
+
+func TestExportMomentMediaRejectsUntrustedURLBeforeRequestingAuthorization(t *testing.T) {
+	root := t.TempDir()
+	payload := testPNG("untrusted-url")
+	evidenceID := createMomentExportFixture(t, root, payload, "12345", "secret-token")
+	database, err := sql.Open("sqlite", filepath.Join(root, "sns", "sns.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content string
+	if err := database.QueryRow("SELECT content FROM SnsTimeLine WHERE tid=29").Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	content = strings.ReplaceAll(content, "szmmsns.qpic.cn", "example.com")
+	if _, err := database.Exec("UPDATE SnsTimeLine SET content=? WHERE tid=29", content); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	downloader := &fakeMomentDownloader{}
+	_, err = exportMomentMediaWithDownloader(context.Background(), root, evidenceID, MomentMediaExportOptions{
+		MomentMediaOptions: MomentMediaOptions{AccountPath: t.TempDir()},
+	}, downloader)
+	var exportErr *MomentMediaExportError
+	if !errors.As(err, &exportErr) || exportErr.Kind != "moment_media_remote_url_rejected" || downloader.calls != 0 {
+		t.Fatalf("不可信目标不应先请求联网授权：%v", err)
 	}
 }
 

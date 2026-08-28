@@ -48,7 +48,7 @@ jobs:
           go mod verify
           go test ./...
           go vet ./...
-          go test ./internal/app -run 'Test(SkillContractMatchesCommandSchema|ImplementedFlagsMatchCommandSchema|DocumentationCommandOptionsMatchSchema|ExternalCommandErrorsHaveRecoveryDocumentation|PackageVersionMatchesRuntimeVersion|DocumentationRelativeLinksResolve|OfficialArticleDNSFallbackDocumentationMatchesImplementation|NativeOCRSandboxBoundaryIsDocumented|MacOSAcceptanceBoundaryMatchesCapabilities|DocumentedEnvironmentVariablesMatchImplementation)$'
+          go test ./internal/app -run 'Test(SkillContractMatchesCommandSchema|ChatImageAgentRecoveryContract|ImplementedFlagsMatchCommandSchema|DocumentationCommandOptionsMatchSchema|ExternalCommandErrorsHaveRecoveryDocumentation|PackageVersionMatchesRuntimeVersion|DocumentationRelativeLinksResolve|OfficialArticleDNSFallbackDocumentationMatchesImplementation|NativeOCRSandboxBoundaryIsDocumented|MacOSAcceptanceBoundaryMatchesCapabilities|DocumentedEnvironmentVariablesMatchImplementation)$'
       - name: 运行 npm 与 Skill 打包测试
         working-directory: npm
         run: node --test tests/*.test.js

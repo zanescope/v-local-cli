@@ -54,7 +54,7 @@ locks/
   <account_id>.lock
 ```
 
-`state.json` 只指向一个已发布的不可变版本，并保留其 manifest 摘要；不包含密钥。`derived/<generation_id>` 是从对应 snapshot 原子构建的结构化消息索引，manifest 同时绑定账号、generation、snapshot 摘要和 parser/schema 版本；它不是微信源数据，也不能跨 generation 复用。`inbox` 保存每个 consumer 的原子增量位置和未确认批次；`gc` 会保留仍被游标引用的派生 generation。`daemon/endpoint.json` 保存 loopback endpoint、PID 和随机认证令牌，只对当前用户开放，`forget` 单个账号不会删除 daemon 控制状态。
+`state.json` 只指向一个已发布的不可变版本，并保留其 manifest 摘要；不包含密钥。`derived/<generation_id>` 是从对应 snapshot 原子构建的结构化消息索引，manifest 同时绑定账号、generation、snapshot 摘要和 parser/schema 版本；它不是微信源数据，也不能跨 generation 复用。`inbox` 保存每个 consumer 的原子增量位置和未确认批次；`gc` 会保留仍被游标引用的派生 generation。`daemon/endpoint.json` 保存 loopback endpoint、PID、CLI 版本、可执行文件 SHA-256 和随机认证令牌，只对当前用户开放，`forget` 单个账号不会删除 daemon 控制状态。
 
 `voice-transcripts.db` 保存用户选择生成的语音转写、音频摘要和本地引擎/模型名称，不保存原始语音；`ocr-texts.db` 保存 OCR 文字、图片摘要和证据元数据，不保存原始图片。`keychain` 模式把最小候选集合保存到当前桌面用户的系统凭据库。`tmp` 用于受限导出、视频验证、OCR 明文图片和本地 ASR 的临时 WAV/文本；成功或失败都会尽快删除临时文件，清理失败时命令会显式报错。
 

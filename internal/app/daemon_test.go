@@ -30,7 +30,7 @@ func TestDaemonUsesAuthenticatedLoopbackAndStopsCleanly(t *testing.T) {
 	if err := serveDaemon(); err == nil || !strings.Contains(err.Error(), "已经运行") {
 		t.Fatalf("daemon 单实例锁未生效：%v", err)
 	}
-	if !strings.HasPrefix(info.Address, "127.0.0.1:") || len(info.Token) != 64 {
+	if !strings.HasPrefix(info.Address, "127.0.0.1:") || len(info.Token) != 64 || !validLowerHexSHA256(info.ExecutableSHA256) || info.Version != Version {
 		t.Fatalf("daemon 端点不安全：%+v", info)
 	}
 	path, _ := daemonInfoPath()
@@ -41,6 +41,16 @@ func TestDaemonUsesAuthenticatedLoopbackAndStopsCleanly(t *testing.T) {
 	if err != nil || ping.Status != "ready" {
 		t.Fatalf("daemon ping 异常：response=%+v err=%v", ping, err)
 	}
+	wrongVersion := info
+	wrongVersion.Version = "stale-build"
+	if _, err := daemonExchange(wrongVersion, "__ping__", nil); err == nil || !strings.Contains(err.Error(), "不匹配") {
+		t.Fatalf("daemon 客户端未拒绝不同版本：%v", err)
+	}
+	wrongExecutable := info
+	wrongExecutable.ExecutableSHA256 = strings.Repeat("0", 64)
+	if _, err := daemonExchange(wrongExecutable, "__ping__", nil); err == nil || !strings.Contains(err.Error(), "不匹配") {
+		t.Fatalf("daemon 客户端未拒绝不同可执行文件：%v", err)
+	}
 	denied, err := daemonExchange(info, "refresh", nil)
 	if err != nil || denied.ExitCode == 0 || !strings.Contains(denied.Stderr, "白名单") {
 		t.Fatalf("daemon 未拒绝 refresh：response=%+v err=%v", denied, err)
@@ -49,8 +59,8 @@ func TestDaemonUsesAuthenticatedLoopbackAndStopsCleanly(t *testing.T) {
 	if err != nil || denied.ExitCode == 0 || !strings.Contains(denied.Stderr, "拒绝") {
 		t.Fatalf("daemon 未拒绝可变本地媒体解析：response=%+v err=%v", denied, err)
 	}
-	if _, err := daemonExchange(info, "__stop__", nil); err != nil {
-		t.Fatal(err)
+	if stopped, err := daemonStopExchange(wrongVersion); err != nil || stopped.Status != "stopping" {
+		t.Fatalf("升级后的客户端无法关闭同协议旧 daemon：response=%+v err=%v", stopped, err)
 	}
 	select {
 	case err := <-done:
