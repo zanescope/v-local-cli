@@ -123,6 +123,57 @@ func TestFixedProviderInstallPathIsArchitectureScoped(t *testing.T) {
 	}
 }
 
+func TestCandidateBuildReportsItsUnsignedIntegrityState(t *testing.T) {
+	previous := buildMode
+	buildMode = "candidate"
+	t.Cleanup(func() { buildMode = previous })
+	name := "v-local-key-provider"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	providerPath := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(providerPath, []byte("test"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	status := Current(providerPath)
+	if !status.Available || status.Integrity != "candidate_unverified" {
+		t.Fatalf("候选 Provider 没有保留未签名通道身份：%+v", status)
+	}
+}
+
+func TestCandidateBuildDiscoversFixedProviderInstallation(t *testing.T) {
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		t.Skip("固定 Provider 安装目录只适用于 Windows 与 macOS")
+	}
+	previous := buildMode
+	buildMode = "candidate"
+	t.Cleanup(func() { buildMode = previous })
+	t.Setenv(EnvironmentVariable, "")
+	t.Setenv(DevelopmentBinaryPathVariable, "")
+	t.Setenv(DevelopmentModeVariable, "")
+	t.Setenv(DevelopmentUnverifiedVariable, "")
+	base := t.TempDir()
+	if runtime.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", base)
+	} else {
+		t.Setenv("HOME", base)
+	}
+	providerPath := fixedProviderInstallPath()
+	if providerPath == "" {
+		t.Fatal("候选构建没有得到固定 Provider 安装路径")
+	}
+	if err := os.MkdirAll(filepath.Dir(providerPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(providerPath, []byte("test"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path, source := resolveCandidate("")
+	if path == "" || source != "fixed_install" {
+		t.Fatalf("候选构建没有发现固定安装的 Provider：path=%q source=%q", path, source)
+	}
+}
+
 func TestReleaseBuildRejectsExplicitAndEnvironmentProviderOverrides(t *testing.T) {
 	previous := buildMode
 	buildMode = "release"

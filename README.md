@@ -36,7 +36,13 @@ macOS 上的 Provider 会自动使用同包安装的 companion helper。路由�
 
 ## 安装
 
-当前为纯 Go 的 `0.1.0-dev.1`。正式发布后的统一入口如下（仓库仍处于 init 阶段，尚未提供已签名 Release，暂不可公开安装）：
+当前为纯 Go 的 `0.1.0-dev.1`。未签名 early-access 发布后必须显式选择 `next`：
+
+```sh
+npx @zanescope/v-local-cli@next install
+```
+
+该通道使用 `buildMode=candidate`，不宣称平台签名信任。正式签名发布后的统一入口才是：
 
 ```powershell
 npx @zanescope/v-local-cli@latest install
@@ -44,7 +50,7 @@ npx @zanescope/v-local-cli@latest install
 
 npm 包没有运行时依赖，只负责识别平台、从限定的 GitHub Release 下载 Go 二进制并校验 SHA-256，同时安装包内的 Agent Skill bundle（该 bundle 自带摘要清单）。
 
-正式密钥 Provider 由其独立 npm 安装器落到当前用户固定目录，而不是从 PATH 或任意 `--provider` 路径启动。发行 CLI 会在每次使用前复核 Provider/helper 的规范路径和平台签名，并把 acquisition daemon 的实际 PID image 绑定到同一组件；Windows 还要求 CLI 与 Provider 匹配编译期固定的 Authenticode 叶证书 SHA-256，macOS 要求固定 code identifier、Developer ID 和同一 Team ID。开发构建仍可显式覆盖组件路径，但发行构建会拒绝这些 override。
+密钥 Provider 由其独立 npm 安装器落到当前用户固定目录。Candidate CLI 会优先发现这个目录，但完整性明确报告为 `candidate_unverified`，不会把固定路径冒充平台签名。Signed release 会在每次使用前复核 Provider/helper 的规范路径和平台签名，并把 acquisition daemon 的实际 PID image 绑定到同一组件；Windows 还要求 CLI 与 Provider 匹配编译期固定的 Authenticode 叶证书 SHA-256，macOS 要求固定 code identifier、Developer ID 和同一 Team ID。开发构建仍可显式覆盖组件路径，但 signed release 会拒绝这些 override。
 
 源码构建只需要 Go——SQLite、zstd、SILK 解码与系统凭据库适配都在编译期进入二进制：
 
@@ -181,7 +187,7 @@ go vet ./...
 node --test npm/tests/*.test.js
 ```
 
-发布前门槛（Authenticode 与 Developer ID 签名及 notarization、npm Trusted Publishing、真机验收清单等）见 [SECURITY.md](SECURITY.md)；在全部通过之前不发布 `latest`。候选件与正式签名发布步骤见 [RELEASING.md](RELEASING.md)。
+发布门槛见 [SECURITY.md](SECURITY.md)：签名资料未完成时可以发布明确标记的 unsigned early-access，但在 Authenticode、Developer ID/notarization、真机复验和 Trusted Publishing 全部通过之前不得发布 `latest`。候选件、unsigned prerelease 与正式签名发布步骤见 [RELEASING.md](RELEASING.md)。
 
 ## 许可
 

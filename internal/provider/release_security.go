@@ -26,6 +26,19 @@ func releaseBuild() bool {
 	return strings.EqualFold(strings.TrimSpace(buildMode), "release")
 }
 
+func candidateBuild() bool {
+	return strings.EqualFold(strings.TrimSpace(buildMode), "candidate")
+}
+
+// unverifiedBuildIntegrity 区分可公开下载的候选件与本机源码构建。两者都不能冒充
+// 平台签名信任，但调用方仍需准确知道当前使用的是哪条发布通道。
+func unverifiedBuildIntegrity() string {
+	if candidateBuild() {
+		return "candidate_unverified"
+	}
+	return "development_unverified"
+}
+
 func fixedProviderInstallPathFor(platform, architecture, base string) string {
 	if strings.TrimSpace(base) == "" {
 		return ""

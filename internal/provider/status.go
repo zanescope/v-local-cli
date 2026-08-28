@@ -131,6 +131,14 @@ func resolveCandidate(explicit string) (string, string) {
 		}
 		return path, "guarded_environment"
 	}
+	if candidateBuild() {
+		// 未签名候选件优先使用 Provider npm 安装器维护的固定目录。这里不把固定路径
+		// 等同于平台签名；完整性状态仍明确保留为 candidate_unverified。
+		path, ok := canonicalExecutable(fixedProviderInstallPath())
+		if ok {
+			return path, "fixed_install"
+		}
+	}
 	if configured := os.Getenv(EnvironmentVariable); configured != "" {
 		path, ok := canonicalExecutable(configured)
 		if !ok {

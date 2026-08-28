@@ -26,6 +26,7 @@ func requireCLIReleaseFragments(t *testing.T, relative string, fragments ...stri
 func TestCLIReleaseKeepsAllArchitectureSigningAndPublishingGates(t *testing.T) {
 	release := requireCLIReleaseFragments(t, ".github/workflows/release.yml",
 		"persist-credentials: false",
+		"!v*-dev.*",
 		"arch: [amd64, arm64]",
 		// 签名与发布必须以 Audit gates 为前置条件：只在 push 时并行触发它，失败也
 		// 拦不住发布。
@@ -97,11 +98,25 @@ func TestCLIReleaseKeepsAllArchitectureSigningAndPublishingGates(t *testing.T) {
 		"Windows x64", "Windows ARM64", "Credential Manager", "Config.Cipher", "missing-only",
 	)
 	candidate := requireCLIReleaseFragments(t, ".github/workflows/release-candidate.yml",
-		"internal/provider.buildMode=candidate",
+		"internal/provider.buildMode=candidate", "publish_unsigned_preview", "PUBLISH_UNSIGNED_PREVIEW",
+		"refs/heads/main", "actions/workflows/audit-gates.yml/runs?head_sha=", ".conclusion == \"success\"",
+		"gh attestation verify", "--source-digest", "gh release create", "--prerelease",
 	)
 	if strings.Contains(candidate, "internal/provider.buildMode=release") {
 		t.Fatal("unsigned release-candidate assets must not enable release trust claims")
 	}
+	for _, forbidden := range []string{
+		"WINDOWS_SIGNING_CERTIFICATE_BASE64", "MACOS_SIGNING_CERTIFICATE_BASE64",
+		"APPLE_NOTARY_APPLE_ID", "npm stage publish",
+	} {
+		if strings.Contains(candidate, forbidden) {
+			t.Errorf("unsigned preview workflow contains signed-release operation %q", forbidden)
+		}
+	}
+	requireCLIReleaseFragments(t, "internal/provider/release_security.go",
+		"candidateBuild", "candidate_unverified", "development_unverified",
+	)
+	requireCLIReleaseFragments(t, "internal/provider/status.go", "candidateBuild()", "fixed_install")
 	if strings.Contains(release, "for binary in dist/v-local-cli-*") {
 		t.Fatal("signed release build-info must not parse DMG containers as Go binaries")
 	}

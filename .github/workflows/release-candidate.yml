@@ -2,6 +2,17 @@ name: Release candidate
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_unsigned_preview:
+        description: 将本次 candidate 作为未签名 early-access GitHub prerelease 发布
+        required: false
+        default: false
+        type: boolean
+      confirmation:
+        description: 发布时必须精确填写 PUBLISH_UNSIGNED_PREVIEW
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -80,3 +91,96 @@ jobs:
             npm/*.tgz
           if-no-files-found: error
           retention-days: 14
+
+  publish-unsigned-preview:
+    name: Publish unsigned early-access prerelease
+    if: ${{ inputs.publish_unsigned_preview }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    steps:
+      - name: 检出候选源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 配置 Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - name: 下载本次候选集合
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: v-local-cli-release-candidate
+          path: candidate
+      - name: 验证未签名预览发布授权与版本
+        id: preview
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "${GITHUB_REF}" = 'refs/heads/main'
+          test "${CONFIRMATION}" = 'PUBLISH_UNSIGNED_PREVIEW'
+          audit_count="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/audit-gates.yml/runs?head_sha=${GITHUB_SHA}&status=completed&per_page=100" \
+            --jq '[.workflow_runs[] | select(.head_branch == "main" and .conclusion == "success")] | length')"
+          if [[ "${audit_count}" -lt 1 ]]; then
+            echo '当前 main 提交没有成功的 Audit gates，拒绝发布预览版' >&2
+            exit 1
+          fi
+          version="$(node -p "require('./npm/package.json').version")"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$ ]]
+          tag="v${version}"
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+            echo '目标预览标签已经存在，拒绝覆盖' >&2
+            exit 1
+          fi
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo '目标预览 Release 已经存在，拒绝覆盖' >&2
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+      - name: 重新验证候选摘要、npm 包和来源证明
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd candidate/dist && sha256sum -c checksums.txt)
+          shopt -s nullglob
+          packages=(candidate/npm/*.tgz)
+          test "${#packages[@]}" -eq 1
+          packed_version="$(tar -xOf "${packages[0]}" package/package.json | node -e \
+            "const fs=require('fs'); process.stdout.write(JSON.parse(fs.readFileSync(0,'utf8')).version)")"
+          test "v${packed_version}" = '${{ steps.preview.outputs.tag }}'
+          tar -xOf "${packages[0]}" package/checksums.txt > "${RUNNER_TEMP}/cli-checksums.txt"
+          cmp "${RUNNER_TEMP}/cli-checksums.txt" candidate/dist/checksums.txt
+          signer_workflow="${GITHUB_REPOSITORY}/.github/workflows/release-candidate.yml"
+          while IFS= read -r -d '' asset; do
+            gh attestation verify "${asset}" --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${signer_workflow}" --source-digest "${GITHUB_SHA}"
+          done < <(find candidate/dist candidate/npm -maxdepth 1 -type f -print0)
+      - name: 创建明确标记为未签名的 GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIEW_TAG: ${{ steps.preview.outputs.tag }}
+        run: |
+          notes="${RUNNER_TEMP}/unsigned-preview-notes.md"
+          printf '%s\n' \
+            '这是未签名 early-access 预览版，只发布到 prerelease/next 通道。' \
+            '' \
+            '- 二进制 build mode 为 candidate。' \
+            '- 不包含 Authenticode、Developer ID 或 Apple notarization 声明。' \
+            '- Provider 完整性状态会明确显示 candidate_unverified。' \
+            '- 不构成 signed release 或 latest 支持声明。' \
+            '- 所有资产均绑定本次 candidate 源码和 GitHub artifact attestation。' > "${notes}"
+          gh release create "${PREVIEW_TAG}" candidate/dist/* candidate/npm/*.tgz \
+            --target "${GITHUB_SHA}" --title "${PREVIEW_TAG} unsigned early access" \
+            --prerelease --notes-file "${notes}"
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${PREVIEW_TAG}" --jq '.object.sha')" = "${GITHUB_SHA}"
+          test "$(gh release view "${PREVIEW_TAG}" --json isPrerelease --jq '.isPrerelease')" = 'true'
+          echo '::notice::npm 包可从该 prerelease 的 tgz 使用交互式 2FA 发布到 next；本作业不执行 npm publish。'

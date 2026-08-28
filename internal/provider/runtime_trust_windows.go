@@ -118,7 +118,7 @@ func verifyWindowsAuthenticode(path string) error {
 
 func validateProviderExecutableTrust(path string) (string, error) {
 	if !releaseBuild() {
-		return "development_unverified", nil
+		return unverifiedBuildIntegrity(), nil
 	}
 	expected := fixedProviderInstallPath()
 	provider, ok := canonicalExecutable(path)
