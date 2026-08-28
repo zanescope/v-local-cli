@@ -214,6 +214,137 @@ function Read-BinaryStaticEvidence {
     }
 }
 
+function Read-PEAsciiZ {
+    param(
+        [Parameter(Mandatory = $true)][System.Reflection.PortableExecutable.PEReader]$Reader,
+        [Parameter(Mandatory = $true)][int]$Rva,
+        [int]$MaximumBytes = 1024
+    )
+    Assert-Inspection ($Rva -gt 0) 'pe_string_rva_invalid'
+    Assert-Inspection ($MaximumBytes -ge 1 -and $MaximumBytes -le 4096) 'pe_string_limit_invalid'
+    $Blob = $Reader.GetSectionData($Rva).GetReader()
+    $Bytes = [System.Collections.Generic.List[byte]]::new()
+    $Terminated = $false
+    while ($Blob.RemainingBytes -gt 0 -and $Bytes.Count -lt $MaximumBytes) {
+        $Value = $Blob.ReadByte()
+        if ($Value -eq 0) {
+            $Terminated = $true
+            break
+        }
+        $Bytes.Add($Value)
+    }
+    Assert-Inspection $Terminated 'pe_string_unterminated'
+    return [System.Text.Encoding]::ASCII.GetString($Bytes.ToArray())
+}
+
+function Read-PortableExecutableLinkageEvidence {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    Assert-LocalAbsolutePath $Path 'pe_path_not_local_absolute'
+    Assert-NoReparsePoint $Path 'pe_reparse_or_missing'
+    $Before = Get-Item -LiteralPath $Path -Force
+    Assert-Inspection (-not $Before.PSIsContainer) 'pe_not_file'
+    Assert-Inspection ($Before.Length -gt 0 -and $Before.Length -le $MaximumBinaryBytes) 'pe_size_invalid'
+
+    $Share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    $Stream = [System.IO.FileStream]::new(
+        $Before.FullName,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        $Share
+    )
+    $Reader = [System.Reflection.PortableExecutable.PEReader]::new($Stream)
+    try {
+        $Header = $Reader.PEHeaders.PEHeader
+        Assert-Inspection ($null -ne $Header) 'pe_header_missing'
+        $Imports = [System.Collections.Generic.List[string]]::new()
+        $DelayImports = [System.Collections.Generic.List[string]]::new()
+        $Exports = [System.Collections.Generic.List[string]]::new()
+
+        $ImportDirectory = $Header.ImportTableDirectory
+        if ($ImportDirectory.RelativeVirtualAddress -gt 0 -and $ImportDirectory.Size -gt 0) {
+            $Blob = $Reader.GetSectionData($ImportDirectory.RelativeVirtualAddress).GetReader()
+            for ($Index = 0; $Index -lt 4096 -and $Blob.RemainingBytes -ge 20; $Index++) {
+                $OriginalFirstThunk = $Blob.ReadUInt32()
+                $TimeDateStamp = $Blob.ReadUInt32()
+                $ForwarderChain = $Blob.ReadUInt32()
+                $NameRva = $Blob.ReadUInt32()
+                $FirstThunk = $Blob.ReadUInt32()
+                if ($OriginalFirstThunk -eq 0 -and $TimeDateStamp -eq 0 -and
+                    $ForwarderChain -eq 0 -and $NameRva -eq 0 -and $FirstThunk -eq 0) {
+                    break
+                }
+                $Imports.Add((Read-PEAsciiZ -Reader $Reader -Rva ([int]$NameRva)))
+            }
+        }
+
+        $DelayImportDirectory = $Header.DelayImportTableDirectory
+        if ($DelayImportDirectory.RelativeVirtualAddress -gt 0 -and $DelayImportDirectory.Size -gt 0) {
+            $Blob = $Reader.GetSectionData($DelayImportDirectory.RelativeVirtualAddress).GetReader()
+            for ($Index = 0; $Index -lt 4096 -and $Blob.RemainingBytes -ge 32; $Index++) {
+                $Attributes = $Blob.ReadUInt32()
+                $NameRva = $Blob.ReadUInt32()
+                $ModuleHandle = $Blob.ReadUInt32()
+                $ImportAddressTable = $Blob.ReadUInt32()
+                $ImportNameTable = $Blob.ReadUInt32()
+                $BoundImportAddressTable = $Blob.ReadUInt32()
+                $UnloadImportAddressTable = $Blob.ReadUInt32()
+                $TimeDateStamp = $Blob.ReadUInt32()
+                if ($Attributes -eq 0 -and $NameRva -eq 0 -and $ModuleHandle -eq 0 -and
+                    $ImportAddressTable -eq 0 -and $ImportNameTable -eq 0 -and
+                    $BoundImportAddressTable -eq 0 -and $UnloadImportAddressTable -eq 0 -and
+                    $TimeDateStamp -eq 0) {
+                    break
+                }
+                Assert-Inspection (($Attributes -band 1) -eq 1) 'pe_delay_import_legacy_va_unsupported'
+                $DelayImports.Add((Read-PEAsciiZ -Reader $Reader -Rva ([int]$NameRva)))
+            }
+        }
+
+        $ExportDirectory = $Header.ExportTableDirectory
+        if ($ExportDirectory.RelativeVirtualAddress -gt 0 -and $ExportDirectory.Size -gt 0) {
+            $Blob = $Reader.GetSectionData($ExportDirectory.RelativeVirtualAddress).GetReader()
+            Assert-Inspection ($Blob.RemainingBytes -ge 40) 'pe_export_directory_truncated'
+            [void]$Blob.ReadUInt32()
+            [void]$Blob.ReadUInt32()
+            [void]$Blob.ReadUInt16()
+            [void]$Blob.ReadUInt16()
+            [void]$Blob.ReadUInt32()
+            [void]$Blob.ReadUInt32()
+            [void]$Blob.ReadUInt32()
+            $NameCount = $Blob.ReadUInt32()
+            [void]$Blob.ReadUInt32()
+            $NameTableRva = $Blob.ReadUInt32()
+            [void]$Blob.ReadUInt32()
+            Assert-Inspection ($NameCount -le 65536) 'pe_export_name_count_too_large'
+            if ($NameCount -gt 0) {
+                Assert-Inspection ($NameTableRva -gt 0) 'pe_export_name_table_missing'
+                $NameTable = $Reader.GetSectionData([int]$NameTableRva).GetReader()
+                Assert-Inspection ($NameTable.RemainingBytes -ge ([int64]$NameCount * 4)) 'pe_export_name_table_truncated'
+                for ($Index = 0; $Index -lt $NameCount; $Index++) {
+                    $NameRva = $NameTable.ReadUInt32()
+                    $Exports.Add((Read-PEAsciiZ -Reader $Reader -Rva ([int]$NameRva)))
+                }
+            }
+        }
+    }
+    finally {
+        $Reader.Dispose()
+        $Stream.Dispose()
+    }
+
+    $After = Get-Item -LiteralPath $Path -Force
+    Assert-Inspection (
+        $Before.Length -eq $After.Length -and
+        $Before.LastWriteTimeUtc.Ticks -eq $After.LastWriteTimeUtc.Ticks
+    ) 'binary_changed_during_linkage_scan'
+    return [pscustomobject]@{
+        ImportDllNames = @($Imports | Sort-Object -Unique)
+        DelayImportDllNames = @($DelayImports | Sort-Object -Unique)
+        ExportNames = @($Exports | Sort-Object -Unique)
+    }
+}
+
 function Invoke-SelfTest {
     $TempBase = [System.IO.Path]::GetTempPath().TrimEnd([System.IO.Path]::DirectorySeparatorChar)
     Assert-LocalAbsolutePath $TempBase 'self_test_temp_not_local_absolute'
@@ -232,6 +363,12 @@ function Invoke-SelfTest {
         Assert-Inspection ($Result.Markers['cross_boundary'] -eq $true) 'self_test_cross_boundary_missed'
         Assert-Inspection ($Result.Markers['absent'] -eq $false) 'self_test_false_positive'
         Assert-Inspection ($Result.Sha256 -cmatch '^[0-9a-f]{64}$') 'self_test_hash_invalid'
+        if ($IsWindows) {
+            $PEFixture = Join-Path $Root 'pwsh.exe'
+            [System.IO.File]::Copy((Get-Process -Id $PID).Path, $PEFixture, $false)
+            $Linkage = Read-PortableExecutableLinkageEvidence -Path $PEFixture
+            Assert-Inspection (($Linkage.ImportDllNames.Count + $Linkage.DelayImportDllNames.Count) -gt 0) 'self_test_pe_imports_missing'
+        }
         [ordered]@{
             protocol = $EvidenceProtocol
             status = 'self_test_passed'
@@ -278,16 +415,22 @@ function Invoke-Inspection {
         network_manager_factory = 'CreateNetworkManagerNoPB'
         auth_session_accessor = 'GetAuthRawData@AuthManagerNoPB'
         real_uin_accessor = 'RealUin@NetworkManagerNoPB'
+        encrypted_query_param = 'encrypted_query_param'
+        c2c_download_http_path = '/c2c/download'
     }
     $IlinkCoreMarkers = [ordered]@{
         c2c_download_core = 'mars::cdn::CdnCore::start_c2c_download'
         rsa_parameter_core = 'mars::cdn::CdnCore::set_rsa_params'
         ilink_c2c_message = 'IlinkC2CDownload'
+        encrypted_query_param = 'encrypted_query_param'
+        c2c_download_http_path = '/c2c/download'
     }
 
     $Weixin = Read-BinaryStaticEvidence -Path (Join-Path $VersionDirectory 'Weixin.dll') -Markers $WeixinMarkers
     $IlinkWrapper = Read-BinaryStaticEvidence -Path (Join-Path $VersionDirectory 'ilink_wrapper.dll') -Markers $IlinkMarkers
     $IlinkCore = Read-BinaryStaticEvidence -Path (Join-Path $VersionDirectory 'ilink2.dll') -Markers $IlinkCoreMarkers
+    $WeixinLinkage = Read-PortableExecutableLinkageEvidence -Path (Join-Path $VersionDirectory 'Weixin.dll')
+    $IlinkWrapperLinkage = Read-PortableExecutableLinkageEvidence -Path (Join-Path $VersionDirectory 'ilink_wrapper.dll')
 
     $Required = @(
         $Weixin.Markers['descriptor_high'],
@@ -310,6 +453,48 @@ function Invoke-Inspection {
         'current_client_static_stack_present_unbound'
     } else {
         'partial_current_client_static_evidence'
+    }
+    $DirectIlinkHttpsMarkers = if (
+        ($Weixin.Markers['encrypted_query_param'] -or $IlinkWrapper.Markers['encrypted_query_param'] -or $IlinkCore.Markers['encrypted_query_param']) -and
+        ($Weixin.Markers['c2c_download_http_path'] -or $IlinkWrapper.Markers['c2c_download_http_path'] -or $IlinkCore.Markers['c2c_download_http_path'])
+    ) {
+        'observed_unbound'
+    } elseif (
+        $Weixin.Markers['encrypted_query_param'] -or $IlinkWrapper.Markers['encrypted_query_param'] -or $IlinkCore.Markers['encrypted_query_param'] -or
+        $Weixin.Markers['c2c_download_http_path'] -or $IlinkWrapper.Markers['c2c_download_http_path'] -or $IlinkCore.Markers['c2c_download_http_path']
+    ) {
+        'partial_unbound'
+    } else {
+        'not_observed_in_current_client_binaries'
+    }
+    $MainToIlinkWrapperReference = if (
+        @($WeixinLinkage.DelayImportDllNames | Where-Object { $_ -ieq 'ilink_wrapper.dll' }).Count -gt 0
+    ) {
+        'delay_import_observed_unbound'
+    } elseif (
+        @($WeixinLinkage.ImportDllNames | Where-Object { $_ -ieq 'ilink_wrapper.dll' }).Count -gt 0
+    ) {
+        'import_observed_unbound'
+    } else {
+        'static_reference_not_observed_in_current_weixin_binary'
+    }
+    $WeixinPublicC2CExport = @(
+        $WeixinLinkage.ExportNames |
+            Where-Object { $_ -cmatch '(?i:c2c|cdn|download|taskfactory)' }
+    ).Count -gt 0
+    $WrapperNetworkManagerFactoryExport = @(
+        $IlinkWrapperLinkage.ExportNames |
+            Where-Object { $_ -ceq 'CreateNetworkManagerNoPB' }
+    ).Count -gt 0
+    $SessionizedC2CStack = if (
+        $Weixin.Markers['c2c_image_task'] -and
+        $Weixin.Markers['c2c_download_api'] -and
+        $Weixin.Markers['dynamic_route_request'] -and
+        $Weixin.Markers['download_binding_fields']
+    ) {
+        'present_unbound'
+    } else {
+        'partial_or_not_observed'
     }
 
     $Files = @(
@@ -351,6 +536,16 @@ function Invoke-Inspection {
             novac2c_host_in_weixin_binary = $Weixin.Markers['novac2c_host']
             encrypted_query_param_static_marker = $Weixin.Markers['encrypted_query_param']
             c2c_download_http_path_static_marker = $Weixin.Markers['c2c_download_http_path']
+            direct_ilink_https_markers_in_ilink_wrapper_binary = (
+                $IlinkWrapper.Markers['encrypted_query_param'] -or $IlinkWrapper.Markers['c2c_download_http_path']
+            )
+            direct_ilink_https_markers_in_ilink_core_binary = (
+                $IlinkCore.Markers['encrypted_query_param'] -or $IlinkCore.Markers['c2c_download_http_path']
+            )
+            ilink_wrapper_import_in_weixin_pe = @($WeixinLinkage.ImportDllNames | Where-Object { $_ -ieq 'ilink_wrapper.dll' }).Count -gt 0
+            ilink_wrapper_delay_import_in_weixin_pe = @($WeixinLinkage.DelayImportDllNames | Where-Object { $_ -ieq 'ilink_wrapper.dll' }).Count -gt 0
+            public_c2c_cdn_download_export_in_weixin_pe = $WeixinPublicC2CExport
+            network_manager_factory_export_in_ilink_wrapper_pe = $WrapperNetworkManagerFactoryExport
             ilink_c2c_api_in_wrapper_binary = (
                 $IlinkWrapper.Markers['c2c_download_async'] -and
                 $IlinkWrapper.Markers['network_manager_factory']
@@ -370,6 +565,10 @@ function Invoke-Inspection {
         }
         conclusions = [ordered]@{
             contemporary_client_static_evidence = $Complete
+            sessionized_c2c_static_stack = $SessionizedC2CStack
+            direct_ilink_https_markers = $DirectIlinkHttpsMarkers
+            main_to_ilink_wrapper_static_reference = $MainToIlinkWrapperReference
+            weixin_main_public_c2c_download_entry = if ($WeixinPublicC2CExport) { 'observed_unbound' } else { 'not_observed_in_current_weixin_export_table' }
             descriptor_to_runtime_request_binding = 'not_observed'
             runtime_protocol_selection = 'not_observed'
             endpoint_qualification = 'not_qualified'
@@ -386,6 +585,8 @@ function Invoke-Inspection {
             'static marker presence can include dormant or unrelated code paths',
             'static marker absence does not prove a runtime feature is absent',
             'co-location in one binary does not bind a message descriptor to a request path',
+            'a PE import or delay-import binds a module dependency, not a message descriptor or runtime request',
+            'missing public exports do not exclude private internal call paths',
             'this report does not authorize or perform a real CDN request'
         )
     }

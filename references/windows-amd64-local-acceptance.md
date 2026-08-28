@@ -225,6 +225,20 @@ pwsh -NoProfile -File .\scripts\inspect-windows-chat-cdn-static-evidence.ps1
 
 完整观察的退出码为 `0`，并返回 `status=current_client_static_stack_present_unbound`；标志不完整时退出码为 `2`，不得把 partial 当成“不存在”；检查失败退出码为 `1`。无论观察结果如何，都必须保持 `descriptor_to_runtime_request_binding=not_observed`、`runtime_protocol_selection=not_observed`、`endpoint_qualification=not_qualified`、`network_access_performed=false` 和 `secrets_output=false`。报告默认只含版本、文件名、大小、SHA-256、布尔观察及边界枚举，不显示安装路径；只有本机排错时增加 `-ShowPaths`。该步骤只替代陈旧实现作为架构线索，不计入真实 CDN 协议或 W64-08 下载能力通过。
 
+当前报告还区分 `sessionized_c2c_static_stack=present_unbound`、`direct_ilink_https_markers=not_observed_in_current_client_binaries`、`main_to_ilink_wrapper_static_reference=delay_import_observed_unbound` 和 `weixin_main_public_c2c_download_entry=not_observed_in_current_weixin_export_table`。它们分别表示当前主模块包含会话化 C2C 任务材料、三个相关客户端模块都没有观察到 iLink 直连路径/参数标志、主模块确实延迟依赖 wrapper，但没有稳定公开的主模块下载入口。模块依赖不能绑定某条消息或补足会话材料，不得据此拼接 iLink GET 或调用私有进程内 ABI。
+
+如果要判断当日 xlog 是否具备无密钥解码条件，运行独立的 [xlog 结构检查器](../scripts/inspect-windows-chat-cdn-xlog-structure.ps1)：
+
+```powershell
+pwsh -NoProfile -File .\scripts\inspect-windows-chat-cdn-xlog-structure.ps1
+pwsh -NoProfile -File .\scripts\inspect-windows-chat-cdn-xlog-structure.ps1 `
+  -LogPath (Join-Path $env:APPDATA 'Tencent\xwechat\log\radium\ilink_YYYYMMDD.xlog')
+```
+
+省略 `-LogPath` 时只检查当天 `mm_YYYYMMDD.xlog`；显式路径也必须位于当前用户 `Tencent\xwechat\log` 下。退出码 `0` 仅表示帧结构检查完整，不表示已经解码或取得 CDN 资格。`encrypted_mars_xlog_private_key_required` 表示没有未加密帧，官方无密钥脚本不适用；检查器不读取或猜测私钥，不输出正文、路径、嵌入公钥或指纹。无论结果如何，都必须保持 `plaintext_event_binding=not_observed`、`descriptor_to_runtime_request_binding=not_observed` 和 `endpoint_qualification=not_qualified`。该步骤不计入 W64-08 通过，只用于阻止把加密日志误交给过时第三方工具。
+
+2026-08-29 的哈希绑定静态调用链复审进一步观察到 `start_c2c_download -> _startDownloadMedia -> CreateC2CImageDownloadTask`，并要求 task/root/session 类材料；当前主模块没有稳定公开的 C2C 下载导出。系统连接元数据也不能把加密 TLS 请求绑定到某个消息描述符。结论是：本轮不增加聊天图片 `--allow-network`、直连 GET、包捕获观察器或进程注入路线；W64-08 支持并验收的是用户打开指定原图后，Agent 自动 refresh 并对同一 evidence 单次重试。
+
 优先使用仓库内的[半自动验收脚本](../scripts/accept-windows-chat-image-recovery.ps1)。脚本要求 PowerShell 7（`pwsh`）；它会先在同一 generation 采集四个初始夹具。WXGF 若返回预期的 `chat_image_unavailable/decoder_unavailable`，失败响应本身也必须带同一 `generation_id` 和 manifest，不能被伪装成导出成功。脚本只对 `lower_tier_missing` 和 `expiry_unknown_descriptor` 各询问一次，并在每次询问前用当前 generation 重新预检该 evidence；用户输入脚本显示的精确确认词后，脚本自动执行一次 `refresh --require-media` 和一次同 evidence 重试。所有恢复结束后，脚本会在最新 generation 上重新探测四个夹具，避免拼接不同快照的结果：
 
 ```powershell

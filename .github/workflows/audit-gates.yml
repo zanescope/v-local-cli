@@ -59,6 +59,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           pwsh -NoProfile -File scripts/inspect-windows-chat-cdn-static-evidence.ps1 -SelfTest
+          pwsh -NoProfile -File scripts/inspect-windows-chat-cdn-xlog-structure.ps1 -SelfTest
           pwsh -NoProfile -File scripts/accept-windows-chat-image-recovery.ps1 -SelfTest
           go test ./internal/app -run 'Test(NoForcePublishingRejectsConcurrentTargetCreation|ForcePublishingBreaksHardlinkWithoutMutatingPeer|PrepareOutputTargetRejectsSymbolicLink|PublishFilePreservesLockedWindowsTarget|RunLocalASRProviderCleansTemporaryAudioWhenCommandCannotStart|RunLocalWhisperCleansTemporaryPlaintextWhenCommandFails|RecognizeTemporaryChatImageCleansPlaintextAfterRecognitionFailure|RecognizeTemporaryChatImageReportsLockedWindowsPlaintext)$' -count=1
           go test ./internal/state -run 'Test(LoadRecoversAfterProcessExitBetweenBackupAndPublish|CommitStateFileRestoresOldStateWhenPublishFails)$' -count=1

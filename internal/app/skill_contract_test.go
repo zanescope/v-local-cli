@@ -276,6 +276,15 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 	for _, expected := range []string{
 		"v-local-cli/windows-chat-cdn-static-evidence/v1",
 		"current_client_static_stack_present_unbound",
+		"sessionized_c2c_static_stack = $SessionizedC2CStack",
+		"direct_ilink_https_markers = $DirectIlinkHttpsMarkers",
+		"main_to_ilink_wrapper_static_reference = $MainToIlinkWrapperReference",
+		"weixin_main_public_c2c_download_entry",
+		"not_observed_in_current_client_binaries",
+		"delay_import_observed_unbound",
+		"not_observed_in_current_weixin_export_table",
+		"static_reference_not_observed_in_current_weixin_binary",
+		"System.Reflection.PortableExecutable.PEReader",
 		"descriptor_to_runtime_request_binding = 'not_observed'",
 		"runtime_protocol_selection = 'not_observed'",
 		"endpoint_qualification = 'not_qualified'",
@@ -294,13 +303,55 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 			t.Errorf("Windows 聊天 CDN 静态证据脚本不得联网或读取进程内存：%s", forbidden)
 		}
 	}
+	xlogEvidenceScript, err := os.ReadFile(filepath.Join(root, "scripts", "inspect-windows-chat-cdn-xlog-structure.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	xlogEvidenceText := string(xlogEvidenceScript)
+	for _, expected := range []string{
+		"v-local-cli/windows-chat-cdn-xlog-structure-evidence/v1",
+		"encrypted_mars_xlog_private_key_required",
+		"no_crypt_mars_xlog_decoder_candidate",
+		"mixed_mars_xlog_requires_separate_review",
+		"log_path_outside_xwechat_log_root",
+		"log_read_access_denied",
+		"log_open_failed",
+		"log_changed_during_scan",
+		"payload_decoding_performed = $false",
+		"plaintext_event_binding = 'not_observed'",
+		"descriptor_to_runtime_request_binding = 'not_observed'",
+		"endpoint_qualification = 'not_qualified'",
+		"embedded_key_material_output = $false",
+		"secrets_output = $false",
+	} {
+		if !strings.Contains(xlogEvidenceText, expected) {
+			t.Errorf("Windows 聊天 CDN xlog 结构检查器缺少边界：%s", expected)
+		}
+	}
+	for _, forbidden := range []string{"Invoke-WebRequest", "Invoke-RestMethod", "Start-BitsTransfer", "Get-NetTCPConnection", "pktmon", "wpr.exe", "netsh", "OpenProcess", "ReadProcessMemory", "decode_mars_crypt_log_file.py"} {
+		if strings.Contains(xlogEvidenceText, forbidden) {
+			t.Errorf("Windows 聊天 CDN xlog 结构检查器不得联网、读进程内存或尝试解密：%s", forbidden)
+		}
+	}
+	auditWorkflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "audit-gates.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(auditWorkflow, []byte("inspect-windows-chat-cdn-xlog-structure.ps1 -SelfTest")) {
+		t.Fatal("Windows audit gate 未运行聊天 CDN xlog 结构检查器自检")
+	}
 	acceptance, err := os.ReadFile(filepath.Join(root, "references", "windows-amd64-local-acceptance.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(acceptance, []byte("../scripts/accept-windows-chat-image-recovery.ps1")) ||
 		!bytes.Contains(acceptance, []byte("../scripts/inspect-windows-chat-cdn-static-evidence.ps1")) ||
+		!bytes.Contains(acceptance, []byte("../scripts/inspect-windows-chat-cdn-xlog-structure.ps1")) ||
 		!bytes.Contains(acceptance, []byte("current_client_static_stack_present_unbound")) ||
+		!bytes.Contains(acceptance, []byte("direct_ilink_https_markers=not_observed_in_current_client_binaries")) ||
+		!bytes.Contains(acceptance, []byte("main_to_ilink_wrapper_static_reference=delay_import_observed_unbound")) ||
+		!bytes.Contains(acceptance, []byte("本轮不增加聊天图片 `--allow-network`")) ||
+		!bytes.Contains(acceptance, []byte("encrypted_mars_xlog_private_key_required")) ||
 		!bytes.Contains(acceptance, []byte("退出码 `0`")) || !bytes.Contains(acceptance, []byte("`1` 表示")) ||
 		!bytes.Contains(acceptance, []byte("`2` 表示")) ||
 		!bytes.Contains(acceptance, []byte("不要设置固定像素门槛")) ||
@@ -321,7 +372,13 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 		"Weixin 4.1.12.55",
 		"current_client_static_stack_present_unbound",
 		"descriptor_to_runtime_request_binding=not_observed",
-		"不预设它属于 iLink 风格 HTTPS 或旧版二进制 CDN",
+		"encrypted_mars_xlog_private_key_required",
+		"payload_decoding_performed=false",
+		"CdnCore::start_c2c_download -> CdnCore::_startDownloadMedia -> TaskFactory::CreateC2CImageDownloadTask",
+		"主模块确实 delay-import `ilink_wrapper.dll`",
+		"本轮不实现聊天图片直接 CDN 请求",
+		"当前受支持的自动恢复只有",
+		"描述符年龄、字段存在、HTTP 状态、缓存层级和像素尺寸都不能单独判定时效或质量",
 		"任何非 loopback 端点都会在请求前拒绝",
 		"重新取得单次授权",
 		"`429` 只表示限流",

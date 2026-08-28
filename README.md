@@ -143,7 +143,7 @@ v-local-cli history --fresh --limit 200 <chat_username>
 ## 安全与隐私
 
 - **只处理本人拥有或已获明确授权访问的数据。** CLI 只读，不操作微信界面、不发送消息。
-- **普通查询不联网。** 只有两处例外，而且每次都需要显式开启：`export-moment-media --allow-network`（受限腾讯 CDN）与 `official-article --allow-network`（`mp.weixin.qq.com`）；令牌与密钥不会进入 JSON、日志或错误文本。CDN 描述符可能随时过期，成功只证明请求当时可用，不形成后续授权或长期可用性保证。聊天图片当前会脱敏报告远端描述符结构状态，并已通过 TLS 假服务的单请求/解密/证据绑定测试；真实端点仍由代码禁止，尚未通过桌面协议真机门禁，因此不会联网尝试。
+- **普通查询不联网。** 只有两处例外，而且每次都需要显式开启：`export-moment-media --allow-network`（受限腾讯 CDN）与 `official-article --allow-network`（`mp.weixin.qq.com`）；令牌与密钥不会进入 JSON、日志或错误文本。CDN 描述符可能随时过期，成功只证明请求当时可用，不形成后续授权或长期可用性保证。聊天图片当前会脱敏报告远端描述符结构状态，并已通过 TLS 假服务的单请求/解密/证据绑定测试；当前客户端深度复审显示实际路径依赖内部会话化 C2C 任务，而非可由描述符直接拼接的已验证 GET，所以真实端点仍由代码禁止。缺少本地高层级候选时，受支持的恢复方式是用户打开指定原图后由 Agent 自动 refresh 并单次重试。
 - **密钥最小化。** 系统凭据库只保存通过验证的最小密钥集；`refresh` 直接复用它，不再读微信进程，也不启动 Provider。
 - **快照隔离。** 私有目录会设置当前用户专属的 ACL，并拒绝符号链接和 junction；查询走 SQLite 的只读、不可变（immutable）、`query_only` 模式。
 - **派生状态绑定。** 全文索引同时绑定账号、generation、快照 manifest 摘要和 parser/schema 版本；增量 pending batch 在输出前持久化，未 ack 会重放。
@@ -176,7 +176,7 @@ v-local-cli history --fresh --limit 200 <chat_username>
 | 语音 ASR 协议 | [asr-provider.md](references/asr-provider.md) |
 | 统计口径 | [statistics.md](references/statistics.md) |
 | 排错 | [troubleshooting.md](references/troubleshooting.md) |
-| Windows 聊天图片真机验收 | [验收说明](references/windows-amd64-local-acceptance.md) · [静态协议证据检查](scripts/inspect-windows-chat-cdn-static-evidence.ps1) · [半自动恢复脚本](scripts/accept-windows-chat-image-recovery.ps1) |
+| Windows 聊天图片真机验收 | [验收说明](references/windows-amd64-local-acceptance.md) · [静态协议证据检查](scripts/inspect-windows-chat-cdn-static-evidence.ps1) · [xlog 结构检查](scripts/inspect-windows-chat-cdn-xlog-structure.ps1) · [半自动恢复脚本](scripts/accept-windows-chat-image-recovery.ps1) |
 
 Agent 行为约束与授权规则见 [SKILL.md](SKILL.md)。
 
