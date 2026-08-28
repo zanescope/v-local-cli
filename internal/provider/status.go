@@ -13,6 +13,9 @@ import (
 // Protocol 是首个公开的密钥提供器协议。首次发布前已移除从未发布的 v2 开发常量。
 const Protocol = "v-local-key-provider/v1"
 const EnvironmentVariable = "V_LOCAL_CLI_KEY_PROVIDER"
+const DevelopmentBinaryPathVariable = "V_LOCAL_KEY_PROVIDER_BINARY_PATH"
+const DevelopmentModeVariable = "V_LOCAL_KEY_PROVIDER_DEVELOPMENT"
+const DevelopmentUnverifiedVariable = "V_LOCAL_KEY_PROVIDER_ALLOW_UNVERIFIED_LOCAL_BINARY"
 
 type Status struct {
 	Available       bool   `json:"executable_present"`
@@ -96,8 +99,12 @@ func Resolve(explicit string) (string, string) {
 }
 
 func resolveCandidate(explicit string) (string, string) {
+	developmentPath := strings.TrimSpace(os.Getenv(DevelopmentBinaryPathVariable))
+	developmentMode := strings.TrimSpace(os.Getenv(DevelopmentModeVariable))
+	developmentUnverified := strings.TrimSpace(os.Getenv(DevelopmentUnverifiedVariable))
+	developmentOverrideConfigured := developmentPath != "" || developmentMode != "" || developmentUnverified != ""
 	if releaseBuild() {
-		if strings.TrimSpace(explicit) != "" || strings.TrimSpace(os.Getenv(EnvironmentVariable)) != "" {
+		if strings.TrimSpace(explicit) != "" || strings.TrimSpace(os.Getenv(EnvironmentVariable)) != "" || developmentOverrideConfigured {
 			return "", "override_rejected"
 		}
 		path, ok := canonicalExecutable(fixedProviderInstallPath())
@@ -112,6 +119,17 @@ func resolveCandidate(explicit string) (string, string) {
 			return "", "explicit"
 		}
 		return path, "explicit"
+	}
+	if developmentOverrideConfigured {
+		// 本机开发 Provider 只有在路径、开发模式和未签名确认三项同时精确设置时才可解析。
+		if developmentPath == "" || developmentMode != "1" || developmentUnverified != "1" {
+			return "", "override_rejected"
+		}
+		path, ok := canonicalExecutable(developmentPath)
+		if !ok {
+			return "", "guarded_environment"
+		}
+		return path, "guarded_environment"
 	}
 	if configured := os.Getenv(EnvironmentVariable); configured != "" {
 		path, ok := canonicalExecutable(configured)

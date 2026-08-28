@@ -171,7 +171,42 @@ func TestAcquisitionCommandErrorExposesScopeQualifiedCoverage(t *testing.T) {
 	}
 }
 
-func TestAcquisitionCommandErrorExposesSafeWindowsPhase4Evidence(t *testing.T) {
+func TestPersistedSecretFlagsDistinguishDerivedKeysFromStoredCredential(t *testing.T) {
+	bundle := provider.CandidateBundle{
+		DatabaseKeys:       map[string]string{"message.db": strings.Repeat("a", 64)},
+		DatabaseCredential: &provider.DatabaseCredential{Mode: "per_database"},
+		ImageKeys:          &provider.ImageKeys{AES: "0123456789abcdef", XOR: 90},
+	}
+	keys, credential, image := persistedSecretFlags(bundle, true)
+	if keys || !credential || !image {
+		t.Fatalf("结构化凭据最小化后的持久化状态误报：keys=%t credential=%t image=%t", keys, credential, image)
+	}
+	keys, credential, image = persistedSecretFlags(bundle, false)
+	if !keys || !credential || !image {
+		t.Fatalf("旧 keychain bundle 的实际逐库 key 状态丢失：keys=%t credential=%t image=%t", keys, credential, image)
+	}
+}
+
+func TestProviderExecutionErrorExposesOnlySafeProcessClassification(t *testing.T) {
+	err := keyProviderCommandError(&provider.ExecutionError{Stage: "process_exit", ExitCode: 3})
+	details := err.details.(map[string]any)
+	if err.typeName != "key_provider_failed" || details["stage"] != "process_exit" || details["exit_code"] != 3 ||
+		details["stderr_included"] != false || details["path_included"] != false {
+		t.Fatalf("Provider 子进程失败分类泄漏或缺失：%v", details)
+	}
+}
+
+func TestProviderProtocolContractErrorExposesOnlySafeClassification(t *testing.T) {
+	err := keyProviderCommandError(&provider.ProtocolContractError{Cause: errors.New("包含私有路径或候选的原始原因")})
+	details := err.details.(map[string]any)
+	if err.typeName != "key_provider_failed" || details["stage"] != "protocol_contract_validation" ||
+		details["stderr_included"] != false || details["path_included"] != false ||
+		strings.Contains(err.hint, "私有路径") || strings.Contains(err.hint, "原始原因") {
+		t.Fatalf("Provider 契约错误分类泄漏或缺失：%v", details)
+	}
+}
+
+func TestAcquisitionCommandErrorExposesSafeWindowsEvidence(t *testing.T) {
 	err := acquisitionCommandError(&provider.AcquisitionError{
 		Platform: "windows", ConfigCipherRouteStatus: "unavailable_unregistered",
 		WindowsRouteEvidence: []string{"registry_no_exact_match"},
@@ -1080,6 +1115,62 @@ func TestSetupRequiresAuthorization(t *testing.T) {
 	code, _, _ := runForTest("setup")
 	if code == 0 {
 		t.Fatal("没有账号目录结构时 setup 不应成功")
+	}
+}
+
+func TestSetupDryRunAcceptsStableAccountID(t *testing.T) {
+	account := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(account, "db_storage"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("V_LOCAL_CLI_ACCOUNT_DIR", account)
+	t.Setenv("V_LOCAL_CLI_HOME", testHome(t))
+	accountID := state.AccountID(account)
+	code, output, errorOutput := runForTest("setup", "--account", accountID, "--dry-run")
+	if code != 0 {
+		t.Fatalf("setup dry-run 拒绝 accounts 返回的 account_id：code=%d error=%v", code, errorOutput)
+	}
+	data := output["data"].(map[string]any)
+	selected := data["account"].(map[string]any)
+	if selected["account_id"] != accountID || data["status"] != "planned" ||
+		data["process_access_performed"] != false || data["secrets_persisted"] != false {
+		t.Fatalf("setup dry-run 的 account_id 或无副作用契约异常：%v", data)
+	}
+}
+
+func TestPrivateOutputPathCapturesOneSchemaV1Response(t *testing.T) {
+	account := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(account, "db_storage"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("V_LOCAL_CLI_ACCOUNT_DIR", account)
+	home := testHome(t)
+	t.Setenv("V_LOCAL_CLI_HOME", home)
+	privateDirectory, err := state.DaemonRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(privateDirectory, "dry-run.json")
+	t.Setenv(privateOutputPathEnv, outputPath)
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"setup", "--account", state.AccountID(account), "--dry-run"}, &stdout, &stderr)
+	if code != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("私有输出通道泄漏到标准流：code=%d stdout=%d stderr=%d", code, stdout.Len(), stderr.Len())
+	}
+	payload, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(payload, &result); err != nil {
+		t.Fatal(err)
+	}
+	data := result["data"].(map[string]any)
+	if result["schema_version"].(float64) != 1 || result["command_status"] != "succeeded" || data["status"] != "planned" {
+		t.Fatalf("私有输出没有保留 schema v1 响应：%v", result)
+	}
+	if code := Main([]string{"setup", "--dry-run"}, &stdout, &stderr); code == 0 {
+		t.Fatal("私有输出目标被静默覆盖")
 	}
 }
 

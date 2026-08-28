@@ -23,7 +23,7 @@ func requireCLIReleaseFragments(t *testing.T, relative string, fragments ...stri
 	return text
 }
 
-func TestPhase5CLIReleaseKeepsAllArchitectureSigningAndPublishingGates(t *testing.T) {
+func TestCLIReleaseKeepsAllArchitectureSigningAndPublishingGates(t *testing.T) {
 	release := requireCLIReleaseFragments(t, ".github/workflows/release.yml",
 		"persist-credentials: false",
 		"arch: [amd64, arm64]",

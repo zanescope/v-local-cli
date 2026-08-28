@@ -940,9 +940,74 @@ func finalizeDaemonAcquisition(parent context.Context, endpoint acquisitionDaemo
 		return CandidateBundle{}, true, err
 	}
 	if err := validateFinalAcquisitionResponse(&result, scopes, localplatform.Account{Path: finalize.AccountDir}, catalogKey); err != nil {
+		var contract *ProtocolContractError
+		if errors.As(err, &contract) {
+			contract.Stage = "daemon_finalize"
+		}
 		return CandidateBundle{}, true, err
 	}
 	return result, true, nil
+}
+
+func validateDaemonObservationResponse(bundle *CandidateBundle, expected []string, account localplatform.Account, catalogKey string, request acquireRequest) error {
+	if request.Workflow.Operation != "observe" || request.Workflow.SessionID == "" || request.Workflow.ExpectedCatalogID == "" ||
+		diagnosticString(bundle.Diagnostics, "session_id") != request.Workflow.SessionID || bundle.CatalogID != request.Workflow.ExpectedCatalogID {
+		return errors.New("acquisition daemon observe 响应没有绑定当前 session 和 catalog")
+	}
+	if len(bundle.DatabaseKeys) != 0 || len(bundle.DatabaseProfiles) != 0 || bundle.DatabaseCredential != nil || bundle.ImageKeys != nil {
+		return errors.New("acquisition daemon observe 响应意外携带凭据")
+	}
+	missing := []string{}
+	if _, present := bundle.Diagnostics["missing_database_ids"]; present {
+		var err error
+		missing, err = diagnosticStringList(bundle.Diagnostics, "missing_database_ids")
+		if err != nil {
+			return err
+		}
+	}
+	missingSet := make(map[string]bool, len(missing))
+	for _, databaseID := range missing {
+		if !validSecretHex(databaseID) || len(databaseID) != 64 || missingSet[databaseID] {
+			return errors.New("acquisition daemon observe 响应的缺失数据库证明无效")
+		}
+		missingSet[databaseID] = true
+	}
+
+	// observe 按协议移除全部凭据；这个只在校验栈内存活的投影根据 catalog 与
+	// missing_database_ids 恢复“哪些槽位已覆盖”，让原有 v1 结构和计数断言继续运行。
+	// 占位值永不返回或持久化，随后 finalize 仍必须携带并通过真实凭据的完整验证。
+	projected := *bundle
+	projected.DatabaseKeys = map[string]string{}
+	projected.DatabaseProfiles = map[string]string{}
+	for _, entry := range bundle.CatalogEntries {
+		if !entry.RequiredForKeyCoverage || missingSet[entry.DatabaseID] || entry.Classification != "encrypted_eligible" {
+			continue
+		}
+		profileID := entry.ProfileID
+		if profileID == "" {
+			if len(bundle.Profiles) != 1 || !supportedProfileSummary(bundle.Profiles[0]) {
+				return errors.New("acquisition daemon observe 无法唯一确定已覆盖数据库的 profile")
+			}
+			profileID = bundle.Profiles[0].ID
+		}
+		projected.DatabaseKeys[entry.RelativePath] = strings.Repeat("0", 64)
+		projected.DatabaseProfiles[entry.RelativePath] = profileID
+	}
+	if diagnosticString(bundle.Diagnostics, "media_coverage_status") == "complete" {
+		projected.ImageKeys = &ImageKeys{AES: strings.Repeat("0", 16), XOR: 0}
+	}
+	err := validateBundleForRequest(&projected, expected, account, catalogKey)
+	for name := range projected.DatabaseKeys {
+		delete(projected.DatabaseKeys, name)
+	}
+	for name := range projected.DatabaseProfiles {
+		delete(projected.DatabaseProfiles, name)
+	}
+	if projected.ImageKeys != nil {
+		projected.ImageKeys.AES = ""
+		projected.ImageKeys = nil
+	}
+	return err
 }
 
 func acquireViaDaemon(parent context.Context, providerPath string, account localplatform.Account, scopes []string, privateRoot, confirmedAction, catalogKey string) (CandidateBundle, bool, error) {
@@ -974,7 +1039,7 @@ func acquireViaDaemon(parent context.Context, providerPath string, account local
 			return CandidateBundle{}, true, err
 		}
 		if err := validateBundleForRequest(&prepared, scopes, localplatform.Account{Path: prepare.AccountDir}, catalogKey); err != nil {
-			return CandidateBundle{}, true, &ProtocolContractError{Cause: err}
+			return CandidateBundle{}, true, &ProtocolContractError{Cause: err, Stage: "daemon_prepare"}
 		}
 		resume = acquisitionResume{
 			Version: acquisitionResumeVersion, ProviderPath: providerPath, EndpointStartedAt: endpoint.StartedAt,
@@ -1032,10 +1097,10 @@ func acquireViaDaemon(parent context.Context, providerPath string, account local
 	if err != nil {
 		return CandidateBundle{}, true, err
 	}
-	if err := validateBundleForRequest(&observed, scopes, localplatform.Account{Path: observe.AccountDir}, catalogKey); err != nil {
+	if err := validateDaemonObservationResponse(&observed, scopes, localplatform.Account{Path: observe.AccountDir}, catalogKey, observe); err != nil {
 		cancelAcquisitionSession(parent, endpoint, account, scopes, resume)
 		removeAcquisitionResume(resumePath)
-		return CandidateBundle{}, true, &ProtocolContractError{Cause: err}
+		return CandidateBundle{}, true, &ProtocolContractError{Cause: err, Stage: "daemon_observe"}
 	}
 	updateResumeFromResult(&resume, observed)
 	workflowStatus := diagnosticString(observed.Diagnostics, "workflow_status")
@@ -1071,7 +1136,7 @@ func acquireViaDaemon(parent context.Context, providerPath string, account local
 	return finalizeDaemonAcquisition(parent, endpoint, account, scopes, resume, resumePath, catalogKey)
 }
 
-// CancelAcquisition 取消当前账号尚未完成的密钥获取会话。续接文件不含秘密；无论守护
+// CancelAcquisition 取消当前账号尚未完成的密钥获取会话。续接文件不含凭据；无论守护
 // 进程是否仍存活，取消都会先移除本地续接记录，避免后续误续接。
 func CancelAcquisition(parent context.Context, explicit string, account localplatform.Account, privateRoot string) (bool, error) {
 	checkpointPath, checkpointErr := externalCheckpointPath(privateRoot, account.Path)

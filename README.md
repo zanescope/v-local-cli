@@ -1,10 +1,10 @@
 # v-local-cli
 
-> 面向 Agent 的本地微信（WeChat）只读查询工具。
+> 在自己电脑上查阅和导出微信数据的工具，也可以接入智能助手自动查询。
 
-单个 Go 二进制即可完成账号发现、密钥验证、只读快照、会话/未读/群成员/收藏、generation 全文索引、原子增量消息、联系人/聊天/搜索、语音转写与 OCR 读取、朋友圈与公众号查询、图片解密与导出，并可启动只服务 immutable generation 的本机查询 daemon。
+安装后只需一个程序，就能读取本机的微信聊天记录、联系人、群信息、收藏和未读消息，搜索历史聊天，转写语音，识别图片文字，浏览朋友圈和公众号文章，导出聊天记录和解密图片。
 
-项目仅供处理**本人拥有或已获明确授权访问**的数据。CLI 只读，不操作微信界面、不发送消息，普通查询不联网。
+**只读取、不修改**——不会操作微信界面、不会代发消息，普通查询不需要联网。仅供处理**自己拥有或已获得明确授权访问**的数据。
 
 ## 能做什么
 
@@ -32,7 +32,7 @@ amd64/arm64 都保持 `build_only`，直到对应架构的签名候选件和真�
 的精确匹配，因而未 promotion 的候选件不能冒充正式兼容声明。
 具体门禁见 [Windows 密钥获取真机与发布回归](references/windows-key-provider-acceptance.md)；本机 `windows/amd64` 的密钥、凭据复用、指定联系人历史/高清图、收藏和朋友圈端到端步骤见 [Windows amd64 本机真机验收](references/windows-amd64-local-acceptance.md)。
 
-macOS 上的 Provider 会自动使用同包安装的 companion helper。路由优先级固定为 `standard -> shadow -> sip_disabled`，但未实现的 Shadow 不是硬阻塞：当前 Provider 如实返回 `shadow_route_status=unavailable_in_build`，标准访问有机器失败证据且 SIP 已验证时，可以向用户提供较低优先级的 SIP fallback。候选 standard route 只以 `registry_candidate_entry` 标记用于 live regression；签名发行版还必须带外部 promotion 验证标记并命中内容寻址真机证据支持的精确 registry 条目。未知构建的通用符号路径只供 development 受控试验。未来 Shadow 通过签名和分架构真机验收后必须优先进入 `available/awaiting_approval`。SIP/Shadow 不能作为 Phase 2 daemon receipt 自动推进。Apple Silicon、Intel 与 Rosetta x86_64 必须按目标进程实际架构独立验收。具体门禁见 [macOS 真机验收](references/macos-acceptance.md)；候选文件导入路径不受影响。
+macOS 上的 Provider 会自动使用同包安装的 companion helper。路由优先级固定为 `standard -> shadow -> sip_disabled`，但未实现的 Shadow 不是硬阻塞：当前 Provider 如实返回 `shadow_route_status=unavailable_in_build`，标准访问有机器失败证据且 SIP 已验证时，可以向用户提供较低优先级的 SIP fallback。候选 standard route 只以 `registry_candidate_entry` 标记用于 live regression；签名发行版还必须带外部 promotion 验证标记并命中内容寻址真机证据支持的精确 registry 条目。未知构建的通用符号路径只供 development 受控试验。未来 Shadow 通过签名和分架构真机验收后必须优先进入 `available/awaiting_approval`。SIP/Shadow 不能作为 daemon receipt 自动推进。Apple Silicon、Intel 与 Rosetta x86_64 必须按目标进程实际架构独立验收。具体门禁见 [macOS 真机验收](references/macos-acceptance.md)；候选文件导入路径不受影响。
 
 ## 安装
 

@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/zalando/go-keyring"
+	"github.com/zanescope/v-local-cli/internal/state"
 	_ "modernc.org/sqlite"
 )
 
@@ -86,7 +88,7 @@ $response = [ordered]@{
 	}
 	providerPath := filepath.Join(directory, "mock-provider")
 	// macOS 在跨越 Provider 进程边界前会主动清除调用方的环境变量。把 fixture
-	// 中合成且不含秘密的证据嵌入脚本，让该测试覆盖生产环境的隔离行为，而不依赖
+	// 中合成且不含凭据的证据嵌入脚本，让该测试覆盖生产环境的隔离行为，而不依赖
 	// 继承 V_LOCAL_TEST_* 环境变量。
 	script := "#!/bin/sh\n" +
 		"V_LOCAL_TEST_FILE_ID='" + identity + "'\n" +
@@ -176,13 +178,25 @@ func TestSetupProviderKeychainRefreshAndExportMedia(t *testing.T) {
 
 	t.Setenv("V_LOCAL_CLI_ACCOUNT_DIR", account)
 	t.Setenv("V_LOCAL_CLI_HOME", testHome(t))
+	accountID := state.AccountID(account)
+	if err := state.DeleteSecrets(accountID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := state.DeleteSecrets(accountID); err != nil {
+			t.Errorf("系统凭据库测试条目清理失败：%v", err)
+		}
+	})
+	if err := keyring.Set("v-local-cli", accountID, "invalid-legacy-payload"); err != nil {
+		t.Fatal(err)
+	}
 	code, output, errorOutput := runForTest("setup", "--allow-key-access", "--provider", providerPath, "--storage", "keychain")
 	if code != 0 {
 		t.Fatalf("provider setup failed: code=%d output=%v error=%v", code, output, errorOutput)
 	}
 	setupData := output["data"].(map[string]any)
 	media := setupData["media"].(map[string]any)
-	if setupData["status"] != "ready" || media["status"] != "verified" || setupData["secrets_persisted"] != true || setupData["database_keys_persisted"] != false || setupData["image_keys_persisted"] != true {
+	if setupData["status"] != "ready" || media["status"] != "verified" || setupData["secrets_persisted"] != true || setupData["database_keys_persisted"] != false || setupData["image_keys_persisted"] != true || setupData["unreadable_keychain_replaced"] != true {
 		t.Fatalf("provider setup did not persist verified media secrets: %v", setupData)
 	}
 

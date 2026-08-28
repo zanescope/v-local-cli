@@ -4,7 +4,7 @@
 
 项目提供独立的 `v-local-cli-sensevoice` 仓库实现：它使用 sherpa-onnx 的 Go 绑定读取本地 SenseVoice int8 模型，不改变主仓依赖边界。仓库中的 Windows amd64 真实语音记录未绑定当前候选件摘要，只能作为历史验收线索；普通 `capabilities` 或适配器自报元数据不能把它升级为当前发布能力证据。
 
-调用方式：v-local-cli 启动适配器，不传命令行秘密，并向标准输入写入一行 JSON：
+调用方式：v-local-cli 启动适配器，不在命令行传入凭据，向标准输入写入一行 JSON：
 
 ```json
 {"protocol":"v-local-cli-asr/1","action":"transcribe","audio_path":"<临时 WAV>","source_audio_sha256":"<原始语音摘要>","sample_rate":16000,"channels":1,"language":"zh","model_path":"<本地模型路径>"}

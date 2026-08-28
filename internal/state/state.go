@@ -1,11 +1,16 @@
 package state
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,6 +24,65 @@ import (
 
 const stateVersion = 1
 const keyringService = "v-local-cli"
+const savedSecretsSchemaVersion = 1
+const savedSecretsEncoding = "gzip+base64"
+const savedSecretsChunkEncoding = "gzip+base64-chunks"
+const maxSavedSecretsBytes = 8 * 1024 * 1024
+const credentialBlobMaxBytes = 5 * 512
+const savedSecretsChunkSize = 2000
+const maxSavedSecretsChunks = 64
+
+var ErrSavedSecretsInvalid = errors.New("系统凭据库中的密钥数据无效")
+
+type credentialStore interface {
+	Set(service, user, password string) error
+	Get(service, user string) (string, error)
+	Delete(service, user string) error
+}
+
+type systemCredentialStore struct{}
+
+func (systemCredentialStore) Set(service, user, password string) error {
+	return keyring.Set(service, user, password)
+}
+
+func (systemCredentialStore) Get(service, user string) (string, error) {
+	return keyring.Get(service, user)
+}
+
+func (systemCredentialStore) Delete(service, user string) error {
+	return keyring.Delete(service, user)
+}
+
+var savedSecretsStore credentialStore = systemCredentialStore{}
+
+type savedSecretsCleanupError struct {
+	cause error
+}
+
+func (value *savedSecretsCleanupError) Error() string {
+	return "新凭据已提交，但旧凭据分片清理未完成"
+}
+
+func (value *savedSecretsCleanupError) Unwrap() error {
+	return value.cause
+}
+
+// SavedSecretsCommitted 判断错误是否发生在新 manifest 已经提交之后；调用方必须把
+// 新凭据视为可读，同时明确报告旧分片仍需清理，不能降级成“完全没有写入”。
+func SavedSecretsCommitted(err error) bool {
+	var cleanup *savedSecretsCleanupError
+	return errors.As(err, &cleanup)
+}
+
+type stateVersionMismatchError struct {
+	found    int
+	required int
+}
+
+func (value *stateVersionMismatchError) Error() string {
+	return fmt.Sprintf("账号状态文件版本为 %d，当前要求 %d；重新运行 v-local-cli setup 重建账号状态", value.found, value.required)
+}
 
 type DatabaseSummary struct {
 	Discovered int `json:"discovered"`
@@ -51,6 +115,15 @@ type AccountState struct {
 	Storage                string          `json:"storage"`
 	Database               DatabaseSummary `json:"database"`
 	Media                  MediaSummary    `json:"media"`
+}
+
+type savedSecretsEnvelope struct {
+	SchemaVersion int    `json:"schema_version"`
+	Encoding      string `json:"encoding"`
+	Payload       string `json:"payload,omitempty"`
+	ChunkSlot     string `json:"chunk_slot,omitempty"`
+	ChunkCount    int    `json:"chunk_count,omitempty"`
+	PayloadSHA256 string `json:"payload_sha256,omitempty"`
 }
 
 func Home() (string, error) {
@@ -201,7 +274,7 @@ func DaemonRoot() (string, error) {
 	return directory, nil
 }
 
-// AcquisitionRoot 保存密钥获取 daemon 的认证端点、不含秘密的 session resume 元数据，
+// AcquisitionRoot 保存密钥获取 daemon 的认证端点、不含凭据的 session resume 元数据，
 // 以及只用于生成 opaque catalog 标识的机器随机密钥。目录使用与凭据状态相同的当前用户专属 ACL。
 func AcquisitionRoot() (string, error) {
 	root, err := Home()
@@ -341,12 +414,9 @@ func decodeState(path, accountID string) (AccountState, error) {
 	if err := decoder.Decode(&value); err != nil {
 		return AccountState{}, fmt.Errorf("状态文件无效：%w", err)
 	}
-	// 版本不符与账号不符是两种完全不同的处置：前者是本机存在旧版本状态、需要重新
-	// setup 重建，后者说明状态文件与目标账号目录对不上。合并成一句会让诊断时无法
-	// 区分，而 List 对加载失败的条目是静默跳过的，除此之外没有别的信号。
-	if value.Version != stateVersion {
-		return AccountState{}, fmt.Errorf("账号状态文件版本为 %d，当前要求 %d；重新运行 v-local-cli setup 重建账号状态", value.Version, stateVersion)
-	}
+	// 即使版本不匹配，也先完成账号和路径边界验证；setup 的替换基线只能接受通过这些
+	// 安全检查的旧状态，绝不能让旧版本成为绕过账号绑定或目录边界的理由。
+	versionMismatch := value.Version != stateVersion
 	if value.AccountID != accountID {
 		return AccountState{}, errors.New("账号状态文件的账号标识与所在目录不一致")
 	}
@@ -363,6 +433,9 @@ func decodeState(path, accountID string) (AccountState, error) {
 	}
 	if err := validatePrivateHierarchy(filepath.Dir(value.SnapshotPath)); err != nil {
 		return AccountState{}, err
+	}
+	if versionMismatch {
+		return value, &stateVersionMismatchError{found: value.Version, required: stateVersion}
 	}
 	return value, nil
 }
@@ -382,6 +455,33 @@ func Load(accountID string) (AccountState, error) {
 		return AccountState{}, currentErr
 	}
 	return value, nil
+}
+
+// LoadReplacementBaseline 只供 setup 在原子发布新 v1 状态前读取覆盖率基线。版本不匹配
+// 的状态仍不会被 List、Select 或 refresh 视为已初始化；只有完整通过 JSON、账号绑定、
+// 私有路径和目录边界校验后，才可暂时提供旧快照路径。
+func LoadReplacementBaseline(accountID string) (AccountState, error) {
+	path, err := StatePath(accountID)
+	if err != nil {
+		return AccountState{}, err
+	}
+	current, currentErr := decodeState(path, accountID)
+	if currentErr == nil {
+		return current, nil
+	}
+	backup, backupErr := decodeState(path+".old", accountID)
+	if backupErr == nil {
+		return backup, nil
+	}
+	var currentVersion *stateVersionMismatchError
+	if errors.As(currentErr, &currentVersion) {
+		return current, nil
+	}
+	var backupVersion *stateVersionMismatchError
+	if errors.As(backupErr, &backupVersion) {
+		return backup, nil
+	}
+	return AccountState{}, currentErr
 }
 
 func List() ([]AccountState, error) {
@@ -468,19 +568,270 @@ func SaveSecrets(accountID string, bundle provider.CandidateBundle) error {
 		ImageKeys:          bundle.ImageKeys,
 		Profiles:           bundle.Profiles,
 	}
-	payload, err := json.Marshal(minimal)
+	// 结构化 credential 已能针对当前数据库重新派生并验证 key；重复保存逐库派生结果会
+	// 触发 Windows Credential Manager 的 2560-byte 单条上限，也增加凭据暴露面。
+	if minimal.DatabaseCredential != nil {
+		minimal.DatabaseKeys = nil
+		minimal.DatabaseProfiles = nil
+	}
+	encoded, err := encodeSavedSecrets(minimal)
 	if err != nil {
 		return err
 	}
-	return keyring.Set(keyringService, accountID, string(payload))
+	oldSlot, _, _, err := currentSavedSecretsChunkMetadata(accountID)
+	if err != nil {
+		return err
+	}
+	// 新写入统一采用 manifest 与双槽分片；单条格式仅保留读取兼容。这样无论 payload
+	// 变大或缩小都只会原子切换 manifest，不存在分片退回单条后的旧凭据残留窗口。
+	if len(encoded) == 0 || len(encoded) > savedSecretsChunkSize*maxSavedSecretsChunks {
+		return keyring.ErrSetDataTooBig
+	}
+	newSlot := "a"
+	if oldSlot == "a" {
+		newSlot = "b"
+	}
+	// inactive slot 可能来自上次在 manifest 提交前中断的写入；必须在复用前完整清理。
+	cleanupErr := cleanupSavedSecretChunks(accountID, newSlot, 0, maxSavedSecretsChunks)
+	// 没有可用 slot 元数据时，另一个槽位也必须清理。主 manifest 可能已被 forget
+	// 删除，而上次 best-effort 清理失败的孤儿分片仍留在任一槽位。
+	if oldSlot == "" {
+		otherSlot := "b"
+		if newSlot == "b" {
+			otherSlot = "a"
+		}
+		cleanupErr = errors.Join(cleanupErr, cleanupSavedSecretChunks(accountID, otherSlot, 0, maxSavedSecretsChunks))
+	}
+	if cleanupErr != nil {
+		return cleanupErr
+	}
+	chunkCount := (len(encoded) + savedSecretsChunkSize - 1) / savedSecretsChunkSize
+	written := 0
+	for index := 0; index < chunkCount; index++ {
+		end := (index + 1) * savedSecretsChunkSize
+		if end > len(encoded) {
+			end = len(encoded)
+		}
+		if err := savedSecretsStore.Set(keyringService, savedSecretsChunkAccount(accountID, newSlot, index), encoded[index*savedSecretsChunkSize:end]); err != nil {
+			return errors.Join(err, cleanupSavedSecretChunks(accountID, newSlot, 0, written))
+		}
+		written++
+	}
+	digest := sha256.Sum256([]byte(encoded))
+	manifest, err := json.Marshal(savedSecretsEnvelope{
+		SchemaVersion: savedSecretsSchemaVersion, Encoding: savedSecretsChunkEncoding,
+		ChunkSlot: newSlot, ChunkCount: chunkCount, PayloadSHA256: hex.EncodeToString(digest[:]),
+	})
+	if err != nil {
+		return errors.Join(err, cleanupSavedSecretChunks(accountID, newSlot, 0, written))
+	}
+	if len(manifest) > credentialBlobMaxBytes {
+		clearSecretBytes(manifest)
+		return errors.Join(keyring.ErrSetDataTooBig, cleanupSavedSecretChunks(accountID, newSlot, 0, written))
+	}
+	if err := savedSecretsStore.Set(keyringService, accountID, string(manifest)); err != nil {
+		clearSecretBytes(manifest)
+		return errors.Join(err, cleanupSavedSecretChunks(accountID, newSlot, 0, written))
+	}
+	clearSecretBytes(manifest)
+	if oldSlot != "" && oldSlot != newSlot {
+		// manifest 只描述当前有效分片数，旧槽位还可能带有更早失败写入留下的尾部分片。
+		if err := cleanupSavedSecretChunks(accountID, oldSlot, 0, maxSavedSecretsChunks); err != nil {
+			return &savedSecretsCleanupError{cause: err}
+		}
+	}
+	return nil
+}
+
+func clearSecretBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
+}
+
+func encodeSavedSecrets(bundle provider.CandidateBundle) (string, error) {
+	plain, err := json.Marshal(bundle)
+	if err != nil {
+		return "", err
+	}
+	defer clearSecretBytes(plain)
+	var compressed bytes.Buffer
+	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
+	if err != nil {
+		return "", err
+	}
+	if _, err := writer.Write(plain); err != nil {
+		_ = writer.Close()
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+	compressedBytes := compressed.Bytes()
+	defer clearSecretBytes(compressedBytes)
+	return base64.StdEncoding.EncodeToString(compressedBytes), nil
+}
+
+func marshalSavedSecrets(bundle provider.CandidateBundle) ([]byte, error) {
+	encoded, err := encodeSavedSecrets(bundle)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(savedSecretsEnvelope{
+		SchemaVersion: savedSecretsSchemaVersion, Encoding: savedSecretsEncoding, Payload: encoded,
+	})
+}
+
+func decodeStrictJSON(payload []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("JSON 包含多余数据")
+	}
+	return nil
+}
+
+func savedSecretsChunkAccount(accountID, slot string, index int) string {
+	return fmt.Sprintf("%s.v1.%s.%02d", accountID, slot, index)
+}
+
+func cleanupSavedSecretChunks(accountID, slot string, start, end int) error {
+	if slot != "a" && slot != "b" {
+		return nil
+	}
+	if start < 0 {
+		start = 0
+	}
+	if end > maxSavedSecretsChunks {
+		end = maxSavedSecretsChunks
+	}
+	var cleanupErrors []error
+	for index := start; index < end; index++ {
+		err := savedSecretsStore.Delete(keyringService, savedSecretsChunkAccount(accountID, slot, index))
+		if err != nil && !errors.Is(err, keyring.ErrNotFound) {
+			cleanupErrors = append(cleanupErrors, err)
+		}
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func currentSavedSecretsChunkMetadata(accountID string) (string, int, bool, error) {
+	payload, err := savedSecretsStore.Get(keyringService, accountID)
+	if errors.Is(err, keyring.ErrNotFound) {
+		return "", 0, false, nil
+	}
+	if err != nil {
+		return "", 0, false, err
+	}
+	encoded := []byte(payload)
+	defer clearSecretBytes(encoded)
+	var envelope savedSecretsEnvelope
+	if decodeStrictJSON(encoded, &envelope) != nil || envelope.SchemaVersion != savedSecretsSchemaVersion ||
+		envelope.Encoding != savedSecretsChunkEncoding || (envelope.ChunkSlot != "a" && envelope.ChunkSlot != "b") ||
+		envelope.ChunkCount < 1 || envelope.ChunkCount > maxSavedSecretsChunks {
+		return "", 0, true, nil
+	}
+	return envelope.ChunkSlot, envelope.ChunkCount, true, nil
+}
+
+func decodeSavedSecretsEncoding(encoded string) (provider.CandidateBundle, error) {
+	if len(encoded) == 0 || len(encoded) > savedSecretsChunkSize*maxSavedSecretsChunks {
+		return provider.CandidateBundle{}, ErrSavedSecretsInvalid
+	}
+	compressed, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return provider.CandidateBundle{}, ErrSavedSecretsInvalid
+	}
+	defer clearSecretBytes(compressed)
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return provider.CandidateBundle{}, ErrSavedSecretsInvalid
+	}
+	decoded, readErr := io.ReadAll(io.LimitReader(reader, maxSavedSecretsBytes+1))
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil || len(decoded) > maxSavedSecretsBytes {
+		clearSecretBytes(decoded)
+		return provider.CandidateBundle{}, ErrSavedSecretsInvalid
+	}
+	defer clearSecretBytes(decoded)
+	var bundle provider.CandidateBundle
+	if decodeStrictJSON(decoded, &bundle) != nil {
+		return provider.CandidateBundle{}, ErrSavedSecretsInvalid
+	}
+	return bundle, nil
+}
+
+func decodeSavedSecretsForAccount(accountID string, payload []byte) (provider.CandidateBundle, error) {
+	var marker struct {
+		SchemaVersion *int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(payload, &marker); err != nil {
+		return provider.CandidateBundle{}, ErrSavedSecretsInvalid
+	}
+	if marker.SchemaVersion != nil {
+		var envelope savedSecretsEnvelope
+		if decodeStrictJSON(payload, &envelope) != nil || envelope.SchemaVersion != savedSecretsSchemaVersion {
+			return provider.CandidateBundle{}, ErrSavedSecretsInvalid
+		}
+		switch envelope.Encoding {
+		case savedSecretsEncoding:
+			if envelope.Payload == "" || envelope.ChunkSlot != "" || envelope.ChunkCount != 0 || envelope.PayloadSHA256 != "" {
+				return provider.CandidateBundle{}, ErrSavedSecretsInvalid
+			}
+			return decodeSavedSecretsEncoding(envelope.Payload)
+		case savedSecretsChunkEncoding:
+			if accountID == "" || envelope.Payload != "" || (envelope.ChunkSlot != "a" && envelope.ChunkSlot != "b") ||
+				envelope.ChunkCount < 1 || envelope.ChunkCount > maxSavedSecretsChunks || len(envelope.PayloadSHA256) != 64 {
+				return provider.CandidateBundle{}, ErrSavedSecretsInvalid
+			}
+			encoded := make([]byte, 0, envelope.ChunkCount*savedSecretsChunkSize)
+			for index := 0; index < envelope.ChunkCount; index++ {
+				chunk, err := savedSecretsStore.Get(keyringService, savedSecretsChunkAccount(accountID, envelope.ChunkSlot, index))
+				if err != nil || len(chunk) == 0 || len(chunk) > savedSecretsChunkSize {
+					clearSecretBytes(encoded)
+					return provider.CandidateBundle{}, ErrSavedSecretsInvalid
+				}
+				encoded = append(encoded, chunk...)
+			}
+			defer clearSecretBytes(encoded)
+			digest := sha256.Sum256(encoded)
+			actual := hex.EncodeToString(digest[:])
+			if subtle.ConstantTimeCompare([]byte(actual), []byte(strings.ToLower(envelope.PayloadSHA256))) != 1 {
+				return provider.CandidateBundle{}, ErrSavedSecretsInvalid
+			}
+			return decodeSavedSecretsEncoding(string(encoded))
+		default:
+			return provider.CandidateBundle{}, ErrSavedSecretsInvalid
+		}
+	}
+	var bundle provider.CandidateBundle
+	if decodeStrictJSON(payload, &bundle) != nil {
+		return provider.CandidateBundle{}, ErrSavedSecretsInvalid
+	}
+	return bundle, nil
+}
+
+func decodeSavedSecrets(payload []byte) (provider.CandidateBundle, error) {
+	return decodeSavedSecretsForAccount("", payload)
 }
 
 func DeleteSecrets(accountID string) error {
-	err := keyring.Delete(keyringService, accountID)
-	if errors.Is(err, keyring.ErrNotFound) {
-		return nil
+	var deleteErrors []error
+	if err := savedSecretsStore.Delete(keyringService, accountID); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		deleteErrors = append(deleteErrors, err)
 	}
-	return err
+	for _, slot := range []string{"a", "b"} {
+		for index := 0; index < maxSavedSecretsChunks; index++ {
+			err := savedSecretsStore.Delete(keyringService, savedSecretsChunkAccount(accountID, slot, index))
+			if err != nil && !errors.Is(err, keyring.ErrNotFound) {
+				deleteErrors = append(deleteErrors, err)
+			}
+		}
+	}
+	return errors.Join(deleteErrors...)
 }
 
 func DeleteAccountData(accountID string) error {
@@ -513,20 +864,22 @@ func DeleteAccountData(accountID string) error {
 }
 
 func LoadSecrets(accountID string) (provider.CandidateBundle, error) {
-	payload, err := keyring.Get(keyringService, accountID)
+	payload, err := savedSecretsStore.Get(keyringService, accountID)
 	if err != nil {
 		return provider.CandidateBundle{}, err
 	}
-	var bundle provider.CandidateBundle
-	if err := json.Unmarshal([]byte(payload), &bundle); err != nil {
-		return provider.CandidateBundle{}, errors.New("系统凭据库中的密钥数据无效")
+	encoded := []byte(payload)
+	defer clearSecretBytes(encoded)
+	bundle, err := decodeSavedSecretsForAccount(accountID, encoded)
+	if err != nil {
+		return provider.CandidateBundle{}, err
 	}
 	// ValidateBundle 会就地归一化候选，校验不过时不返回半归一化的结果。
 	if err := provider.ValidateBundle(&bundle); err != nil {
-		return provider.CandidateBundle{}, err
+		return provider.CandidateBundle{}, ErrSavedSecretsInvalid
 	}
 	if bundle.DatabaseCredential != nil && bundle.DatabaseCredential.StorageAccountID != accountID {
-		return provider.CandidateBundle{}, errors.New("系统凭据库中的凭据账号绑定不匹配")
+		return provider.CandidateBundle{}, ErrSavedSecretsInvalid
 	}
 	return bundle, nil
 }

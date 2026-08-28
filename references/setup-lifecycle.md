@@ -54,6 +54,8 @@ v-local-cli setup --account <account> --keys <keys.json> --storage keychain
 - 默认 setup 就是一次性取得完整数据库和图片能力的严格流程；它会在保存前验证图片 DAT，失败时不发布部分完成的 setup。
 - 只处理文本时显式增加 `--database-only`；该模式向 Provider 只请求数据库 scope，并明确不能保证图片密钥已保存。
 
+Windows Credential Manager 的单个 `CredentialBlob` 上限是 `5*512` bytes。CLI 的新写入固定使用 schema v1 manifest、2000-byte 分片和 a/b 双槽：先完整写入 inactive slot，再原子切换 manifest；旧的单条 `gzip+base64` 记录只保留读取兼容。应用最多接受 64 个分片，超过预算时不截断、不只保存部分凭据，而是让 keychain 写入失败并按上面的 `snapshot-only` 降级语义报告。manifest 提交后的旧分片清理若失败，新凭据仍按已提交处理，setup 返回 warning，后续 setup 或 `forget` 会再次执行有界清理。上限来源见 [Microsoft CREDENTIAL 结构说明](https://learn.microsoft.com/en-us/windows/win32/api/wincred/ns-wincred-credentiala)。
+
 ### 4. 判断 setup 是否可用
 
 不要只看 `data.status`，同时检查：
@@ -68,7 +70,7 @@ v-local-cli setup --account <account> --keys <keys.json> --storage keychain
 处理规则：
 
 - `ready`：数据库快照可读，所需检查均已通过。
-- 完整媒体 setup 的成功判据是同时满足 `status=ready`、`media.status=verified`、`database_credential_status=persisted|not_required_plaintext_only` 和 `image_keys_persisted=true`。plaintext-only Catalog 合法地没有数据库秘密。
+- 完整媒体 setup 的成功判据是同时满足 `status=ready`、`media.status=verified`、`database_credential_status=persisted|not_required_plaintext_only` 和 `image_keys_persisted=true`。plaintext-only Catalog 合法地没有数据库凭据。
 - database-only 的成功判据是 `status=ready`、`database_only=true`、`database_credential_status=persisted|not_required_plaintext_only` 和 `image_keys_persisted=false`；它不具备图片能力。
 - `status=security_restoration_required` 表示验真 credential/generation 可以已经发布，但 macOS SIP 工作流尚未完成；先恢复 SIP 并重启，再用不带旧确认参数的新 setup 取得 `sip_enabled_verified`。该值只证明 SIP 已开启，不代表整机总体安全。
 - `partial`：只在当前任务不依赖失败部分时继续，并向用户说明具体缺口。文本任务要求至少有可读数据库快照；媒体任务要求图片状态为 `verified`。

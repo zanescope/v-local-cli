@@ -13,7 +13,9 @@ CLI 只把包含 `db_storage` 目录的父目录识别为微信账号目录。�
 - `V_LOCAL_CLI_DATA_ROOT`：覆盖账号搜索根。
 - `V_LOCAL_CLI_ACCOUNT_DIR`：直接指定一个账号目录；其中必须存在 `db_storage`。
 - `V_LOCAL_CLI_HOME`：覆盖 v-local-cli 状态、快照、锁和私有临时文件根。
+- `V_LOCAL_CLI_PRIVATE_OUTPUT_PATH`：仅供本机受控验收把单个 schema v1 响应原子写入私有 JSON 文件；必须是既有、非重解析点私有目录中的绝对新路径，拒绝覆盖，命令结束后立即清除该变量。不得把它写入普通用户配置或指向仓库、共享目录。
 - `V_LOCAL_CLI_KEY_PROVIDER`：仅开发/候选构建可指定隔离测试 Provider；发行构建检测到该变量会拒绝密钥组件，不会回退 PATH。
+- `V_LOCAL_KEY_PROVIDER_BINARY_PATH`、`V_LOCAL_KEY_PROVIDER_DEVELOPMENT`、`V_LOCAL_KEY_PROVIDER_ALLOW_UNVERIFIED_LOCAL_BINARY`：仅本机受控开发验收使用；三者必须分别是绝对 Provider 路径、`1`、`1` 才解析本地未签名构建。任一缺失或发行构建都会 fail closed；它们只放宽本地组件解析，不构成 compatibility authorization。
 - `V_LOCAL_CLI_WHISPER_BIN`：指定用户已安装的本地 `whisper-cli`；也可每次传 `--engine`。
 - `V_LOCAL_CLI_WHISPER_MODEL`：指定用户已下载的 whisper.cpp 多语言模型；也可每次传 `--model`。
 - `V_LOCAL_CLI_ASR_PROVIDER`：指定用户选择的 `v-local-cli-asr/1` 本地适配器；也可每次传 `--asr-provider`。

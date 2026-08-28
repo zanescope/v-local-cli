@@ -30,6 +30,8 @@ var Version = "0.1.0-dev.1"
 
 const responseSchemaVersion = 1
 
+const privateOutputPathEnv = "V_LOCAL_CLI_PRIVATE_OUTPUT_PATH"
+
 const setupUsage = "v-local-cli setup [--dry-run | --cancel-acquisition | --cancel-all-external-workflows] [--account NAME] [--provider FILE] [--allow-key-access | --keys FILE] [--confirm-key-action ACTION] [--storage keychain|snapshot-only] [--database-only] [--require-media] [--allow-coverage-regression] [--show-paths]"
 
 type envelope struct {
@@ -88,7 +90,64 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		writeError(stderr, &commandError{typeName: "crash_protection_unavailable", message: "无法禁用密钥处理进程的 crash artifact", hint: "停止密钥获取并检查当前进程的 core dump / crash reporting 策略。", code: 5})
 		return 5
 	}
+	if output := strings.TrimSpace(os.Getenv(privateOutputPathEnv)); output != "" {
+		return mainWithPrivateOutput(args, output, stderr)
+	}
 	return mainWithPolicy(args, stdout, stderr, false)
+}
+
+func mainWithPrivateOutput(args []string, output string, fallbackStderr io.Writer) int {
+	if !filepath.IsAbs(output) {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_invalid", message: "私有 JSON 输出必须使用绝对路径", code: 2})
+		return 2
+	}
+	parent := filepath.Dir(filepath.Clean(output))
+	info, err := os.Lstat(parent)
+	if err != nil || !info.IsDir() {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_invalid", message: "私有 JSON 输出父目录不可用", code: 2})
+		return 2
+	}
+	reparse, err := outputPathIsReparsePoint(parent)
+	if err != nil || reparse {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_invalid", message: "私有 JSON 输出父目录是链接或重解析点", code: 2})
+		return 2
+	}
+	if err := state.ValidatePrivateDirectorySecurity(parent); err != nil {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_invalid", message: "私有 JSON 输出父目录权限不安全", code: 2})
+		return 2
+	}
+	target, err := prepareOutputTarget(output, false)
+	if err != nil {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_invalid", message: "私有 JSON 输出目标不可用", code: 2})
+		return 2
+	}
+	file, temporary, err := createTemporaryFileNear(target)
+	if err != nil {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_unavailable", message: "无法创建私有 JSON 输出", code: 5})
+		return 5
+	}
+	remove := true
+	defer func() {
+		_ = file.Close()
+		if remove {
+			_ = os.Remove(temporary)
+		}
+	}()
+	code := mainWithPolicy(args, file, file, false)
+	if err := file.Sync(); err != nil {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_unavailable", message: "无法同步私有 JSON 输出", code: 5})
+		return 5
+	}
+	if err := file.Close(); err != nil {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_unavailable", message: "无法关闭私有 JSON 输出", code: 5})
+		return 5
+	}
+	if err := publishNewFile(temporary, target); err != nil {
+		writeError(fallbackStderr, &commandError{typeName: "private_output_unavailable", message: "无法发布私有 JSON 输出", code: 5})
+		return 5
+	}
+	remove = false
+	return code
 }
 
 func mainWithPolicy(args []string, stdout, stderr io.Writer, immutableOnly bool) int {
@@ -780,6 +839,14 @@ func selectLocalAccount(selector string) (localplatform.Account, error) {
 	if len(accounts) == 0 {
 		return localplatform.Account{}, &commandError{typeName: "no_accounts", message: "未发现本地微信账号", hint: "请重新登录微信/打开新消息后重试；也可设置 V_LOCAL_CLI_DATA_ROOT 或 V_LOCAL_CLI_ACCOUNT_DIR。", code: 5}
 	}
+	// accounts 返回的稳定 account_id 必须能原样用于后续 --account，且不能退化为名称子串猜测。
+	if selector != "" {
+		for _, account := range accounts {
+			if state.AccountID(account.Path) == selector {
+				return account, nil
+			}
+		}
+	}
 	account, selected, ambiguous := localplatform.Select(accounts, selector)
 	if selected {
 		return account, nil
@@ -845,7 +912,18 @@ func snapshotCatalogEntries(entries []provider.CatalogEntry) []snapshot.CatalogE
 	return result
 }
 
+func persistedSecretFlags(bundle provider.CandidateBundle, structuredCredentialMinimized bool) (bool, bool, bool) {
+	databaseKeysPersisted := len(bundle.DatabaseKeys) > 0
+	if structuredCredentialMinimized && bundle.DatabaseCredential != nil {
+		databaseKeysPersisted = false
+	}
+	databaseCredentialPersisted := databaseKeysPersisted || bundle.DatabaseCredential != nil
+	return databaseKeysPersisted, databaseCredentialPersisted, bundle.ImageKeys != nil
+}
+
 func publishAccountSnapshot(account localplatform.Account, bundle provider.CandidateBundle, options snapshotPublishOptions) (any, error) {
+	savedKeychainDatabaseKeysPersisted, savedKeychainDatabaseCredentialPersisted, savedKeychainImageKeysPersisted :=
+		persistedSecretFlags(bundle, false)
 	if options.CredentialSource != "provider" {
 		// 只有当前受控 Provider 交换返回的 proof 可以绑定获取时的 catalog。保存的
 		// credential 和用户候选文件都必须针对眼前文件重新生成机器密钥化 catalog。
@@ -873,7 +951,9 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 	if err != nil {
 		return nil, err
 	}
-	previousState, previousErr := state.Load(accountID)
+	// setup 可以用已通过账号和路径安全校验的旧版本状态作为一次性替换基线；旧状态
+	// 仍不会被普通查询或 refresh 当成已初始化，且会一直保留到新 v1 状态原子提交。
+	previousState, previousErr := state.LoadReplacementBaseline(accountID)
 	if previousErr != nil && !os.IsNotExist(previousErr) {
 		return nil, &commandError{
 			typeName: "state_recovery_failed", message: "现有账号状态无法安全恢复",
@@ -922,10 +1002,19 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 	previousSecretsExist := false
 	secretsStateKnown := false
 	secretsChanged := false
+	unreadableSecretsReplaced := false
 	if options.PersistSecrets {
 		previousSecrets, previousSecretsExist, err = state.LoadSecretsOptional(accountID)
 		if err == nil {
 			secretsStateKnown = true
+		} else if errors.Is(err, state.ErrSavedSecretsInvalid) && options.CredentialSource == "provider" &&
+			diagnosticStringValue(bundle.Diagnostics, "result_code") == "complete" &&
+			report.Summary.Decrypted == report.Summary.Discovered && report.Summary.Failed == 0 && report.Summary.Skipped == 0 &&
+			(!options.RequireMedia || media.Status == "verified") {
+			// 旧条目内容确定无效时，只有本轮 Provider 与全部请求 scope 都完整验真，才允许
+			// 用新凭据替换。系统凭据库不可访问等瞬态错误仍保持不写入。
+			secretsStateKnown = true
+			unreadableSecretsReplaced = true
 		} else {
 			warnings = append(warnings, "系统凭据库当前不可读；未修改已有凭据")
 		}
@@ -958,22 +1047,25 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 		}
 		if !secretsStateKnown {
 			effectiveStorage = "snapshot-only"
-		} else if err := state.SaveSecrets(accountID, verifiedBundle); err != nil {
+		} else if saveErr := state.SaveSecrets(accountID, verifiedBundle); saveErr != nil && !state.SavedSecretsCommitted(saveErr) {
 			effectiveStorage = "snapshot-only"
 			warnings = append(warnings, "系统凭据库写入失败；已保留可查询快照，但刷新和图片导出需要重新 setup")
 		} else {
 			keychainStatePersisted = true
-			databaseKeysPersisted = len(verifiedBundle.DatabaseKeys) > 0
-			databaseCredentialPersisted = databaseKeysPersisted || verifiedBundle.DatabaseCredential != nil
-			imageKeysPersisted = verifiedBundle.ImageKeys != nil
+			// SaveSecrets 在存在结构化 credential 时只保存可重新派生的根或逐库 override，
+			// 不重复保存刚刚派生出的 DatabaseKeys。
+			databaseKeysPersisted, databaseCredentialPersisted, imageKeysPersisted = persistedSecretFlags(verifiedBundle, true)
 			secretsPersisted = databaseCredentialPersisted || imageKeysPersisted
 			secretsChanged = true
+			if saveErr != nil {
+				warnings = append(warnings, "新凭据已写入系统凭据库，但旧分片未完整清理；后续 setup 或 forget 会再次清理")
+			}
 		}
 	}
 	if options.CredentialSource == "saved_keychain" {
-		databaseKeysPersisted = len(bundle.DatabaseKeys) > 0
-		databaseCredentialPersisted = databaseKeysPersisted || bundle.DatabaseCredential != nil
-		imageKeysPersisted = bundle.ImageKeys != nil
+		databaseKeysPersisted = savedKeychainDatabaseKeysPersisted
+		databaseCredentialPersisted = savedKeychainDatabaseCredentialPersisted
+		imageKeysPersisted = savedKeychainImageKeysPersisted
 	}
 	if report.Summary.Skipped > 0 && options.CredentialSource == "saved_keychain" {
 		warnings = append(warnings, "部分数据库没有已保存的验真密钥；已发布可解密范围，需要完整覆盖时重新 setup")
@@ -1002,20 +1094,28 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 		}
 	}
 	if err := state.Save(&accountState); err != nil {
+		keychainRollbackIncomplete := false
 		if secretsChanged {
-			if previousSecretsExist {
-				_ = state.SaveSecrets(accountID, previousSecrets)
+			if unreadableSecretsReplaced {
+				// 无效旧条目无法作为可信回滚目标；保留已经完整验真的新凭据，后续 setup
+				// 可以继续完成状态提交，且不会恢复已知无效的数据。
+			} else if previousSecretsExist {
+				keychainRollbackIncomplete = state.SaveSecrets(accountID, previousSecrets) != nil
 			} else {
-				_ = state.DeleteSecrets(accountID)
+				keychainRollbackIncomplete = state.DeleteSecrets(accountID) != nil
 			}
 		}
 		if derived, derivedErr := messageindex.GenerationDir(accountID, generation.ID); derivedErr == nil {
 			_ = os.RemoveAll(derived)
 		}
 		_ = os.RemoveAll(generation.Path)
+		hint := "上一代快照保持不变；运行 v-local-cli doctor 后重试。"
+		if keychainRollbackIncomplete {
+			hint = "上一代快照保持不变，但系统凭据库回滚未完整完成；先运行 v-local-cli doctor，再用 setup 重试或用 forget 精确清理。"
+		}
 		return nil, &commandError{
 			typeName: "state_commit_failed", message: "快照状态提交失败，已回滚新代际",
-			hint: "上一代快照保持不变；运行 v-local-cli doctor 后重试。", code: 5,
+			hint: hint, code: 5,
 		}
 	}
 	if options.PersistSecrets && options.Storage == "snapshot-only" && secretsStateKnown && previousSecretsExist {
@@ -1075,6 +1175,7 @@ func publishAccountSnapshot(account localplatform.Account, bundle provider.Candi
 		"database_credential_persisted": databaseCredentialPersisted,
 		"database_credential_status":    databaseCredentialStatus,
 		"image_keys_persisted":          imageKeysPersisted,
+		"unreadable_keychain_replaced":  unreadableSecretsReplaced,
 		"acquisition_result_code":       acquisitionResultCode,
 		"security_posture_status":       securityPostureStatus,
 		"next_action":                   nextAction,
@@ -1216,6 +1317,29 @@ func acquisitionCommandError(acquisition *provider.AcquisitionError, typeName, m
 func keyProviderCommandError(err error) *commandError {
 	var acquisition *provider.AcquisitionError
 	if !errors.As(err, &acquisition) {
+		var contract *provider.ProtocolContractError
+		if errors.As(err, &contract) {
+			details := map[string]any{"stage": "protocol_contract_validation", "stderr_included": false, "path_included": false}
+			if contract.Stage != "" {
+				details["contract_stage"] = contract.Stage
+			}
+			return &commandError{
+				typeName: "key_provider_failed", message: "密钥提供器未能返回有效候选",
+				hint:    "Provider v1 响应未通过 CLI 契约验证；原始响应、路径和候选均未包含在错误中。",
+				details: details, code: 5,
+			}
+		}
+		var execution *provider.ExecutionError
+		if errors.As(err, &execution) {
+			details := map[string]any{"stage": execution.Stage, "stderr_included": false, "path_included": false}
+			if execution.ExitCode >= 0 {
+				details["exit_code"] = execution.ExitCode
+			}
+			return &commandError{
+				typeName: "key_provider_failed", message: "密钥提供器未能返回有效候选",
+				hint: "根据 details.stage 区分子进程启动失败和 Provider 非零退出；原始 stderr 已隐藏。", details: details, code: 5,
+			}
+		}
 		return &commandError{
 			typeName: "key_provider_failed", message: "密钥提供器未能返回有效候选",
 			hint: "请保持微信登录并打开一条新消息后重试。", code: 5,
@@ -1300,7 +1424,7 @@ func runSetup(args []string) (any, error) {
 	dryRun := set.Bool("dry-run", false, "只运行预检")
 	cancelAcquisition := set.Bool("cancel-acquisition", false, "取消当前账号未完成的密钥获取会话")
 	cancelAllExternalWorkflows := set.Bool("cancel-all-external-workflows", false, "只清理全部跨重启密钥工作流 checkpoint")
-	accountName := set.String("account", "", "账号目录名或唯一子串")
+	accountName := set.String("account", "", "account_id、账号目录名或唯一子串")
 	providerPath := set.String("provider", "", "显式指定密钥提供器路径")
 	allowKeyAccess := set.Bool("allow-key-access", false, "明确授权调用独立密钥提供器")
 	confirmKeyAction := set.String("confirm-key-action", "", "明确确认 Provider 当前请求的动作；stop_and_report 结束并保留已验真的 partial")

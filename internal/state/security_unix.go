@@ -5,7 +5,27 @@ package state
 import (
 	"errors"
 	"os"
+	"syscall"
 )
+
+// ValidatePrivateDirectorySecurity 验证目录属于当前用户，且组用户和其他用户没有权限。
+func ValidatePrivateDirectorySecurity(path string) error {
+	if err := validatePrivatePath(path, true); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return errors.New("v-local-cli 私有目录 owner 不是当前用户")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return errors.New("v-local-cli 私有目录向组用户或其他用户开放")
+	}
+	return nil
+}
 
 func validatePrivatePath(path string, allowDirectory bool) error {
 	info, err := os.Lstat(path)

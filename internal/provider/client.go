@@ -29,7 +29,7 @@ const (
 	maxResponseProfiles = 64
 )
 
-// acquireTimeout 是硬性上限，到点直接杀进程；acquireBudget 是告知提供器的自我收敛时限。
+// acquireTimeout 是硬性上限，到点直接杀进程；acquireBudget 是告知提供器的软截止时限。
 // 两者之间留出的余量用于进程启动、收尾和响应编码，确保提供器有机会
 // 在被杀之前把已经验证出的密钥写回来。
 const (
@@ -45,6 +45,7 @@ var ErrComponentMissing = errors.New("未找到 v-local-key-provider")
 // payload 子集推断出的采集结果替代它。
 type ProtocolContractError struct {
 	Cause error
+	Stage string
 }
 
 func (value *ProtocolContractError) Error() string {
@@ -222,6 +223,16 @@ type limitedBuffer struct {
 	over      bool
 }
 
+// ExecutionError 只暴露 Provider 子进程失败阶段和退出码，不携带路径、stderr 或请求内容。
+type ExecutionError struct {
+	Stage    string
+	ExitCode int
+}
+
+func (err *ExecutionError) Error() string {
+	return "密钥提供器子进程失败"
+}
+
 func (writer *limitedBuffer) Write(data []byte) (int, error) {
 	var over bool
 	writer.buffer, over = appendSensitiveBytesLimited(writer.buffer, data, writer.limit)
@@ -259,7 +270,7 @@ func AcquireScopes(parent context.Context, explicit string, account localplatfor
 }
 
 // AcquireScopesWithRoot 使用当前用户私有目录保存密钥获取守护进程的认证端点和不含
-// 秘密的续接元数据。实际候选只经受控进程间通信返回，不写入该目录。
+// 凭据的续接元数据。实际候选只经受控进程间通信返回，不写入该目录。
 func AcquireScopesWithRoot(parent context.Context, explicit string, account localplatform.Account, scopes []string, privateRoot string) (CandidateBundle, error) {
 	return acquireScopes(parent, explicit, account, scopes, privateRoot, "")
 }
@@ -335,7 +346,7 @@ func reconcileNormalAcquisition(parent context.Context, privateRoot, providerPat
 ) (CandidateBundle, error) {
 	if disableCheckpointPending && acquisitionErr != nil {
 		// 普通采集可能尚未生成 SIP 诊断，就先发生致命的 catalog、路径或 Provider
-		// 错误。仅在这一特定场景下，使用不接触秘密的 posture RPC 判断用户是否执行了
+		// 错误。仅在这一特定场景下，使用不涉及凭据的 posture RPC 判断用户是否执行了
 		// 外部变更。disabled 结果优先，以免恢复流程搁置；enabled 或 unknown 结果则保留
 		// 原始错误和 checkpoint。
 		postureBundle, postureErr := revalidateSecurityPostureOneShot(parent, providerPath, account, scopes, catalogKey)
@@ -417,7 +428,11 @@ func executeOneShotProviderRequest(parent context.Context, path string, request 
 		if ctx.Err() != nil {
 			return CandidateBundle{}, errors.New("密钥提供器运行超时")
 		}
-		return CandidateBundle{}, errors.New("密钥提供器执行失败；原始 stderr 已隐藏")
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return CandidateBundle{}, &ExecutionError{Stage: "process_exit", ExitCode: exitErr.ExitCode()}
+		}
+		return CandidateBundle{}, &ExecutionError{Stage: "process_start", ExitCode: -1}
 	}
 	if stdout.over {
 		return CandidateBundle{}, errors.New("密钥提供器响应超过安全上限")
@@ -531,7 +546,7 @@ func revalidateSecurityPostureOneShot(parent context.Context, path string, accou
 	return bundle, nil
 }
 
-// IsSecurityPostureRevalidation 判断结果是否为成功且不接触秘密的重新验证结果，
+// IsSecurityPostureRevalidation 判断结果是否为成功且不涉及凭据的重新验证结果，
 // setup 用它在不重新采集密钥的情况下结束外部恢复流程。
 func IsSecurityPostureRevalidation(bundle CandidateBundle) bool {
 	scopes, err := diagnosticStringList(bundle.Diagnostics, "requested_scopes")
@@ -694,7 +709,7 @@ func validateScopeDiagnostics(bundle *CandidateBundle) error {
 		if shadowRouteStatus == "not_applicable" || strings.Join(routePriority, "\x00") != "standard\x00shadow\x00sip_disabled" {
 			return errors.New("Provider diagnostics 的 macOS route_priority 或 Shadow 状态无效")
 		}
-		if err := validateDarwinPhase3Evidence(bundle.Diagnostics); err != nil {
+		if err := validateDarwinEvidence(bundle.Diagnostics); err != nil {
 			return err
 		}
 	} else if platform != "windows" {
@@ -726,7 +741,7 @@ func validateScopeDiagnostics(bundle *CandidateBundle) error {
 			route == "darwin_amd64_sip_disabled" || route == "darwin_sip_disabled_waitfor"
 	}
 	if platform == "windows" {
-		if err := validateWindowsPhase4Evidence(bundle.Diagnostics, routesAttempted); err != nil {
+		if err := validateWindowsEvidence(bundle.Diagnostics, routesAttempted); err != nil {
 			return err
 		}
 	}
@@ -754,8 +769,11 @@ func validateScopeDiagnostics(bundle *CandidateBundle) error {
 	if databaseRequested && (!validSecretHex(bundle.CatalogID) || len(bundle.CatalogID) != 64) {
 		return errors.New("Provider diagnostics 的数据库 scope 缺少有效 catalog_id")
 	}
-	if (bundle.ImageKeys != nil) != (mediaCoverage == "complete") {
-		return errors.New("Provider diagnostics media_coverage_status 与已验真的媒体凭据不一致")
+	if bundle.ImageKeys == nil && mediaCoverage == "complete" {
+		return errors.New("Provider diagnostics media_coverage_status=complete 但缺少已验真的媒体凭据")
+	}
+	if bundle.ImageKeys != nil && mediaCoverage != "complete" {
+		return errors.New("Provider diagnostics media_coverage_status 未完成却携带媒体凭据")
 	}
 	resultCode := diagnosticString(bundle.Diagnostics, "result_code")
 	workflowStatus := diagnosticString(bundle.Diagnostics, "workflow_status")
@@ -875,7 +893,7 @@ func validBlockingReason(value string) bool {
 	}[value]
 }
 
-func validateDarwinPhase3Evidence(values map[string]any) error {
+func validateDarwinEvidence(values map[string]any) error {
 	fingerprintStatus := diagnosticString(values, "binary_fingerprint_status")
 	signingStatus := diagnosticString(values, "binary_signing_status")
 	architecture := diagnosticString(values, "process_architecture")
@@ -1002,7 +1020,7 @@ func diagnosticIntegerMap(values map[string]any, name string) (map[string]int, e
 	return result, nil
 }
 
-func validateWindowsPhase4Evidence(values map[string]any, routesAttempted []string) error {
+func validateWindowsEvidence(values map[string]any, routesAttempted []string) error {
 	fingerprintStatus := diagnosticString(values, "binary_fingerprint_status")
 	signingStatus := diagnosticString(values, "binary_signing_status")
 	architecture := diagnosticString(values, "process_architecture")
@@ -1019,7 +1037,8 @@ func validateWindowsPhase4Evidence(values map[string]any, routesAttempted []stri
 		!map[string]bool{"not_evaluated": true, "registered_supported": true, "registered_unsupported": true, "unregistered": true, "rejected_untrusted_binary": true}[registryStatus] ||
 		!map[string]bool{
 			"not_evaluated": true, "unavailable_unregistered": true, "unavailable_untrusted_binary": true,
-			"eligible_registered": true, "attempted_no_structure": true, "attempted_invalid_structure": true,
+			"eligible_registered": true, "registered_reviewed_no_structure": true,
+			"attempted_no_structure": true, "attempted_invalid_structure": true,
 			"attempted_no_verified_candidate": true, "partial": true, "succeeded": true,
 		}[configStatus] {
 		return errors.New("Provider diagnostics 包含未知或缺失的 Windows Phase 4 证据状态")
@@ -1170,7 +1189,7 @@ func validateWindowsPhase4Evidence(values map[string]any, routesAttempted []stri
 		if registryStatus != "rejected_untrusted_binary" {
 			return errors.New("Provider diagnostics 的 Config.Cipher untrusted 状态与签名证据矛盾")
 		}
-	case "eligible_registered", "attempted_no_structure", "attempted_invalid_structure", "attempted_no_verified_candidate", "partial", "succeeded":
+	case "eligible_registered", "registered_reviewed_no_structure", "attempted_no_structure", "attempted_invalid_structure", "attempted_no_verified_candidate", "partial", "succeeded":
 		if registryStatus != "registered_supported" {
 			return errors.New("Provider diagnostics 在未精确登记的 Windows 构建上声明 Config.Cipher 可用")
 		}
@@ -1186,7 +1205,7 @@ func validateWindowsPhase4Evidence(values map[string]any, routesAttempted []stri
 		return errors.New("Provider diagnostics 的 Config.Cipher 结构、候选和验证计数矛盾")
 	}
 	switch configStatus {
-	case "not_evaluated", "unavailable_unregistered", "unavailable_untrusted_binary", "eligible_registered":
+	case "not_evaluated", "unavailable_unregistered", "unavailable_untrusted_binary", "eligible_registered", "registered_reviewed_no_structure":
 		if structureCount != 0 || invalidCount != 0 || candidateCount != 0 || verifiedCount != 0 {
 			return errors.New("Provider diagnostics 在未执行 Config.Cipher 时报告了扫描计数")
 		}
@@ -1683,7 +1702,7 @@ func ValidateBundle(bundle *CandidateBundle) error {
 			break
 		}
 	}
-	if len(bundle.DatabaseKeys) == 0 && !plaintextOnlyComplete && !structuredIncomplete && !hasPlaintextCatalog && bundle.ImageKeys == nil {
+	if len(bundle.DatabaseKeys) == 0 && bundle.DatabaseCredential == nil && !plaintextOnlyComplete && !structuredIncomplete && !hasPlaintextCatalog && bundle.ImageKeys == nil {
 		return errors.New("密钥提供器没有返回数据库候选")
 	}
 	for name, value := range bundle.DatabaseKeys {

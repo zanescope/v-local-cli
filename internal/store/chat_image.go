@@ -14,6 +14,8 @@ import (
 )
 
 const maxChatImageBytes = 64 * 1024 * 1024
+const maxChatImageHardlinkRows = 32
+const maxChatImageResourceRows = 32
 
 type ChatImage struct {
 	EvidenceID string `json:"evidence_id"`
@@ -113,7 +115,7 @@ func imageResourceStem(root string, message Message) (string, error) {
 		}
 		database, openErr := openReadOnly(path)
 		if openErr != nil {
-			continue
+			return "", errors.New("图片消息资源数据库不可读")
 		}
 		table := findTableCI(database, "MessageResourceInfo")
 		if table == "" {
@@ -135,26 +137,51 @@ func imageResourceStem(root string, message Message) (string, error) {
 			query += " AND " + quoteIdentifier(serverIDColumn) + "=?"
 			arguments = append(arguments, message.ServerID)
 		}
+		query += " ORDER BY rowid LIMIT ?"
+		arguments = append(arguments, maxChatImageResourceRows+1)
 		rows, queryErr := database.Query(query, arguments...)
-		if queryErr == nil {
-			for rows.Next() {
-				var raw any
-				if rows.Scan(&raw) != nil {
-					continue
-				}
-				var packed []byte
-				switch value := raw.(type) {
-				case []byte:
-					packed = append([]byte(nil), value...)
-				case string:
-					packed = []byte(value)
-				}
-				stem, stemErr := chatImageStem(packed)
-				if stemErr == nil {
-					stems[stem] = true
-				}
+		if queryErr != nil {
+			_ = database.Close()
+			return "", errors.New("图片消息资源查询失败")
+		}
+		matchedRows := 0
+		for rows.Next() {
+			matchedRows++
+			if matchedRows > maxChatImageResourceRows {
+				_ = rows.Close()
+				_ = database.Close()
+				return "", errors.New("图片消息资源映射超过上限")
 			}
-			_ = rows.Close()
+			var raw any
+			if err := rows.Scan(&raw); err != nil {
+				_ = rows.Close()
+				_ = database.Close()
+				return "", errors.New("图片消息资源行无效")
+			}
+			var packed []byte
+			switch value := raw.(type) {
+			case []byte:
+				packed = append([]byte(nil), value...)
+			case string:
+				packed = []byte(value)
+			default:
+				_ = rows.Close()
+				_ = database.Close()
+				return "", errors.New("图片消息资源内容无效")
+			}
+			stem, stemErr := chatImageStem(packed)
+			if stemErr != nil {
+				_ = rows.Close()
+				_ = database.Close()
+				return "", errors.New("图片消息资源标识无效")
+			}
+			stems[stem] = true
+		}
+		rowErr := rows.Err()
+		_ = rows.Close()
+		if rowErr != nil {
+			_ = database.Close()
+			return "", errors.New("图片消息资源读取失败")
 		}
 		_ = database.Close()
 	}
@@ -174,13 +201,35 @@ type chatImageCandidate struct {
 	path string
 }
 
-func chatImageCandidates(root, accountPath, stem string) ([]chatImageCandidate, error) {
+func normalizedChatImageMD5(value string) (string, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if len(value) != 32 {
+		return "", false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return "", false
+		}
+	}
+	return value, true
+}
+
+func chatImageCandidates(root, accountPath, stem, mediaMD5 string) ([]chatImageCandidate, error) {
 	files, err := sqliteFiles(root)
 	if err != nil {
 		return nil, err
 	}
+	normalizedMD5 := ""
+	if strings.TrimSpace(mediaMD5) != "" {
+		var valid bool
+		normalizedMD5, valid = normalizedChatImageMD5(mediaMD5)
+		if !valid {
+			return nil, errors.New("图片消息媒体标识无效")
+		}
+	}
 	result := []chatImageCandidate{}
 	seen := map[string]bool{}
+	mappedFileNames := map[string]bool{}
 	hardlinkMatched := false
 	for _, path := range files {
 		if !strings.EqualFold(filepath.Base(path), "hardlink.db") {
@@ -188,7 +237,7 @@ func chatImageCandidates(root, accountPath, stem string) ([]chatImageCandidate, 
 		}
 		database, openErr := openReadOnly(path)
 		if openErr != nil {
-			continue
+			return nil, errors.New("图片 hardlink 数据库不可读")
 		}
 		table := findTableCI(database, "image_hardlink_info_v4")
 		if table == "" {
@@ -198,61 +247,98 @@ func chatImageCandidates(root, accountPath, stem string) ([]chatImageCandidate, 
 		available := columns(database, table)
 		fileColumn := columnCI(available, "file_name")
 		dir1Column, dir2Column := columnCI(available, "dir1"), columnCI(available, "dir2")
+		md5Column := columnCI(available, "md5")
 		if fileColumn == "" || dir1Column == "" || dir2Column == "" {
 			_ = database.Close()
 			continue
 		}
 		directories := hardlinkDirectoryMap(database)
-		rows, queryErr := database.Query("SELECT "+quoteIdentifier(fileColumn)+","+quoteIdentifier(dir1Column)+","+quoteIdentifier(dir2Column)+" FROM "+quoteIdentifier(table)+" WHERE lower(CAST("+quoteIdentifier(fileColumn)+" AS TEXT)) LIKE ? ORDER BY rowid", stem+"%")
-		if queryErr == nil {
-			for rows.Next() {
-				var fileName any
-				var dir1, dir2 int64
-				if rows.Scan(&fileName, &dir1, &dir2) != nil || normalizedResourceStem(filepath.Base(asString(fileName))) != stem {
-					continue
-				}
-				hardlinkMatched = true
-				segments := []string{}
-				for _, segment := range []string{directories[dir1], directories[dir2], filepath.Base(asString(fileName))} {
-					if strings.TrimSpace(segment) != "" {
-						segments = append(segments, segment)
-					}
-				}
-				for _, base := range hardlinkRoots(accountPath, "image") {
-					candidatePath := filepath.Join(append([]string{base}, segments...)...)
-					if !pathUnderRoot(candidatePath, base) {
-						continue
-					}
-					identity := strings.ToLower(filepath.Clean(candidatePath))
-					if !seen[identity] {
-						seen[identity] = true
-						result = append(result, chatImageCandidate{path: candidatePath})
-					}
+		query := "SELECT " + quoteIdentifier(fileColumn) + "," + quoteIdentifier(dir1Column) + "," + quoteIdentifier(dir2Column) + " FROM " + quoteIdentifier(table)
+		arguments := []any{}
+		if normalizedMD5 != "" {
+			if md5Column == "" {
+				_ = database.Close()
+				continue
+			}
+			query += " WHERE lower(CAST(" + quoteIdentifier(md5Column) + " AS TEXT)) = ? ORDER BY rowid LIMIT ?"
+			arguments = append(arguments, normalizedMD5, maxChatImageHardlinkRows+1)
+		} else {
+			query += " WHERE lower(CAST(" + quoteIdentifier(fileColumn) + " AS TEXT)) LIKE ? ORDER BY rowid LIMIT ?"
+			arguments = append(arguments, stem+"%", maxChatImageHardlinkRows+1)
+		}
+		rows, queryErr := database.Query(query, arguments...)
+		if queryErr != nil {
+			_ = database.Close()
+			return nil, errors.New("图片 hardlink 映射查询失败")
+		}
+		matchedRows := 0
+		for rows.Next() {
+			matchedRows++
+			if matchedRows > maxChatImageHardlinkRows {
+				_ = rows.Close()
+				_ = database.Close()
+				return nil, errors.New("图片 hardlink 精确映射超过上限")
+			}
+			var fileName any
+			var dir1, dir2 int64
+			if err := rows.Scan(&fileName, &dir1, &dir2); err != nil {
+				_ = rows.Close()
+				_ = database.Close()
+				return nil, errors.New("图片 hardlink 映射行无效")
+			}
+			if normalizedResourceStem(filepath.Base(asString(fileName))) != stem {
+				continue
+			}
+			hardlinkMatched = true
+			mappedName := filepath.Base(asString(fileName))
+			mappedFileNames[strings.ToLower(mappedName)] = true
+			segments := []string{}
+			for _, segment := range []string{directories[dir1], directories[dir2], mappedName} {
+				if strings.TrimSpace(segment) != "" {
+					segments = append(segments, segment)
 				}
 			}
-			_ = rows.Close()
+			for _, base := range hardlinkRoots(accountPath, "image") {
+				candidatePath := filepath.Join(append([]string{base}, segments...)...)
+				if !pathUnderRoot(candidatePath, base) {
+					continue
+				}
+				identity := strings.ToLower(filepath.Clean(candidatePath))
+				if !seen[identity] {
+					seen[identity] = true
+					result = append(result, chatImageCandidate{path: candidatePath})
+				}
+			}
+		}
+		rowErr := rows.Err()
+		_ = rows.Close()
+		if rowErr != nil {
+			_ = database.Close()
+			return nil, errors.New("图片 hardlink 映射读取失败")
 		}
 		_ = database.Close()
 	}
 	// 微信 4.1 的附件目录可能在 hardlink 映射层级外再包一层会话目录。
 	// 只按已由消息资源与 hardlink 同时证明的精确文件名补扫，并保持有界。
 	filesScanned := 0
+	scanTruncated := false
 	if !hardlinkMatched {
 		return result, nil
 	}
 	for _, base := range hardlinkRoots(accountPath, "image") {
-		_ = filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
+		walkErr := filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
-				return nil
+				return walkErr
 			}
 			if entry.IsDir() {
 				return nil
 			}
 			filesScanned++
 			if filesScanned > maxMomentMediaFiles {
+				scanTruncated = true
 				return fs.SkipAll
 			}
-			if normalizedResourceStem(entry.Name()) != stem || !pathUnderRoot(path, base) {
+			if !mappedFileNames[strings.ToLower(entry.Name())] || !pathUnderRoot(path, base) {
 				return nil
 			}
 			identity := strings.ToLower(filepath.Clean(path))
@@ -262,6 +348,15 @@ func chatImageCandidates(root, accountPath, stem string) ([]chatImageCandidate, 
 			}
 			return nil
 		})
+		if walkErr != nil && !os.IsNotExist(walkErr) {
+			return nil, errors.New("图片 hardlink 补扫失败")
+		}
+		if scanTruncated {
+			break
+		}
+	}
+	if scanTruncated {
+		return nil, errors.New("图片 hardlink 补扫达到上限")
 	}
 	return result, nil
 }
@@ -276,7 +371,7 @@ func ResolveChatImage(root, accountPath, evidenceID, aesKey string, xorKey int) 
 	if err != nil {
 		return ChatImage{}, err
 	}
-	candidates, err := chatImageCandidates(root, accountPath, stem)
+	candidates, err := chatImageCandidates(root, accountPath, stem, message.MediaMD5)
 	if err != nil {
 		return ChatImage{}, err
 	}

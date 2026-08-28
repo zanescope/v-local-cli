@@ -9,7 +9,7 @@ import (
 	"unsafe"
 )
 
-func TestPhase5PointerReturnedByWinTrustPreservesNativeAddress(t *testing.T) {
+func TestPointerReturnedByWinTrustPreservesNativeAddress(t *testing.T) {
 	expected := &cryptProviderCertificate{Size: 1234}
 	actual := (*cryptProviderCertificate)(pointerReturnedByWinTrust(uintptr(unsafe.Pointer(expected))))
 	if actual != expected || actual.Size != expected.Size {
@@ -18,7 +18,7 @@ func TestPhase5PointerReturnedByWinTrustPreservesNativeAddress(t *testing.T) {
 	runtime.KeepAlive(expected)
 }
 
-func TestPhase5ExpectedWindowsSignerRequiresExactSHA256(t *testing.T) {
+func TestExpectedWindowsSignerRequiresExactSHA256(t *testing.T) {
 	previous := releaseSignerSHA256
 	t.Cleanup(func() { releaseSignerSHA256 = previous })
 

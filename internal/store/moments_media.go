@@ -136,7 +136,7 @@ func pathDepth(root, path string) int {
 	return len(strings.FieldsFunc(filepath.ToSlash(relative), func(value rune) bool { return value == '/' }))
 }
 
-// relativeMomentRoots 把扫描根收敛为相对账号目录的正斜杠路径，供输出使用，
+// relativeMomentRoots 把扫描根归一化为相对账号目录的正斜杠路径，供输出使用，
 // 去掉本地绝对前缀。无法相对化的项退回到 base 名，始终不带绝对路径。
 func relativeMomentRoots(accountPath string, roots []string) []string {
 	if len(roots) == 0 {

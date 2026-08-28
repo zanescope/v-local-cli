@@ -173,7 +173,7 @@ func trySQLCipherPageKey(data, key []byte) *solvedKey {
 	return nil
 }
 
-// ResolveCredentialFile 把一份结构化凭据中的秘密转换为指定数据库的实际原始密钥，
+// ResolveCredentialFile 把结构化凭据中的原始密文转换为指定数据库的实际原始密钥，
 // 并在返回前验证完整的首页 HMAC。
 func ResolveCredentialFile(path, secretHex, kind, profileID string) (string, error) {
 	if profileID != "" && profileID != SQLCipherDefaultProfileID {

@@ -24,6 +24,7 @@ func createChatImageExportFixture(t *testing.T) (string, string, []byte) {
 	accountPath := t.TempDir()
 	chat := "dong_zzc"
 	stem := strings.Repeat("a", 32)
+	mediaMD5 := strings.Repeat("b", 32)
 
 	value := image.NewRGBA(image.Rect(0, 0, 2048, 1536))
 	var encoded bytes.Buffer
@@ -45,7 +46,7 @@ func createChatImageExportFixture(t *testing.T) (string, string, []byte) {
 	if _, err := messageDB.Exec("CREATE TABLE [" + table + "](local_id INTEGER,server_id INTEGER,local_type INTEGER,sort_seq INTEGER,create_time INTEGER,message_content TEXT)"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := messageDB.Exec("INSERT INTO [" + table + "] VALUES(12,9002,3,1700000001000,1700000001,'[图片]')"); err != nil {
+	if _, err := messageDB.Exec("INSERT INTO ["+table+"] VALUES(12,9002,3,1700000001000,1700000001,?)", "<msg><img md5=\""+mediaMD5+"\" /></msg>"); err != nil {
 		t.Fatal(err)
 	}
 	if err := messageDB.Close(); err != nil {
@@ -84,7 +85,7 @@ func createChatImageExportFixture(t *testing.T) (string, string, []byte) {
 		"CREATE TABLE dir2id(username TEXT)",
 		"INSERT INTO dir2id(rowid,username) VALUES(1,'segment-a'),(2,'segment-b')",
 		"CREATE TABLE image_hardlink_info_v4(md5 TEXT,file_name TEXT,dir1 INTEGER,dir2 INTEGER)",
-		"INSERT INTO image_hardlink_info_v4 VALUES('', '" + stem + ".dat', 1, 2)",
+		"INSERT INTO image_hardlink_info_v4 VALUES('" + mediaMD5 + "', '" + stem + ".dat', 1, 2)",
 	}
 	for _, statement := range statements {
 		if _, err := hardlinkDB.Exec(statement); err != nil {
@@ -183,5 +184,114 @@ func TestExportChatImageRejectsConflictingStrongCandidates(t *testing.T) {
 	}
 	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
 		t.Fatalf("冲突候选仍产生了输出：err=%v", err)
+	}
+}
+
+func TestExportChatImageUsesExactHardlinkNameInsteadOfStemVariant(t *testing.T) {
+	home := testHome(t)
+	t.Setenv("V_LOCAL_CLI_HOME", home)
+	snapshot, accountPath, expected := createChatImageExportFixture(t)
+	stem := strings.Repeat("a", 32)
+	variantPath := filepath.Join(accountPath, "msg", "attach", "another-session", stem+"_t.dat")
+	if err := os.MkdirAll(filepath.Dir(variantPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var variant bytes.Buffer
+	if err := png.Encode(&variant, image.NewRGBA(image.Rect(0, 0, 64, 64))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(variantPath, variant.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	accountID := state.AccountID("chat-image-exact-name")
+	snapshot = privateTestSnapshot(t, home, accountID, snapshot)
+	initialized := state.AccountState{
+		AccountID: accountID, AccountName: "exact-name-test", AccountPath: accountPath,
+		SnapshotPath: snapshot, GenerationID: "generation-exact-name", Storage: "snapshot-only",
+	}
+	if err := state.Save(&initialized); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(t.TempDir(), "exact-name.png")
+	code, _, failure := runForTest("export-chat-image", "--account", "exact-name-test", "--output", outputPath, "wechat:dong_zzc:9002")
+	if code != 0 {
+		t.Fatalf("精确 hardlink 文件名未消除 stem 变体歧义：code=%d failure=%v", code, failure)
+	}
+	exported, err := os.ReadFile(outputPath)
+	if err != nil || !bytes.Equal(exported, expected) {
+		t.Fatalf("精确 hardlink 文件名导出内容异常：bytes=%d err=%v", len(exported), err)
+	}
+}
+
+func TestExportChatImageMatchesMixedCaseHardlinkMD5(t *testing.T) {
+	home := testHome(t)
+	t.Setenv("V_LOCAL_CLI_HOME", home)
+	snapshot, accountPath, expected := createChatImageExportFixture(t)
+	database, err := sql.Open("sqlite", filepath.Join(snapshot, "hardlink", "hardlink.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mixed := strings.Repeat("bB", 16)
+	if _, err := database.Exec("UPDATE image_hardlink_info_v4 SET md5=?", mixed); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	accountID := state.AccountID("chat-image-mixed-md5")
+	snapshot = privateTestSnapshot(t, home, accountID, snapshot)
+	initialized := state.AccountState{
+		AccountID: accountID, AccountName: "mixed-md5-test", AccountPath: accountPath,
+		SnapshotPath: snapshot, GenerationID: "generation-mixed-md5", Storage: "snapshot-only",
+	}
+	if err := state.Save(&initialized); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(t.TempDir(), "mixed-md5.png")
+	code, _, failure := runForTest("export-chat-image", "--account", "mixed-md5-test", "--output", outputPath, "wechat:dong_zzc:9002")
+	if code != 0 {
+		t.Fatalf("混合大小写 MD5 未精确匹配：code=%d failure=%v", code, failure)
+	}
+	exported, err := os.ReadFile(outputPath)
+	if err != nil || !bytes.Equal(exported, expected) {
+		t.Fatalf("混合大小写 MD5 导出内容异常：bytes=%d err=%v", len(exported), err)
+	}
+}
+
+func TestExportChatImageRejectsMessageDescriptorMismatch(t *testing.T) {
+	home := testHome(t)
+	t.Setenv("V_LOCAL_CLI_HOME", home)
+	snapshot, accountPath, _ := createChatImageExportFixture(t)
+	database, err := sql.Open("sqlite", filepath.Join(snapshot, "hardlink", "hardlink.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec("UPDATE image_hardlink_info_v4 SET md5=?", strings.Repeat("c", 32)); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	accountID := state.AccountID("chat-image-descriptor-mismatch")
+	snapshot = privateTestSnapshot(t, home, accountID, snapshot)
+	initialized := state.AccountState{
+		AccountID: accountID, AccountName: "descriptor-mismatch-test", AccountPath: accountPath,
+		SnapshotPath: snapshot, GenerationID: "generation-descriptor-mismatch", Storage: "snapshot-only",
+	}
+	if err := state.Save(&initialized); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(t.TempDir(), "must-not-exist.png")
+	code, _, failure := runForTest("export-chat-image", "--account", "descriptor-mismatch-test", "--output", outputPath, "wechat:dong_zzc:9002")
+	if code == 0 || failure["error"].(map[string]any)["type"] != "chat_image_unavailable" {
+		t.Fatalf("消息描述符不匹配仍选择了图片：code=%d failure=%v", code, failure)
+	}
+	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
+		t.Fatalf("消息描述符不匹配仍产生了输出：err=%v", err)
 	}
 }

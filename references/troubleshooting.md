@@ -12,6 +12,8 @@
 | `missing_command`、`unknown_command`、`invalid_arguments` | 运行 `v-local-cli --help` 或 `v-local-cli schema <command>`，按机器契约修正命令和选项顺序。 |
 | `key_access_not_authorized` | 只有用户明确同意后才能加 `--allow-key-access`。 |
 | `private_state_unavailable` | 检查当前用户缓存目录的所有者、ACL 与剩余空间；不要把 acquisition endpoint 或 resume 文件移到共享目录。 |
+| `private_output_invalid` | 只在本机受控验收中设置 `V_LOCAL_CLI_PRIVATE_OUTPUT_PATH`；使用既有、非重解析点私有目录中的绝对新文件路径，不要覆盖现有文件。 |
+| `private_output_unavailable` | 检查私有输出父目录的当前用户写权限与剩余空间，换用新的文件名后重试；不要改写系统安全策略或降级到共享目录。 |
 | `crash_protection_unavailable` | 停止密钥获取；确认当前进程允许把 Unix `RLIMIT_CORE` 降为 0，或检查 Windows crash reporting/应用控制策略。不得在 crash artifact 防护失败时继续接收 Provider secret。 |
 | `external_workflow_state_invalid` | 跨重启 checkpoint 已损坏、过期或包含协议不允许的字段。它不是授权凭据；停止自动继续。账号仍可选时用 `setup --cancel-acquisition --account NAME` 精确清理；账号已不可选或记录无法识别时，取得用户对“仅清理全部跨重启 checkpoint”的明确确认后运行 `setup --cancel-all-external-workflows`。该命令保留 daemon resume、快照和凭据。`doctor` 同样会 fail-closed，不能修复该记录。 |
 | `external_workflow_cleanup_failed` | 全局 checkpoint 清理没有完成；不要手工递归删除私有状态目录。检查当前用户对私有 acquisition 目录的权限与剩余空间后重试；快照、凭据和 daemon resume 均不在该命令删除范围内。 |

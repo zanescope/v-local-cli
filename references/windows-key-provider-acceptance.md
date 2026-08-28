@@ -1,12 +1,13 @@
 # Windows 密钥获取真机与发布回归
 
-本清单对应密钥获取方案 Phase 4–5。GitHub Windows runner、交叉编译和 mock Provider 只提供构建/协议证据；`Config.Cipher`、进程内存布局、多账号隔离与实际 ARM64 架构必须在明确授权的专用 Windows 真机验证。
+本清单对应 Windows 密钥获取与发布回归。GitHub Windows runner、交叉编译和 mock Provider 只提供构建/协议证据；`Config.Cipher`、进程内存布局、多账号隔离与实际 ARM64 架构必须在明确授权的专用 Windows 真机验证。
 
 面向一台本机 Windows x64 的完整 CLI 数据闭环（Credential Manager 复用、`dong_zzc` 历史记录、强绑定高清图、收藏和朋友圈）读取 [Windows amd64 本机端到端真机验收](windows-amd64-local-acceptance.md)。本文继续作为 Provider 路由和正式发布的上层门禁。
 
-当前生产兼容 registry 有意保持为空；因此下面的 WIN-01 仍是能力晋级门禁，不是当前支持
-声明。只有某个确切微信二进制/签名/架构的固定结构和脱敏真机证据完成审核后，才能把该
-条目加入 registry；registry 引用必须使用脱敏证据产物的 SHA-256，x64 结论不能复制到 ARM64。
+当前 Provider registry 只包含一个完成本机 qualification 的精确 Windows amd64 目标，且
+如实登记为 `Config.Cipher` 已审核但无可用结构、仅允许精确身份绑定的 memory fallback。
+qualification-only evidence 不属于正式发布证据；在候选 attestation、正式 live evidence 和
+promotion 完成前，release 仍保持 fail closed，x64 结论也不能复制到 ARM64 或其他 fingerprint。
 
 ## 测试组合
 
@@ -14,9 +15,9 @@
 
 | ID | 环境 | 关键断言 |
 | --- | --- | --- |
-| WIN-01 | Windows x64、已登记 4.1.x fingerprint | 命中 fingerprint 绑定的 `Config.Cipher` route；每库首页 HMAC 唯一通过 |
+| WIN-01 | Windows x64、已登记 4.1.x fingerprint | 命中 fingerprint 如实登记的 route；`reviewed_no_structure` 只能走精确绑定 fallback，每库首页 HMAC 唯一通过 |
 | WIN-02 | Windows x64、未登记 fingerprint/签名者 | 不使用固定偏移，也不读取目标进程内存；返回稳定的 unregistered/unsupported 诊断 |
-| WIN-03 | Windows x64、已登记签名者但固定结构故障注入 | 主路径失败后 missing-only fallback 成功，已完成 ID 不重复扫描 |
+| WIN-03 | Windows x64、完整身份精确登记且明确允许 fallback | 主路径不可用时 missing-only fallback 成功，已完成 ID 不重复扫描；仅匹配签名者不足以授权 |
 | WIN-04 | Windows ARM64、原生 ARM64 微信 | `process_architecture=arm64`，候选和 fingerprint 不借用 x64 结论 |
 | WIN-05 | 多个 Weixin/WeChat、两个测试账号 | 候选按 process instance 隔离；目标 A/当前 B 返回 mismatch 且不保存根凭据 |
 | WIN-06 | 一个进程 access denied、另一个可读 | 返回准确 partial/process counts；不得丢弃已验证结果或声称 complete |
@@ -26,7 +27,7 @@
 Provider 仓库的专用真机工作流会在自托管 runner 上执行：
 
 ```text
-go test -tags=live_regression -run '^TestPhase4WindowsLiveAcquisition$' -count=1 .
+go test -tags=live_regression -run '^TestWindowsLiveAcquisition$' -count=1 .
 ```
 
 运行前必须准备 `V_LOCAL_KEY_PROVIDER_LIVE_*` 环境变量，并显式确认数据授权。测试不会自动结束进程、切换账号或修改系统策略。
@@ -57,7 +58,7 @@ go test -tags=live_regression -run '^TestPhase4WindowsLiveAcquisition$' -count=1
 
 - `Get-AuthenticodeSignature` 为 `Valid`，存在可信时间戳；`signtool verify /pa /all` 成功；CLI/Provider 内嵌的叶证书 SHA-256 与 manifest 和实际签名证书三者一致。
 - 从最终 npm tgz 安装，下载 URL、资产名和 checksum 一一匹配；安装路径不得经 symlink/junction 重定向；本地二进制 override 必须同时具备路径、development 与 allow 三重授权。
-- 签名前确认每个架构的 registry 条目引用 `compatibility-evidence/<sha256>.json`，文件内容摘要、目标 fingerprint/签名、route、完整 coverage 与 validated profiles 全部匹配；空 registry 必须阻止 release。
+- 签名前确认外部 promotion 为每个架构绑定内容寻址的 `compatibility-evidence/<sha256>.json`，且候选摘要、来源 attestation、目标 fingerprint/签名、route、完整 coverage 与 validated profiles 和 registry 全部匹配；空 registry 或空 promotion 必须阻止 release。
 - npm 安装后的二进制运行 `--version`、`schema`、JSON/YAML/table 烟测、setup/refresh/forget；不能用源码构建件替代。
 - GitHub artifact attestation 与 npm Trusted Publishing 均成功，发布资产清单包含目标架构。
 

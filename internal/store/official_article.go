@@ -347,7 +347,7 @@ func FetchOfficialArticle(ctx context.Context, root, evidenceID string) (Officia
 	return fetchOfficialArticle(ctx, publication, newSafeOfficialHTTPClient())
 }
 
-// ValidateOfficialArticle 验证本地证据存在且卡片 URL 能收敛到允许的公开文章端点，不执行联网。
+// ValidateOfficialArticle 验证本地证据存在且卡片 URL 能解析到允许的公开文章端点，不执行联网。
 func ValidateOfficialArticle(root, evidenceID string) (OfficialPublication, error) {
 	publication, err := FindOfficialPublication(root, evidenceID)
 	if err != nil {

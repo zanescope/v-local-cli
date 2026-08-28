@@ -28,11 +28,11 @@ Provider v1 的诊断使用 `requested_scopes` 回显当前请求，以 `databas
 `shadow_route_status` 独立表达 Shadow 的能力和结果：`unavailable_in_build`、`unsupported_for_target` 与 `attempted_failed` 都是可降级终态，但含义不可互换；`not_evaluated`、`available`、`awaiting_approval` 不能进入 SIP fallback。macOS `route_priority` 必须精确为 `[standard, shadow, sip_disabled]`，但它只表达排序；`routes_attempted` 才记录真实执行，未实现的 Shadow 不能出现在其中。CLI 会拒绝状态、blocking reason、SIP 机器证据或顺序互相矛盾的响应。
 
 4.1.x 微信使用动态 CommonCrypto 捕获时，如果 hook 已安装但尚未发生数据库调用，CLI 返回
-`key_provider_hook_trigger_required`，错误详情包含不含秘密的 `session_id`、`catalog_id`、`process_instance_id`、`action_stage` 和 `next_action`。Agent 只执行对应的只读页面动作，然后在原 setup 参数上显式增加 `--confirm-key-action trigger_database`；CLI 只为这个精确动作提交 receipt。普通重跑、`--allow-key-access` 或旧 session 的确认参数都不能伪造 `user_confirmed=true`，也不应要求用户手工运行 lldb、helper 或填写候选值。
+`key_provider_hook_trigger_required`，错误详情包含不含凭据的 `session_id`、`catalog_id`、`process_instance_id`、`action_stage` 和 `next_action`。Agent 只执行对应的只读页面动作，然后在原 setup 参数上显式增加 `--confirm-key-action trigger_database`；CLI 只为这个精确动作提交 receipt。普通重跑、`--allow-key-access` 或旧 session 的确认参数都不能伪造 `user_confirmed=true`，也不应要求用户手工运行 lldb、helper 或填写候选值。
 
 用户拒绝当前 `trigger_database`、`restart_wechat` 或 `relogin_wechat` 动作时，可以在原 setup 参数上显式传入 `--confirm-key-action stop_and_report`。该值不会生成 action receipt；Provider 只重新核对同一 catalog，终止 session，并返回此前已逐库 HMAC 验真的 partial。错账号、catalog drift 或没有有效候选时仍然 fail closed。
 
-`key_provider_sip_required` 不是 Phase 2 可恢复动作，也不能从 `process_access_error=sip_enabled` 单独推导。只有标准访问失败、`security_posture_status=sip_enabled_verified`，且 Shadow 为 `unavailable_in_build`、`unsupported_for_target` 或 `attempted_failed` 并带匹配原因时，Provider 才能明确返回 `next_action=disable_sip` 并展示影响和恢复步骤。当前未实现 Shadow 属于第一种终态，不再阻塞 fallback。CLI/Provider 不执行 `csrutil disable/enable`，不把 `--allow-key-access` 当成 SIP 同意，也不接受 `disable_sip`/`reenable_sip` daemon receipt。CLI 保存的跨重启 checkpoint 只含 opaque workflow/account/provider ID、scope、阶段和安全姿态，不含路径、session、token、候选或授权；`status` 可发现它。重启后不带旧 `--confirm-key-action` 创建新 session，并用只读机器证据、新进程实例、版本/架构/签名、账号绑定和 Catalog 重新判定。只要确认 SIP 已关闭，Provider 就必须返回 `security_restoration_required/reenable_sip`：完整结果可以先发布；若实际 fallback route 已运行但失败，附带 `sip_route_failed`；若前置检查先失败，附带 `sip_disabled_route_not_attempted` 且不得伪造执行历史。恢复后由独立的 `revalidate_security_posture` 只读请求验证 `sip_enabled_verified`，不重新获取 credential。若用户根本没有执行关闭操作，后续普通 acquisition 在 SIP 开启状态下完整成功也会清除失效 checkpoint。
+`key_provider_sip_required` 不是 daemon 可恢复动作，也不能从 `process_access_error=sip_enabled` 单独推导。只有标准访问失败、`security_posture_status=sip_enabled_verified`，且 Shadow 为 `unavailable_in_build`、`unsupported_for_target` 或 `attempted_failed` 并带匹配原因时，Provider 才能明确返回 `next_action=disable_sip` 并展示影响和恢复步骤。当前未实现 Shadow 属于第一种终态，不再阻塞 fallback。CLI/Provider 不执行 `csrutil disable/enable`，不把 `--allow-key-access` 当成 SIP 同意，也不接受 `disable_sip`/`reenable_sip` daemon receipt。CLI 保存的跨重启 checkpoint 只含 opaque workflow/account/provider ID、scope、阶段和安全姿态，不含路径、session、token、候选或授权；`status` 可发现它。重启后不带旧 `--confirm-key-action` 创建新 session，并用只读机器证据、新进程实例、版本/架构/签名、账号绑定和 Catalog 重新判定。只要确认 SIP 已关闭，Provider 就必须返回 `security_restoration_required/reenable_sip`：完整结果可以先发布；若实际 fallback route 已运行但失败，附带 `sip_route_failed`；若前置检查先失败，附带 `sip_disabled_route_not_attempted` 且不得伪造执行历史。恢复后由独立的 `revalidate_security_posture` 只读请求验证 `sip_enabled_verified`，不重新获取 credential。若用户根本没有执行关闭操作，后续普通 acquisition 在 SIP 开启状态下完整成功也会清除失效 checkpoint。
 
 密钥如何取得**不在本仓库范围内**，由用户自行决定并承担相应合规责任。`refresh` 不需要任何外部组件或重新取证：它读取系统凭据库中的结构化 credential。已证明的账号级 passphrase 会为新 salt 自动派生逐库 effective key；只有根凭据无法覆盖新数据库、credential epoch 改变、账号绑定冲突或账号目录改变时，才回到 `setup`。
 
@@ -55,11 +55,11 @@ Provider v1 的诊断使用 `requested_scopes` 回显当前请求，以 `databas
 
 候选文件只接受上面的 `database_keys` 与 `image_keys` 字段，并且只能包含一个 JSON 对象；
 Provider 专属的 protocol、catalog、diagnostics 与 `database_credential` provenance 不得由
-用户候选文件声明。CLI 会把验真的原始候选收敛为当前 generation 的逐库 key 后再保存。
+用户候选文件声明。CLI 会把验真的原始候选归一化为当前 generation 的逐库 key 后再保存。
 
 Provider v1 还可以返回独立的 `database_credential`。其中 `global_passphrase` 是账号级根凭据，`overrides` 是少数数据库的 raw `enc_key`；`database_keys` 始终只是当前 catalog 已派生、已通过首页 HMAC 的逐库 effective key，不再兼作根凭据容器。只有动态 KDF 调用参数证据完整，且同一 passphrase 在同一 profile 下至少跨两个不同 salt 的目标库逐文件通过 HMAC，Provider 才把它提升为账号级根凭据；静态内存探测、不同 passphrase、跨 profile 拼接证据、单库/单 salt 命中只保存当前 effective key override。CLI 只在当前 catalog 完整验真时保存根凭据；partial generation 会移除根 passphrase，并把每个已验证的 effective key 保存成可供 refresh 使用的结构化逐库 override。
 
-Phase 0–5 回归必须同时执行自动化测试和平台真机清单。macOS 使用 [macOS 真机验收](macos-acceptance.md)，Windows 使用 [Windows 密钥获取真机与发布回归](windows-key-provider-acceptance.md)；普通 CI、交叉编译或 mock Provider 不得替代真实架构、SIP、签名和系统凭据库证据。
+回归必须同时执行自动化测试和平台真机清单。macOS 使用 [macOS 真机验收](macos-acceptance.md)，Windows 使用 [Windows 密钥获取真机与发布回归](windows-key-provider-acceptance.md)；普通 CI、交叉编译或 mock Provider 不得替代真实架构、SIP、签名和系统凭据库证据。
 
 Windows 响应只有在目标进程实际架构、可执行文件 SHA-256、Authenticode 签名者证书
 SHA-256、版本/build 与产品身份都和带真机证据的 registry 条目精确匹配时，才可把

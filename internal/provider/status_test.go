@@ -29,9 +29,45 @@ func TestCurrentUsesExplicitProvider(t *testing.T) {
 
 func TestCurrentReportsMissingProvider(t *testing.T) {
 	t.Setenv(EnvironmentVariable, "")
+	t.Setenv(DevelopmentBinaryPathVariable, "")
+	t.Setenv(DevelopmentModeVariable, "")
+	t.Setenv(DevelopmentUnverifiedVariable, "")
 	status := Current(filepath.Join(t.TempDir(), "missing-provider"))
 	if status.Available {
 		t.Fatalf("不存在的 Provider 不应标记为可用：%+v", status)
+	}
+}
+
+func TestGuardedDevelopmentProviderOverrideRequiresAllThreeValues(t *testing.T) {
+	name := "v-local-key-provider"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	providerPath := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(providerPath, []byte("test"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvironmentVariable, "")
+	for _, test := range []struct {
+		path, mode, allow string
+	}{
+		{path: providerPath},
+		{path: providerPath, mode: "1"},
+		{path: providerPath, allow: "1"},
+		{mode: "1", allow: "1"},
+	} {
+		t.Setenv(DevelopmentBinaryPathVariable, test.path)
+		t.Setenv(DevelopmentModeVariable, test.mode)
+		t.Setenv(DevelopmentUnverifiedVariable, test.allow)
+		if path, source := resolveCandidate(""); path != "" || source != "override_rejected" {
+			t.Fatalf("incomplete guarded override was accepted: path=%q source=%q", path, source)
+		}
+	}
+	t.Setenv(DevelopmentBinaryPathVariable, providerPath)
+	t.Setenv(DevelopmentModeVariable, "1")
+	t.Setenv(DevelopmentUnverifiedVariable, "1")
+	if path, source := resolveCandidate(""); path == "" || source != "guarded_environment" {
+		t.Fatalf("complete guarded override was rejected: path=%q source=%q", path, source)
 	}
 }
 
@@ -98,6 +134,13 @@ func TestReleaseBuildRejectsExplicitAndEnvironmentProviderOverrides(t *testing.T
 	t.Setenv(EnvironmentVariable, filepath.Join(t.TempDir(), "provider"))
 	if path, source := resolveCandidate(""); path != "" || source != "override_rejected" {
 		t.Fatalf("release environment override was not rejected: path=%q source=%q", path, source)
+	}
+	t.Setenv(EnvironmentVariable, "")
+	t.Setenv(DevelopmentBinaryPathVariable, filepath.Join(t.TempDir(), "provider"))
+	t.Setenv(DevelopmentModeVariable, "1")
+	t.Setenv(DevelopmentUnverifiedVariable, "1")
+	if path, source := resolveCandidate(""); path != "" || source != "override_rejected" {
+		t.Fatalf("release guarded development override was not rejected: path=%q source=%q", path, source)
 	}
 }
 

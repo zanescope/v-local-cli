@@ -163,7 +163,13 @@ func TestAcquireViaDaemonRunsPrepareObserveFinalizeAndRemovesResume(t *testing.T
 				case "prepare":
 					result.Diagnostics["workflow_status"] = "running"
 					result.Diagnostics["result_code"] = "partial"
-				case "observe", "finalize":
+				case "observe":
+					result.Diagnostics["workflow_status"] = "terminal"
+					result.Diagnostics["result_code"] = "complete"
+					result.Diagnostics["database_coverage_status"] = "complete"
+					result.Diagnostics["target_binding_status"] = "hmac_verified"
+					result.Diagnostics["candidate_mode"] = "per_database_enc_key"
+				case "finalize":
 					result.DatabaseKeys = map[string]string{"message.db": strings.Repeat("a", 64)}
 					result.DatabaseProfiles = map[string]string{"message.db": "wcdb-v4-sha512-256000-r80"}
 					result.Diagnostics["workflow_status"] = "terminal"
@@ -210,6 +216,74 @@ func TestAcquireViaDaemonRunsPrepareObserveFinalizeAndRemovesResume(t *testing.T
 		if observed != catalogKey {
 			t.Fatal("daemon workflow did not reuse the machine catalog key")
 		}
+	}
+}
+
+func completeWithheldDaemonObservation() CandidateBundle {
+	bundle := phaseRegressionPartialBundle()
+	bundle.DatabaseKeys = nil
+	bundle.DatabaseProfiles = nil
+	bundle.DatabaseCredential = nil
+	bundle.ImageKeys = nil
+	bundle.Diagnostics["result_code"] = "complete"
+	bundle.Diagnostics["workflow_status"] = "terminal"
+	bundle.Diagnostics["requested_scopes"] = []any{"database", "media"}
+	bundle.Diagnostics["database_coverage_status"] = "complete"
+	bundle.Diagnostics["media_coverage_status"] = "complete"
+	bundle.Diagnostics["next_action"] = "none"
+	bundle.Diagnostics["matched_database_count"] = float64(2)
+	bundle.Diagnostics["missing_database_count"] = float64(0)
+	bundle.Diagnostics["missing_database_ids"] = []any{}
+	bundle.Diagnostics["session_id"] = "session-1"
+	bundle.Diagnostics["action_stage"] = "observe"
+	return bundle
+}
+
+func TestDaemonObservationWithholdsSecretsButFinalStillRequiresThem(t *testing.T) {
+	request := acquireRequest{Workflow: workflowRequest{
+		Operation: "observe", SessionID: "session-1", ExpectedCatalogID: strings.Repeat("c", 64),
+	}}
+	bundle := completeWithheldDaemonObservation()
+	account := localplatform.Account{Path: t.TempDir()}
+	if err := validateDaemonObservationResponse(&bundle, []string{"database", "media"}, account, strings.Repeat("a", 64), request); err != nil {
+		t.Fatalf("不含凭据但证明完整的 observe 响应被拒绝：%v", err)
+	}
+	withoutCatalogProfile := completeWithheldDaemonObservation()
+	for index := range withoutCatalogProfile.CatalogEntries {
+		withoutCatalogProfile.CatalogEntries[index].ProfileID = ""
+	}
+	if err := validateDaemonObservationResponse(&withoutCatalogProfile, []string{"database", "media"}, account, strings.Repeat("a", 64), request); err != nil {
+		t.Fatalf("唯一已登记 profile 未能确定 observe 覆盖槽位：%v", err)
+	}
+	withoutProfileRegistry := withoutCatalogProfile
+	withoutProfileRegistry.Profiles = nil
+	if err := validateDaemonObservationResponse(&withoutProfileRegistry, []string{"database", "media"}, account, strings.Repeat("a", 64), request); err == nil {
+		t.Fatal("缺少唯一 profile registry 的 observe 响应被接受")
+	}
+	if err := validateFinalAcquisitionResponse(&bundle, []string{"database", "media"}, account, strings.Repeat("a", 64)); err == nil {
+		t.Fatal("不含凭据的 observe 响应被当成 finalize 结果接受")
+	}
+
+	withSecret := completeWithheldDaemonObservation()
+	withSecret.ImageKeys = &ImageKeys{AES: strings.Repeat("0", 16)}
+	if err := validateDaemonObservationResponse(&withSecret, []string{"database", "media"}, account, strings.Repeat("a", 64), request); err == nil {
+		t.Fatal("意外携带凭据的 observe 响应被接受")
+	}
+
+	wrongSession := completeWithheldDaemonObservation()
+	wrongSession.Diagnostics["session_id"] = "other-session"
+	if err := validateDaemonObservationResponse(&wrongSession, []string{"database", "media"}, account, strings.Repeat("a", 64), request); err == nil {
+		t.Fatal("未绑定当前 session 的 observe 响应被接受")
+	}
+
+	foreignMissing := completeWithheldDaemonObservation()
+	foreignMissing.Diagnostics["matched_database_count"] = float64(1)
+	foreignMissing.Diagnostics["missing_database_count"] = float64(1)
+	foreignMissing.Diagnostics["missing_database_ids"] = []any{strings.Repeat("9", 64)}
+	foreignMissing.Diagnostics["database_coverage_status"] = "partial"
+	foreignMissing.Diagnostics["result_code"] = "partial"
+	if err := validateDaemonObservationResponse(&foreignMissing, []string{"database", "media"}, account, strings.Repeat("a", 64), request); err == nil {
+		t.Fatal("含外部 missing database ID 的 observe 响应被接受")
 	}
 }
 

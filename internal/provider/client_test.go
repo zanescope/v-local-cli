@@ -255,7 +255,7 @@ func phase4WindowsDiagnosticDefaults(values map[string]any) map[string]any {
 	return defaults
 }
 
-func TestPhase0ValidateBundleRejectsAmbiguousOrContradictoryScopeCoverage(t *testing.T) {
+func TestValidateBundleRejectsAmbiguousOrContradictoryScopeCoverage(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*CandidateBundle)
@@ -369,7 +369,7 @@ func TestRoutesAttemptedRequireStablePlatformSpecificIDs(t *testing.T) {
 	}
 }
 
-func TestPhase0ValidateBundleRejectsRequestedScopeEchoMismatch(t *testing.T) {
+func TestValidateBundleRejectsRequestedScopeEchoMismatch(t *testing.T) {
 	bundle := validMediaOnlyBundle()
 	if err := validateBundleForScopes(&bundle, []string{"database"}); err == nil {
 		t.Fatal("provider scope echo mismatch was accepted")
@@ -422,7 +422,7 @@ func TestDisableSIPActionRequiresTerminalShadowRouteEvidence(t *testing.T) {
 	}
 }
 
-func TestPhase3DarwinEvidenceCannotMisleadTheAgent(t *testing.T) {
+func TestDarwinEvidenceCannotMisleadTheAgent(t *testing.T) {
 	base := func() CandidateBundle {
 		bundle := validMediaOnlyBundle()
 		for name, value := range phase3DarwinDiagnosticDefaults(nil) {
@@ -459,7 +459,7 @@ func TestPhase3DarwinEvidenceCannotMisleadTheAgent(t *testing.T) {
 	}
 }
 
-func TestPhase4WindowsEvidenceCannotMisleadTheAgent(t *testing.T) {
+func TestWindowsEvidenceCannotMisleadTheAgent(t *testing.T) {
 	base := func() CandidateBundle {
 		bundle := validMediaOnlyBundle()
 		for name, value := range phase4WindowsDiagnosticDefaults(nil) {
@@ -513,7 +513,7 @@ func TestPhase4WindowsEvidenceCannotMisleadTheAgent(t *testing.T) {
 	}
 }
 
-func TestPhase4WindowsRegisteredConfigCipherEvidenceIsExactAndOrdered(t *testing.T) {
+func TestWindowsRegisteredConfigCipherEvidenceIsExactAndOrdered(t *testing.T) {
 	values := phase4WindowsDiagnosticDefaults(map[string]any{
 		"target_binding_status": "path_verified", "session_account_status": "known_target",
 		"target_bound_process_count": 1, "unknown_account_process_count": 0,
@@ -525,21 +525,59 @@ func TestPhase4WindowsRegisteredConfigCipherEvidenceIsExactAndOrdered(t *testing
 		"static_scan_fallback":                   true, "fallback_stage_counts": map[string]any{"bounded_writable_heap": 1},
 		"per_process_collector_count": 2, "candidate_sources": []any{"windows_config_cipher"},
 	})
-	if err := validateWindowsPhase4Evidence(values, diagnosticStrings(values, "routes_attempted")); err != nil {
+	if err := validateWindowsEvidence(values, diagnosticStrings(values, "routes_attempted")); err != nil {
 		t.Fatalf("exact registered Config.Cipher evidence was rejected: %v", err)
 	}
 	values["routes_attempted"] = []any{"windows_memory_fallback", "windows_config_cipher"}
-	if err := validateWindowsPhase4Evidence(values, diagnosticStrings(values, "routes_attempted")); err == nil {
+	if err := validateWindowsEvidence(values, diagnosticStrings(values, "routes_attempted")); err == nil {
 		t.Fatal("fallback-before-Config.Cipher route order was accepted")
 	}
 	values["routes_attempted"] = []any{"windows_config_cipher", "windows_memory_fallback"}
 	values["candidate_sources"] = []any{"bounded_heap"}
-	if err := validateWindowsPhase4Evidence(values, diagnosticStrings(values, "routes_attempted")); err == nil {
+	if err := validateWindowsEvidence(values, diagnosticStrings(values, "routes_attempted")); err == nil {
 		t.Fatal("verified Config.Cipher candidate without provenance was accepted")
 	}
 }
 
-func TestPhase5ReleaseCLIRequiresPromotionBoundRegistryEvidence(t *testing.T) {
+func TestWindowsReviewedNoStructureRequiresExactRegisteredFallback(t *testing.T) {
+	base := func() map[string]any {
+		return phase4WindowsDiagnosticDefaults(map[string]any{
+			"target_binding_status": "path_verified", "session_account_status": "known_target",
+			"target_bound_process_count": 1, "unknown_account_process_count": 0,
+			"compatibility_registry_status": "registered_supported",
+			"config_cipher_route_status":    "registered_reviewed_no_structure",
+			"windows_route_evidence":        []any{"registry_candidate_entry", "registry_exact_match"},
+			"routes_attempted":              []any{"windows_memory_fallback"},
+			"static_scan_fallback":          true,
+			"fallback_stage_counts":         map[string]any{"structured_key_object": 1},
+			"per_process_collector_count":   1,
+		})
+	}
+	if values := base(); validateWindowsEvidence(values, diagnosticStrings(values, "routes_attempted")) != nil {
+		t.Fatal("精确登记且已审核无结构的 fallback 证据被拒绝")
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"未登记目标", func(values map[string]any) { values["compatibility_registry_status"] = "unregistered" }},
+		{"虚构 Config.Cipher 执行", func(values map[string]any) {
+			values["routes_attempted"] = []any{"windows_config_cipher", "windows_memory_fallback"}
+		}},
+		{"虚构结构计数", func(values map[string]any) { values["config_cipher_structure_count"] = 1 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			values := base()
+			test.mutate(values)
+			if err := validateWindowsEvidence(values, diagnosticStrings(values, "routes_attempted")); err == nil {
+				t.Fatal("矛盾的已审核无结构证据被接受")
+			}
+		})
+	}
+}
+
+func TestReleaseCLIRequiresPromotionBoundRegistryEvidence(t *testing.T) {
 	previous := buildMode
 	buildMode = "release"
 	t.Cleanup(func() { buildMode = previous })
@@ -549,11 +587,11 @@ func TestPhase5ReleaseCLIRequiresPromotionBoundRegistryEvidence(t *testing.T) {
 		"compatibility_registry_status": "registered_supported", "config_cipher_route_status": "eligible_registered",
 		"windows_route_evidence": []any{"registry_candidate_entry", "registry_exact_match"},
 	})
-	if err := validateWindowsPhase4Evidence(windows, nil); err == nil {
+	if err := validateWindowsEvidence(windows, nil); err == nil {
 		t.Fatal("release CLI accepted candidate-only Windows registry evidence")
 	}
 	windows["windows_route_evidence"] = []any{"real_device_evidence_present", "registry_exact_match", "release_promotion_verified"}
-	if err := validateWindowsPhase4Evidence(windows, nil); err != nil {
+	if err := validateWindowsEvidence(windows, nil); err != nil {
 		t.Fatalf("release CLI rejected promotion-bound Windows registry evidence: %v", err)
 	}
 
@@ -561,16 +599,16 @@ func TestPhase5ReleaseCLIRequiresPromotionBoundRegistryEvidence(t *testing.T) {
 		"compatibility_registry_status": "registered_supported", "standard_route_status": "eligible_registered",
 		"standard_route_evidence": []any{"registry_candidate_entry", "registry_exact_match"},
 	})
-	if err := validateDarwinPhase3Evidence(darwin); err == nil {
+	if err := validateDarwinEvidence(darwin); err == nil {
 		t.Fatal("release CLI accepted candidate-only Darwin registry evidence")
 	}
 	darwin["standard_route_evidence"] = []any{"real_device_evidence_present", "registry_exact_match", "release_promotion_verified"}
-	if err := validateDarwinPhase3Evidence(darwin); err != nil {
+	if err := validateDarwinEvidence(darwin); err != nil {
 		t.Fatalf("release CLI rejected promotion-bound Darwin registry evidence: %v", err)
 	}
 }
 
-func TestPhase4CredentialAccountBindingMatchesCurrentRequest(t *testing.T) {
+func TestCredentialAccountBindingMatchesCurrentRequest(t *testing.T) {
 	accountPath := t.TempDir()
 	dbDir := filepath.Join(accountPath, "db_storage")
 	if err := os.MkdirAll(dbDir, 0o700); err != nil {
@@ -985,7 +1023,7 @@ func phaseRegressionPartialBundle() CandidateBundle {
 	}
 }
 
-func TestPhase0ValidateBundleRecomputesCoverageDiagnosticsFromCatalog(t *testing.T) {
+func TestValidateBundleRecomputesCoverageDiagnosticsFromCatalog(t *testing.T) {
 	bundle := phaseRegressionPartialBundle()
 	if err := ValidateBundle(&bundle); err != nil {
 		t.Fatalf("consistent partial coverage was rejected: %v", err)
@@ -1017,7 +1055,7 @@ func TestPhase0ValidateBundleRecomputesCoverageDiagnosticsFromCatalog(t *testing
 	}
 }
 
-func TestPhase0ValidateBundleRejectsUnknownOrDuplicateProfiles(t *testing.T) {
+func TestValidateBundleRejectsUnknownOrDuplicateProfiles(t *testing.T) {
 	unknown := phaseRegressionPartialBundle()
 	unknown.Profiles[0].ID = "unknown-profile"
 	if err := ValidateBundle(&unknown); err == nil {
@@ -1030,7 +1068,7 @@ func TestPhase0ValidateBundleRejectsUnknownOrDuplicateProfiles(t *testing.T) {
 	}
 }
 
-func TestPhase0ValidateBundleRejectsCatalogAndProfileCountOverflow(t *testing.T) {
+func TestValidateBundleRejectsCatalogAndProfileCountOverflow(t *testing.T) {
 	catalogOverflow := CandidateBundle{CatalogEntries: make([]CatalogEntry, maxCatalogEntries+1)}
 	if err := ValidateBundle(&catalogOverflow); err == nil || !strings.Contains(err.Error(), "数量上限") {
 		t.Fatalf("oversized catalog response was not rejected at its count boundary: %v", err)
@@ -1041,7 +1079,7 @@ func TestPhase0ValidateBundleRejectsCatalogAndProfileCountOverflow(t *testing.T)
 	}
 }
 
-func TestPhase5LimitedBufferClearOverwritesSensitiveData(t *testing.T) {
+func TestLimitedBufferClearOverwritesSensitiveData(t *testing.T) {
 	buffer := limitedBuffer{limit: 64}
 	if _, err := buffer.Write([]byte("phase5-secret")); err != nil {
 		t.Fatal(err)

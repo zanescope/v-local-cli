@@ -2,7 +2,7 @@
 
 本流程用于在一台明确获授权的 Windows x64 真机上，验证 `v-local-cli` 与独立 Key Provider 的完整闭环：密钥获取、Windows Credential Manager 持久化、无进程访问的凭据复用、指定联系人 `username=dong_zzc` 的本地历史记录、聊天高清图、收藏、朋友圈及朋友圈本地媒体。
 
-截至 2026-08-24，Provider 的生产 Windows compatibility registry 仍为空，所以当前正式构建只能完成下文的“未登记目标 fail-closed”负向验收，不能宣称正向密钥获取已经通过。完整正向流程必须先有与本机微信可执行文件、Authenticode signer、版本、build 和 `amd64` 完全匹配的 eligible registry 条目，以及内容寻址的脱敏真机证据；不得用源码构建、mock、x64/ARM64 互推或手工关闭门禁替代。
+当前 Provider registry 已包含一个完成本机 qualification 的精确 Windows amd64 条目，可供标准 development/candidate 构建按登记 route 验收；其他 fingerprint 和架构仍保持未登记。该条目尚未取得绑定 GitHub 候选的正式 live evidence、attestation 和 promotion，因此正式 release 仍只能通过 fail-closed 负向门禁，不能把 qualification-only 结果宣称为正式发布支持。不得用源码构建、mock、x64/ARM64 互推或手工关闭门禁替代正式证据。
 
 ## 1. 验收边界
 
@@ -144,7 +144,7 @@ if ($dryRun.data.status -ne 'planned' -or $dryRun.data.process_access_performed 
 
 - 精确 Windows compatibility entry 与本机微信 `version + build + executable_sha256 + signer_sha256 + product_identity + amd64` 完全匹配；
 - entry 的 recipe、validated profiles 和 route support 已审查；
-- Provider 专用 `TestPhase4WindowsLiveAcquisition` 在授权真机通过，并生成不含路径、username、正文、候选或密钥的 evidence；
+- Provider 专用 `TestWindowsLiveAcquisition` 在授权真机通过，并生成不含路径、username、正文、候选或密钥的 evidence；
 - evidence 以自身 SHA-256 命名并被 entry 引用；
 - release compatibility evidence gate 对 `TARGET=windows ARCH=amd64` 通过。
 
