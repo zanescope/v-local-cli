@@ -137,3 +137,13 @@ func TestCLIReleaseKeepsInitialTargetSigningAndPublishingGates(t *testing.T) {
 		t.Fatal("signed release build-info must not parse DMG containers as Go binaries")
 	}
 }
+
+func TestCLIAuditKeepsLinuxSourceOnly(t *testing.T) {
+	requireCLIReleaseFragments(t, ".github/workflows/audit-gates.yml",
+		"target: linux-amd64",
+		"go test -race ./...",
+		"if: runner.os != 'Linux'",
+		"if: runner.os == 'Linux'",
+		"首发平台和架构只包含三个目标",
+	)
+}

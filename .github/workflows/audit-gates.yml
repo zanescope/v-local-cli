@@ -82,8 +82,12 @@ jobs:
         run: |
           node -e "require('fs').mkdirSync('build',{recursive:true})"
           go build -trimpath -o build/v-local-cli${{ matrix.suffix }} ./cmd/v-local-cli
-      - name: 验证 npm 本地二进制安装与启动
+      - name: 验证受支持平台的 npm 本地二进制安装与启动
+        if: runner.os != 'Linux'
         run: node npm/tests/e2e-local.js build/v-local-cli${{ matrix.suffix }}
+      - name: 验证 Linux 不属于首发 npm 安装目标
+        if: runner.os == 'Linux'
+        run: node --test --test-name-pattern='首发平台和架构只包含三个目标' npm/tests/install.test.js
       - name: 检查拉取请求差异格式
         if: github.event_name == 'pull_request'
         run: git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
