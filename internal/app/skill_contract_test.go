@@ -452,6 +452,10 @@ func TestWXGFVisualReviewQualificationContract(t *testing.T) {
 		"本流程不操作微信 UI、不请求 CDN",
 		"两者仍都只命中 `medium`，没有观察到 `high` 本地缓存",
 		"`inconclusive/skipped`",
+		"`sample_review.status=confirmed`",
+		"`samples_confirmed=2`",
+		"`distinct_wxgf_samples=2`",
+		"`high=0`、`medium=2`",
 	} {
 		if !bytes.Contains(reference, []byte(expected)) {
 			t.Errorf("WXGF 人工复审文档缺少证据边界：%s", expected)

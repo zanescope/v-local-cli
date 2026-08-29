@@ -245,6 +245,26 @@ evidence 的 refresh/重试，然后停止并报告可能过期或不可用。
 记录为 `inconclusive/skipped`，临时图片与 capture 已清理，确认样本数为 0，矩阵未
 评估；主观观察没有被升级为视觉等价证据。
 
+随后操作者补齐独立参考图并对新的私有复审会话重跑。两张参考图均从微信“原图”另行
+转存并通过严格 PNG 结构校验；“原图”标签仍不能证明发送前源图精度，故
+`source_original_quality_status=unknown` 保持不变。本轮两个不同 WXGF 仍都属于
+`medium`：45,525 字节、解码为 1180×686，以及 136,403 字节、解码为
+1180×2556；两个解码感知指纹的 Hamming 距离为 30。字节数、尺寸、档位和指纹只用于
+样本区分，不作为图片质量门槛。
+
+操作者在每个一次性离线并排页上分别用随机 challenge 精确确认了内容、方向、裁剪及
+颜色/解码伪影。脱敏报告因此记录 `sample_review.status=confirmed`、
+`samples_confirmed=2`，四项确认均为 true，且私有 capture、参考图、解码图和复审页均
+已清理；`browser_cache_erasure_proven=false` 仍明确保留。公开报告不含账号、
+evidence ID、图片内容摘要或源路径，未上传私有记录，也未执行网络访问或微信 UI 自动化。
+
+正式矩阵仍为 `insufficient`：`distinct_wxgf_samples=2`、
+`distinct_decoded_visual_fingerprints=2`、复审时安装版本数为 1，且观察档位为
+`high=0`、`medium=2`，没有任何版本同时覆盖 `high+medium`。因此四样本、两版本及
+每版本双档位门槛均未满足，`production_ready=false`。这次确认只支持这两个样本在当前
+解码器构建下的人工视觉等价，不证明其他 WXGF、源图质量、未来缓存可用性或 CDN 描述符
+仍有效；描述符时效继续按 `present_expiry_unknown` 处理。
+
 本次只为资格验证临时下载 PyPI
 [`imageio-ffmpeg 0.6.0`](https://pypi.org/project/imageio-ffmpeg/) Windows wheel。wheel 的
 SHA-256 与 PyPI 发布页给出的
@@ -257,8 +277,9 @@ SHA-256 与 PyPI 发布页给出的
 当前形态直接作为 v-local-cli 的可分发解码组件。测试后必须删除 wheel、FFmpeg、
 临时 provider 和所有解码输出。
 
-这条记录把“WXGF 中的 HEVC 在当前真实样本上可解码”从单样本提升为同版本三样本
-证据，并关闭了 Windows 资格进程的“无 `CreateProcess` 子树/Job 成员内存约束”单项
+这条记录把“WXGF 中的 HEVC 在当前真实样本上可解码”从单样本提升为同版本多样本
+证据，并新增了两个具有独立微信参考图的正式人工视觉确认；两者仍不能关闭完整矩阵。
+记录同时关闭了 Windows 资格进程的“无 `CreateProcess` 子树/Job 成员内存约束”单项
 缺口。由于其余 7 个
 `production_ready` 阻断项仍存在，公开 CLI 继续返回 `decoder_unavailable`；本地解码
 结论也不会改变 CDN 描述符的 `present_expiry_unknown` 状态或启用任何远端请求。
