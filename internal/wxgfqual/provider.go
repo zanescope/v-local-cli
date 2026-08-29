@@ -21,11 +21,14 @@ import (
 )
 
 const (
-	ProviderProtocol           = "v-local-cli-image-decoder/1"
-	maxProviderResponseBytes   = 64 * 1024
-	maxProviderDiagnosticBytes = 16 * 1024
-	maxDecodedOutputBytes      = 64 * 1024 * 1024
-	defaultProviderTimeout     = 30 * time.Second
+	ProviderProtocol                = "v-local-cli-image-decoder/1"
+	maxProviderResponseBytes        = 64 * 1024
+	maxProviderDiagnosticBytes      = 16 * 1024
+	maxDecodedOutputBytes           = 64 * 1024 * 1024
+	defaultProviderTimeout          = 30 * time.Second
+	providerProcessMemoryLimitBytes = 512 * 1024 * 1024
+	providerJobMemoryLimitBytes     = 768 * 1024 * 1024
+	providerActiveProcessLimit      = 2
 )
 
 var (
@@ -74,18 +77,50 @@ type ProviderOptions struct {
 	Timeout       time.Duration
 }
 
+// ProviderIsolation reports only controls the runner actually established.
+// CreateProcessTreeContained is deliberately narrower than a claim that every
+// process an untrusted provider could induce is contained. Provider
+// self-reporting can never set these fields.
+type ProviderIsolation struct {
+	Method                     string
+	CreateProcessTreeContained bool
+	JobMemberMemoryLimited     bool
+	NetworkIsolated            bool
+	FilesystemIsolated         bool
+	ProcessMemoryLimitBytes    int64
+	JobMemoryLimitBytes        int64
+	ActiveProcessLimit         int
+}
+
 // Result is deliberately marked as qualification-only. ProductionReady stays
 // false even after a successful decode because this experimental runner does
-// not yet attest the provider binary or enforce OS-level network and memory
-// isolation.
+// not yet attest the provider binary or establish a complete OS sandbox.
 type Result struct {
 	Inspection        Inspection
 	Validation        cryptoutil.ImageValidation
 	OutputPNG         []byte
 	Decoder           string
 	DecoderVersion    string
+	Isolation         ProviderIsolation
 	ProductionReady   bool
 	PromotionBlockers []string
+}
+
+func providerPromotionBlockers(isolation ProviderIsolation) []string {
+	blockers := []string{
+		"wxgf_container_layout_not_fully_specified",
+		"provider_binary_trust_not_verified",
+		"os_network_isolation_not_enforced",
+		"os_filesystem_credential_isolation_not_enforced",
+	}
+	if !isolation.CreateProcessTreeContained || !isolation.JobMemberMemoryLimited {
+		blockers = append(blockers, "createprocess_tree_and_job_memory_limits_not_enforced")
+	}
+	return append(blockers,
+		"real_fixture_matrix_insufficient",
+		"decoded_visual_equivalence_not_confirmed",
+		"decoder_distribution_license_not_qualified",
+	)
 }
 
 type limitedBuffer struct {
@@ -349,7 +384,8 @@ func RunProviderTrial(parent context.Context, data []byte, options ProviderOptio
 	command.Stdout = stdout
 	command.Stderr = stderr
 	command.WaitDelay = 2 * time.Second
-	if err := command.Run(); err != nil {
+	isolation, runErr := runProviderCommand(command)
+	if runErr != nil {
 		if ctx.Err() != nil {
 			return Result{}, ErrProviderTimeout
 		}
@@ -381,16 +417,8 @@ func RunProviderTrial(parent context.Context, data []byte, options ProviderOptio
 	return Result{
 		Inspection: inspection, Validation: validation, OutputPNG: output,
 		Decoder: strings.TrimSpace(response.Decoder), DecoderVersion: strings.TrimSpace(response.DecoderVersion),
-		ProductionReady: false,
-		PromotionBlockers: []string{
-			"wxgf_container_layout_not_fully_specified",
-			"provider_binary_trust_not_verified",
-			"os_network_isolation_not_enforced",
-			"process_memory_limit_not_enforced",
-			"real_fixture_matrix_insufficient",
-			"decoded_visual_equivalence_not_confirmed",
-			"decoder_distribution_license_not_qualified",
-		},
+		Isolation: isolation, ProductionReady: false,
+		PromotionBlockers: providerPromotionBlockers(isolation),
 	}, nil
 }
 

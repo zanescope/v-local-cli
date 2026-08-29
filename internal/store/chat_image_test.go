@@ -3,6 +3,8 @@ package store
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -32,6 +34,59 @@ func TestChatImageResolutionErrorDoesNotExposeInternalCause(t *testing.T) {
 	}
 	if !errors.Is(err, err.cause) {
 		t.Fatal("内部调用方仍应能通过 Unwrap 取得原因")
+	}
+}
+
+func TestChatImageCandidateIndexMatchesBoundFallbackWalk(t *testing.T) {
+	snapshot := t.TempDir()
+	account := t.TempDir()
+	stem := strings.Repeat("ab", 16)
+	name := stem + "_h.dat"
+	hardlinkPath := filepath.Join(snapshot, "hardlink", "hardlink.db")
+	if err := ensureParent(hardlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	createTestDatabase(t, hardlinkPath,
+		"CREATE TABLE dir2id(username TEXT)",
+		"INSERT INTO dir2id(rowid,username) VALUES(1,'one'),(2,'two')",
+		"CREATE TABLE image_hardlink_info_v4(md5 TEXT,file_name TEXT,dir1 INTEGER,dir2 INTEGER)",
+		"INSERT INTO image_hardlink_info_v4 VALUES('','"+name+"',1,2)",
+	)
+	nested := filepath.Join(account, "msg", "attach", "conversation", "extra", name)
+	if err := ensureParent(nested); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nested, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files, err := sqliteFiles(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	walked, err := chatImageCandidatesFromFiles(files, account, stem, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexed, err := chatImageCandidatesFromFiles(files, account, stem, "", map[string][]string{
+		strings.ToLower(name): {nested},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	walkedPaths, indexedPaths := map[string]bool{}, map[string]bool{}
+	for _, candidate := range walked {
+		if _, err := os.Lstat(candidate.path); err == nil {
+			walkedPaths[strings.ToLower(filepath.Clean(candidate.path))] = candidate.qualityTier == "high"
+		}
+	}
+	for _, candidate := range indexed {
+		if _, err := os.Lstat(candidate.path); err == nil {
+			indexedPaths[strings.ToLower(filepath.Clean(candidate.path))] = candidate.qualityTier == "high"
+		}
+	}
+	if len(walkedPaths) != 1 || len(indexedPaths) != 1 || !walkedPaths[strings.ToLower(filepath.Clean(nested))] ||
+		!indexedPaths[strings.ToLower(filepath.Clean(nested))] {
+		t.Fatalf("预索引与有界补扫结果不一致：walked=%v indexed=%v", walkedPaths, indexedPaths)
 	}
 }
 

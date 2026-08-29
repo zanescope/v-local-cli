@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -191,6 +192,10 @@ func imageResourceStem(root string, message Message) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return imageResourceStemFromFiles(files, message)
+}
+
+func imageResourceStemFromFiles(files []string, message Message) (string, error) {
 	stems := map[string]bool{}
 	for _, path := range files {
 		if !strings.EqualFold(filepath.Base(path), "message_resource.db") {
@@ -619,6 +624,14 @@ func chatImageCandidates(root, accountPath, stem, mediaMD5 string) ([]chatImageC
 	if err != nil {
 		return nil, err
 	}
+	return chatImageCandidatesFromFiles(files, accountPath, stem, mediaMD5, nil)
+}
+
+// chatImageCandidatesFromFiles keeps the production message-resource +
+// hardlink binding rules while allowing qualification tests to supply a
+// one-time, bounded attachment index. A nil index preserves the production
+// fallback walk exactly.
+func chatImageCandidatesFromFiles(files []string, accountPath, stem, mediaMD5 string, indexedFiles map[string][]string) ([]chatImageCandidate, error) {
 	normalizedMD5 := ""
 	if strings.TrimSpace(mediaMD5) != "" {
 		var valid bool
@@ -631,6 +644,7 @@ func chatImageCandidates(root, accountPath, stem, mediaMD5 string) ([]chatImageC
 	seen := map[string]bool{}
 	mappedFileNames := map[string]bool{}
 	hardlinkMatched := false
+	roots := hardlinkRoots(accountPath, "image")
 	for _, path := range files {
 		if !strings.EqualFold(filepath.Base(path), "hardlink.db") {
 			continue
@@ -698,7 +712,7 @@ func chatImageCandidates(root, accountPath, stem, mediaMD5 string) ([]chatImageC
 					segments = append(segments, segment)
 				}
 			}
-			for _, base := range hardlinkRoots(accountPath, "image") {
+			for _, base := range roots {
 				candidatePath := filepath.Join(append([]string{base}, segments...)...)
 				if !pathUnderRoot(candidatePath, base) {
 					continue
@@ -727,7 +741,41 @@ func chatImageCandidates(root, accountPath, stem, mediaMD5 string) ([]chatImageC
 	if !hardlinkMatched {
 		return result, nil
 	}
-	for _, base := range hardlinkRoots(accountPath, "image") {
+	if indexedFiles != nil {
+		names := make([]string, 0, len(mappedFileNames))
+		for name := range mappedFileNames {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			paths := append([]string(nil), indexedFiles[name]...)
+			sort.Strings(paths)
+			for _, path := range paths {
+				if strings.ToLower(filepath.Base(path)) != name {
+					continue
+				}
+				insideRoot := false
+				for _, base := range roots {
+					if pathUnderRoot(path, base) {
+						insideRoot = true
+						break
+					}
+				}
+				if !insideRoot {
+					continue
+				}
+				identity := strings.ToLower(filepath.Clean(path))
+				if !seen[identity] {
+					seen[identity] = true
+					result = append(result, chatImageCandidate{
+						path: path, qualityTier: chatImageQualityTier(name, stem),
+					})
+				}
+			}
+		}
+		return result, nil
+	}
+	for _, base := range roots {
 		walkErr := filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr

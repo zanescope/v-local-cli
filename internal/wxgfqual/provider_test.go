@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,16 @@ func TestImageDecoderProviderHelperProcess(t *testing.T) {
 		return
 	}
 	mode := os.Args[separator+1]
+	if mode == "escape_child" {
+		if separator+2 >= len(os.Args) {
+			os.Exit(7)
+		}
+		time.Sleep(750 * time.Millisecond)
+		if err := os.WriteFile(os.Args[separator+2], []byte("escaped"), 0o600); err != nil {
+			os.Exit(8)
+		}
+		os.Exit(0)
+	}
 	if mode == "timeout" {
 		time.Sleep(5 * time.Second)
 		return
@@ -64,6 +75,24 @@ func TestImageDecoderProviderHelperProcess(t *testing.T) {
 		if err := os.WriteFile(request.InputPath, []byte("mutated"), 0o600); err != nil {
 			os.Exit(5)
 		}
+	}
+	if mode == "spawn_child" {
+		if separator+2 >= len(os.Args) {
+			os.Exit(9)
+		}
+		discard, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+		if err != nil {
+			os.Exit(10)
+		}
+		child := exec.Command(os.Args[0], "-test.run=^TestImageDecoderProviderHelperProcess$", "--", "escape_child", os.Args[separator+2])
+		child.Stdout = discard
+		child.Stderr = discard
+		if err := child.Start(); err != nil {
+			_ = discard.Close()
+			os.Exit(11)
+		}
+		_ = child.Process.Release()
+		_ = discard.Close()
 	}
 	output := providerTestPNG(t)
 	if mode == "trailing_png" {
@@ -150,8 +179,40 @@ func TestRunProviderTrialValidatesBoundPNG(t *testing.T) {
 	}
 	assertStageCleaned(t, root)
 	if result.Validation.Format != "png" || result.Validation.Width != 3 || result.Validation.Height != 2 ||
-		result.Decoder != "test-hevc" || result.ProductionReady || len(result.PromotionBlockers) != 7 {
+		result.Decoder != "test-hevc" || result.ProductionReady {
 		t.Fatalf("WXGF provider 资格结果异常：%+v", result)
+	}
+	expectedBlockers := 8
+	if runtime.GOOS == "windows" {
+		expectedBlockers = 7
+		if !result.Isolation.CreateProcessTreeContained || !result.Isolation.JobMemberMemoryLimited || result.Isolation.NetworkIsolated ||
+			result.Isolation.FilesystemIsolated || result.Isolation.ActiveProcessLimit != providerActiveProcessLimit {
+			t.Fatalf("Windows Job Object 隔离声明异常：%+v", result.Isolation)
+		}
+	}
+	if len(result.PromotionBlockers) != expectedBlockers {
+		t.Fatalf("WXGF provider 阻断项异常：%v", result.PromotionBlockers)
+	}
+	blockers := map[string]bool{}
+	for _, blocker := range result.PromotionBlockers {
+		blockers[blocker] = true
+	}
+	requiredBlockers := []string{
+		"wxgf_container_layout_not_fully_specified",
+		"provider_binary_trust_not_verified",
+		"os_network_isolation_not_enforced",
+		"os_filesystem_credential_isolation_not_enforced",
+		"real_fixture_matrix_insufficient",
+		"decoded_visual_equivalence_not_confirmed",
+		"decoder_distribution_license_not_qualified",
+	}
+	if runtime.GOOS != "windows" {
+		requiredBlockers = append(requiredBlockers, "createprocess_tree_and_job_memory_limits_not_enforced")
+	}
+	for _, blocker := range requiredBlockers {
+		if !blockers[blocker] {
+			t.Fatalf("WXGF provider 缺少预期阻断项 %q：%v", blocker, result.PromotionBlockers)
+		}
 	}
 	if len(result.OutputPNG) == 0 || result.String() == "" {
 		t.Fatal("资格结果没有保留经过完整验证的 PNG")
