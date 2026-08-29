@@ -1,6 +1,7 @@
 package store
 
 import (
+	"container/heap"
 	"crypto/md5"
 	"database/sql"
 	"encoding/hex"
@@ -419,61 +420,83 @@ func Search(root, keyword, chat string, limit int) ([]Message, error) {
 	return SearchWindow(root, keyword, chat, nil, nil, limit)
 }
 
+func messageNewer(left, right Message) bool {
+	if left.SortKey == right.SortKey {
+		return left.EvidenceID > right.EvidenceID
+	}
+	return left.SortKey > right.SortKey
+}
+
+// oldestMessageHeap keeps the oldest retained search hit at index zero so a
+// bounded search can discard it as soon as a newer hit is observed.
+type oldestMessageHeap []Message
+
+func (messages oldestMessageHeap) Len() int { return len(messages) }
+
+func (messages oldestMessageHeap) Less(left, right int) bool {
+	return messageNewer(messages[right], messages[left])
+}
+
+func (messages oldestMessageHeap) Swap(left, right int) {
+	messages[left], messages[right] = messages[right], messages[left]
+}
+
+func (messages *oldestMessageHeap) Push(value any) {
+	*messages = append(*messages, value.(Message))
+}
+
+func (messages *oldestMessageHeap) Pop() any {
+	current := *messages
+	last := len(current) - 1
+	value := current[last]
+	*messages = current[:last]
+	return value
+}
+
+type boundedSearchResults struct {
+	limit int
+	items oldestMessageHeap
+}
+
+func newBoundedSearchResults(limit int) *boundedSearchResults {
+	capacity := 0
+	if limit > 0 {
+		capacity = limit
+	}
+	return &boundedSearchResults{limit: limit, items: make(oldestMessageHeap, 0, capacity)}
+}
+
+func (results *boundedSearchResults) emit(message Message) error {
+	if results.limit <= 0 {
+		results.items = append(results.items, message)
+		return nil
+	}
+	if len(results.items) < results.limit {
+		heap.Push(&results.items, message)
+		return nil
+	}
+	if messageNewer(message, results.items[0]) {
+		results.items[0] = message
+		heap.Fix(&results.items, 0)
+	}
+	return nil
+}
+
+func (results *boundedSearchResults) values() []Message {
+	values := append(make([]Message, 0, len(results.items)), results.items...)
+	sort.Slice(values, func(left, right int) bool {
+		return messageNewer(values[left], values[right])
+	})
+	return values
+}
+
 // SearchWindow 在指定闭区间时间窗内搜索已解码的消息正文。
 func SearchWindow(root, keyword, chat string, start, end *int64, limit int) ([]Message, error) {
-	keyword = strings.ToLower(strings.TrimSpace(keyword))
-	if keyword == "" {
-		return nil, errors.New("搜索关键词不能为空")
-	}
-	if chat != "" {
-		// 先扫描完整时间窗再限制命中结果。预先截断最新消息会漏掉较早的匹配项。
-		messages, err := HistoryWindow(root, chat, start, end, 0)
-		if err != nil {
-			return nil, err
-		}
-		return filterMessages(messages, keyword, limit), nil
-	}
-	contactsByUsername := loadContactIdentity(root)
-	redPackets := loadRedPacketIndex(root)
-	contacts, err := Contacts(root, "", 0)
-	if err != nil {
+	results := newBoundedSearchResults(limit)
+	if err := searchWindowEach(root, keyword, chat, start, end, results.emit); err != nil {
 		return nil, err
 	}
-	var result []Message
-	for _, contact := range contacts {
-		identity := messageIdentity{contacts: contactsByUsername, groupNicknames: map[string]string{}}
-		if strings.HasSuffix(contact.Username, "@chatroom") {
-			identity.groupNicknames = loadGroupNicknames(root, contact.Username)
-		}
-		messages, historyErr := historyWindowWithIdentity(root, contact.Username, start, end, 0, identity)
-		if historyErr != nil {
-			continue
-		}
-		enrichRedPacketMessages(messages, redPackets)
-		// 每个会话最多保留全局还可能需要的前 N 个命中，再合并裁剪。
-		// 一个会话中第 N 个之后的命中不可能进入全局前 N，可避免有限搜索
-		// 因联系人很多而把所有匹配项同时保存在内存中。
-		result = append(result, filterMessages(messages, keyword, limit)...)
-		if limit > 0 && len(result) > limit {
-			sort.Slice(result, func(left, right int) bool {
-				if result[left].SortKey == result[right].SortKey {
-					return result[left].EvidenceID > result[right].EvidenceID
-				}
-				return result[left].SortKey > result[right].SortKey
-			})
-			result = result[:limit]
-		}
-	}
-	sort.Slice(result, func(left, right int) bool {
-		if result[left].SortKey == result[right].SortKey {
-			return result[left].EvidenceID > result[right].EvidenceID
-		}
-		return result[left].SortKey > result[right].SortKey
-	})
-	if limit > 0 && len(result) > limit {
-		result = result[:limit]
-	}
-	return result, nil
+	return results.values(), nil
 }
 
 func historyWindowWithIdentity(root, chat string, start, end *int64, limit int, identity messageIdentity) ([]Message, error) {
@@ -523,24 +546,15 @@ func historyWindowWithIdentity(root, chat string, start, end *int64, limit int, 
 	return result, nil
 }
 
-func filterMessages(messages []Message, keyword string, limit int) []Message {
-	result := make([]Message, 0)
-	for _, message := range messages {
-		if strings.Contains(messageSearchText(message), keyword) {
-			result = append(result, message)
-			if limit > 0 && len(result) >= limit {
-				break
-			}
-		}
-	}
-	return result
-}
-
 func historyWindowEach(root, chat string, start, end *int64, emit func(Message) error) error {
 	return historyWindowEachWithRedPackets(root, chat, start, end, loadRedPacketIndex(root), emit)
 }
 
 func historyWindowEachWithRedPackets(root, chat string, start, end *int64, redPackets redPacketIndex, emit func(Message) error) error {
+	return historyWindowEachWithIdentity(root, chat, start, end, loadMessageIdentity(root, chat), redPackets, emit)
+}
+
+func historyWindowEachWithIdentity(root, chat string, start, end *int64, identity messageIdentity, redPackets redPacketIndex, emit func(Message) error) error {
 	if strings.TrimSpace(chat) == "" {
 		return errors.New("会话 username 不能为空")
 	}
@@ -549,7 +563,6 @@ func historyWindowEachWithRedPackets(root, chat string, start, end *int64, redPa
 		return err
 	}
 	table := messageTable(chat)
-	identity := loadMessageIdentity(root, chat)
 	enrichedEmit := func(message Message) error {
 		enrichRedPacketMessage(&message, redPackets)
 		return emit(message)
@@ -596,12 +609,17 @@ func searchWindowEach(root, keyword, chat string, start, end *int64, emit func(M
 	if chat != "" {
 		return historyWindowEachWithRedPackets(root, chat, start, end, redPackets, filteredEmit)
 	}
+	contactsByUsername := loadContactIdentity(root)
 	contacts, err := Contacts(root, "", 0)
 	if err != nil {
 		return err
 	}
 	for _, contact := range contacts {
-		if err := historyWindowEachWithRedPackets(root, contact.Username, start, end, redPackets, filteredEmit); err != nil {
+		identity := messageIdentity{contacts: contactsByUsername, groupNicknames: map[string]string{}}
+		if strings.HasSuffix(contact.Username, "@chatroom") {
+			identity.groupNicknames = loadGroupNicknames(root, contact.Username)
+		}
+		if err := historyWindowEachWithIdentity(root, contact.Username, start, end, identity, redPackets, filteredEmit); err != nil {
 			continue
 		}
 	}
