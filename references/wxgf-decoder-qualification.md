@@ -150,6 +150,69 @@ go test ./internal/store -run TestRealWXGFQualificationFromSnapshot -v -count=1
 质量或视觉等价。测试达到目标后即停止，不声称扫描了完整历史矩阵。
 没有显式设置变量时必须跳过；普通 CI 不读取用户微信数据，也不下载 FFmpeg。
 
+## 人工视觉等价复审
+
+解码成功不能单独关闭 `decoded_visual_equivalence_not_confirmed`。仅供资格验证的人工
+流程使用以下三部分，均不进入公开 CLI 或发行包：
+
+- `scripts/new-windows-wxgf-visual-review-session.ps1` 创建一个既有、空、禁止继承且
+  仅当前用户、SYSTEM、Administrators 可访问的短期目录；
+- 快照测试显式设置 `V_LOCAL_TEST_WXGF_REVIEW_ROOT` 后，把 `decoded-NN.png` 与私有
+  `capture.json` 写入该目录。该变量必须与 `V_LOCAL_TEST_WXGF_PROVIDER` 同时设置；
+- `internal/wxgfqual/cmd/visual-review` 生成无脚本、只含 `data:` 图片的离线 HTML，
+  `scripts/accept-windows-wxgf-visual-equivalence.ps1` 再要求操作者逐样本确认内容、方向、
+  完整裁剪和颜色/解码伪影四项。任一项不确定即不能记录通过。
+
+参考图必须是从 `capture.json` 绑定的同一条微信消息原图界面人工取得的完整图片内容，
+以 `reference-NN.png` 保存。页面按各自像素显示并允许滚动；宽高只用于验证 PNG 结构
+与帮助查看，不参与质量判定。浏览器显示也不是色度学证明。成功或拒绝后，脚本删除
+`capture.json`、解码 PNG、参考 PNG 和 HTML；但是删除磁盘文件不能证明浏览器历史、
+缓存或进程内存已经擦除，因此报告固定保留 `browser_cache_erasure_proven=false`。
+若用户拒绝或没有准备参考图，可直接使用 `-ReviewMode Skip`：helper 只校验 capture 与
+解码图绑定，随后清理，不要求 CLI、账号、参考图或浏览器，也不会生成复审记录。
+
+私有复审记录会保留 evidence ID、快照 generation/manifest、WXGF/解码/参考图摘要和
+解码图 64 位感知指纹；这些值不得上传。可分享矩阵只保留计数与 blocker，不含 evidence
+ID 或图片内容摘要。感知指纹只用于保守去重：矩阵同时要求 `high/medium` 复审中至少
+4 个不同 WXGF 摘要和 4 个不同解码感知指纹；`thumbnail` 只保留诊断计数，不得填充
+多样性门禁，也不能把相同画面的不同编码凑成 4 个样本。感知指纹仍不是质量分数。
+
+矩阵还要求至少两个“复审时安装的微信版本”，且每个版本都有人工作证实的 `high` 与
+`medium` 缓存档位。这里必须同时保留下列限制：
+
+- 版本依据固定为 `installed_package_at_review_not_source_provenance`；它不证明缓存文件
+  由该版本生成，源文件生产版本仍为 `unknown`；
+- 档位依据固定为 `hardlink_cache_filename_variant_not_source_quality`；`high` 只是微信
+  缓存命名层级，不证明发送前源图精度或质量；
+- 记录按 `ffmpeg` 及相邻解码器二进制 SHA-256 分组，不把不同解码器构建拼成一组；
+  该身份仍由未受信任 provider 报告，所以 `provider_binary_trust_status=unverified`；
+- 矩阵即使为 `pass`，范围也只是 `human_visual_equivalence_only`，并固定
+  `production_ready=false`、`fixed_dimension_quality_gate=false`。
+
+示意流程如下，路径与账号都属于本机私有输入：
+
+```powershell
+$session = pwsh -NoProfile -File .\scripts\new-windows-wxgf-visual-review-session.ps1 -ShowPaths | ConvertFrom-Json
+$env:V_LOCAL_TEST_WXGF_ACCOUNT = '<account>'
+$env:V_LOCAL_TEST_WXGF_PROVIDER = '<qualification-provider>'
+$env:V_LOCAL_TEST_WXGF_SAMPLE_TARGET = '2'
+$env:V_LOCAL_TEST_WXGF_REVIEW_ROOT = $session.review_root
+go test .\internal\store -run '^TestRealWXGFQualificationFromSnapshot$' -v -count=1
+
+# 人工保存 reference-01.png、reference-02.png 后：
+pwsh -NoProfile -File .\scripts\accept-windows-wxgf-visual-equivalence.ps1 `
+  -Helper '<visual-review-helper>' -Cli '<current-v-local-cli>' `
+  -Account '<account>' -ReviewRoot $session.review_root -ReviewMode Prompt
+
+# 或者拒绝复审并立即清理；这一分支不需要 -Cli、-Account 或参考图：
+pwsh -NoProfile -File .\scripts\accept-windows-wxgf-visual-equivalence.ps1 `
+  -Helper '<visual-review-helper>' -ReviewRoot $session.review_root -ReviewMode Skip
+```
+
+本流程不操作微信 UI、不请求 CDN，也不把用户同意解释为联网授权。即使描述符刚被
+观察到，它也可能在询问、打开原图、refresh 或首次请求前失效；在没有已验真的真实
+协议请求前只能继续报告 `present_expiry_unknown`。
+
 ## 2026-08-29 单机资格记录
 
 在当前 Windows/Weixin 4.1.12.55 验收快照中，测试通过消息资源 stem 与 hardlink
@@ -170,6 +233,17 @@ Hamming 距离为 19，只能说明本次矩阵不是同一低成本指纹的重
 缓存档位和指纹距离都不能表示发送前源图质量，也不能证明画面与微信显示语义等价。
 本次 3 个样本都属于 `medium`，且来自同一机器和客户端版本，因此仍不足以关闭真实
 夹具矩阵门禁。
+
+同日，在操作者先后于微信中打开两张原图并使用已保存凭据执行一次无进程访问、无网络
+的 `refresh --require-media` 后，又按不同 evidence ID 重采样 2 个 WXGF：分别为
+60,705 字节、1080×2338 和 56,161 字节、1280×2774，感知指纹最小 Hamming 距离为
+23。两者仍都只命中 `medium`，没有观察到 `high` 本地缓存。这不能证明 CDN 已过期，
+但直接否定了“用户打开原图后必然落盘 high”的实现假设；Agent 仍只能做一次绑定同一
+evidence 的 refresh/重试，然后停止并报告可能过期或不可用。
+
+操作者查看了解码输出并认为画面正确，但选择跳过保存独立参考 PNG。按上述门禁，本次
+记录为 `inconclusive/skipped`，临时图片与 capture 已清理，确认样本数为 0，矩阵未
+评估；主观观察没有被升级为视觉等价证据。
 
 本次只为资格验证临时下载 PyPI
 [`imageio-ffmpeg 0.6.0`](https://pypi.org/project/imageio-ffmpeg/) Windows wheel。wheel 的

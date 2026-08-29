@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/png"
 	"io/fs"
 	"math/bits"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -169,6 +173,59 @@ func realWXGFMinimumVisualDistance(value uint64, previous []uint64) int {
 	return minimum
 }
 
+func realWXGFReviewRoot(t *testing.T, accountPath, snapshotPath string) string {
+	t.Helper()
+	raw := strings.TrimSpace(os.Getenv("V_LOCAL_TEST_WXGF_REVIEW_ROOT"))
+	if raw == "" {
+		return ""
+	}
+	if !filepath.IsAbs(raw) || (runtime.GOOS == "windows" && (strings.HasPrefix(raw, `\\`) || strings.HasPrefix(raw, "//"))) {
+		t.Fatal("真实 WXGF 视觉复审目录必须是本机绝对路径")
+	}
+	root, err := filepath.Abs(raw)
+	if err != nil {
+		t.Fatal("真实 WXGF 视觉复审目录无效")
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || state.ValidatePrivateDirectorySecurity(root) != nil {
+		t.Fatal("真实 WXGF 视觉复审目录不是安全的私有目录")
+	}
+	if pathUnderRoot(root, accountPath) || pathUnderRoot(root, snapshotPath) ||
+		pathUnderRoot(accountPath, root) || pathUnderRoot(snapshotPath, root) {
+		t.Fatal("真实 WXGF 视觉复审目录不能与微信数据或快照目录重叠")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("真实 WXGF 视觉复审目录必须为空")
+	}
+	return root
+}
+
+func writeRealWXGFReviewFile(path string, payload []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	succeeded := false
+	defer func() {
+		_ = file.Close()
+		if !succeeded {
+			_ = os.Remove(path)
+		}
+	}()
+	if _, err := file.Write(payload); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	succeeded = true
+	return nil
+}
+
 func realWXGFInspectionReason(err error) string {
 	for _, candidate := range []struct {
 		reason string
@@ -215,6 +272,33 @@ func TestRealWXGFQualificationFromSnapshot(t *testing.T) {
 	indexedFiles, indexedFileCount := realWXGFFileIndex(t, value.AccountPath)
 	target := realWXGFSampleTarget(t)
 	providerPath := strings.TrimSpace(os.Getenv("V_LOCAL_TEST_WXGF_PROVIDER"))
+	reviewRoot := realWXGFReviewRoot(t, value.AccountPath, value.SnapshotPath)
+	if reviewRoot != "" && providerPath == "" {
+		t.Fatal("生成视觉复审材料必须显式设置 WXGF provider")
+	}
+	if reviewRoot != "" && (strings.TrimSpace(value.GenerationID) == "" || len(value.SnapshotManifestSHA256) != sha256.Size*2) {
+		t.Fatal("生成视觉复审材料需要完整快照代际绑定")
+	}
+	reviewCapture := wxgfqual.VisualReviewCapture{
+		Protocol: wxgfqual.VisualReviewCaptureProtocol, GenerationID: value.GenerationID,
+		SnapshotManifestSHA256:    value.SnapshotManifestSHA256,
+		DecoderIdentityBasis:      wxgfqual.VisualReviewDecoderIdentityBasis,
+		ProviderProtocol:          wxgfqual.ProviderProtocol,
+		ProviderBinaryTrustStatus: wxgfqual.VisualReviewProviderBinaryTrustStatus,
+		PrivateOnly:               true, ContainsEvidenceIDs: true, ContainsContentDigests: true,
+	}
+	createdReviewFiles := []string{}
+	reviewCaptureCommitted := false
+	t.Cleanup(func() {
+		if reviewRoot == "" || reviewCaptureCommitted {
+			return
+		}
+		for _, path := range createdReviewFiles {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Errorf("真实 WXGF 视觉复审失败材料清理失败")
+			}
+		}
+	})
 	messageCount := 0
 	imageCount := 0
 	wxgfCount := 0
@@ -224,6 +308,7 @@ func TestRealWXGFQualificationFromSnapshot(t *testing.T) {
 	inspectionFailures := map[string]int{}
 	seenPaths := map[string]bool{}
 	seenPayloads := map[[sha256.Size]byte]bool{}
+	seenQualifiedEvidence := map[string]bool{}
 	visualHashes := []uint64{}
 
 	for _, session := range report.Items {
@@ -249,6 +334,9 @@ func TestRealWXGFQualificationFromSnapshot(t *testing.T) {
 				continue
 			}
 			for _, candidate := range candidates {
+				if strings.TrimSpace(message.EvidenceID) != "" && seenQualifiedEvidence[message.EvidenceID] {
+					break
+				}
 				pathIdentity := strings.ToLower(filepath.Clean(candidate.path))
 				if seenPaths[pathIdentity] {
 					continue
@@ -284,6 +372,9 @@ func TestRealWXGFQualificationFromSnapshot(t *testing.T) {
 					continue
 				}
 				if providerPath == "" {
+					if strings.TrimSpace(message.EvidenceID) != "" {
+						seenQualifiedEvidence[message.EvidenceID] = true
+					}
 					qualifiedCount++
 					t.Logf("真实 WXGF 结构样本 %d/%d 通过：quality_tier=%s bytes=%d hevc_offset=%d nal_units=%d pictures=%d；未设置 provider，未执行解码",
 						qualifiedCount, target, candidate.qualityTier, len(plain), inspection.HEVCOffset, inspection.NALUnitCount, inspection.PictureCount)
@@ -314,12 +405,62 @@ func TestRealWXGFQualificationFromSnapshot(t *testing.T) {
 					}
 				}
 				visualHashes = append(visualHashes, visualHash)
+				if strings.TrimSpace(message.EvidenceID) != "" {
+					seenQualifiedEvidence[message.EvidenceID] = true
+				}
 				qualifiedCount++
+				if reviewRoot != "" {
+					if strings.TrimSpace(message.EvidenceID) == "" {
+						t.Fatal("真实 WXGF 私有视觉复审样本缺少 evidence_id")
+					}
+					if reviewCapture.ReportedDecoder == "" {
+						reviewCapture.ReportedDecoder = result.Decoder
+						reviewCapture.ReportedDecoderVersion = result.DecoderVersion
+					} else if reviewCapture.ReportedDecoder != result.Decoder || reviewCapture.ReportedDecoderVersion != result.DecoderVersion {
+						t.Fatal("真实 WXGF 私有视觉复审样本混用了不同解码器身份")
+					}
+					decodedReview, err := wxgfqual.InspectVisualReviewPNG(result.OutputPNG)
+					if err != nil || decodedReview.SHA256 == "" || decodedReview.VisualFingerprint != fmt.Sprintf("%016x", visualHash) {
+						t.Fatal("真实 WXGF 私有视觉复审 PNG 元数据无效")
+					}
+					decodedFileName := fmt.Sprintf("decoded-%02d.png", qualifiedCount)
+					decodedPath := filepath.Join(reviewRoot, decodedFileName)
+					if err := writeRealWXGFReviewFile(decodedPath, result.OutputPNG); err != nil {
+						t.Fatal("无法写入真实 WXGF 私有视觉复审材料")
+					}
+					createdReviewFiles = append(createdReviewFiles, decodedPath)
+					decodedDigest := sha256.Sum256(result.OutputPNG)
+					reviewCapture.Samples = append(reviewCapture.Samples, wxgfqual.VisualReviewCaptureSample{
+						Ordinal: qualifiedCount, EvidenceID: message.EvidenceID, QualityTier: candidate.qualityTier,
+						QualityTierBasis: wxgfqual.VisualReviewQualityTierBasis,
+						WXGFBytes:        len(plain), WXGFSHA256: hex.EncodeToString(payloadDigest[:]),
+						DecodedSHA256: hex.EncodeToString(decodedDigest[:]), DecodedWidth: result.Validation.Width,
+						DecodedHeight: result.Validation.Height, DecodedFileName: decodedFileName,
+						DecodedVisualFingerprint:    decodedReview.VisualFingerprint,
+						SourceOriginalQualityStatus: wxgfqual.VisualReviewSourceOriginalQualityStatus,
+					})
+				}
 				t.Logf("真实 WXGF 解码样本 %d/%d 通过：quality_tier=%s bytes=%d dimensions=%dx%d decoder=%s pixel_observation=%+v blockers=%v",
 					qualifiedCount, target, candidate.qualityTier, len(plain), result.Validation.Width, result.Validation.Height, result.Decoder, pixels, result.PromotionBlockers)
 				if qualifiedCount >= target {
 					if len(visualHashes) == 1 {
 						minimumVisualDistance = 0
+					}
+					if reviewRoot != "" {
+						if err := wxgfqual.ValidateVisualReviewCapture(reviewCapture); err != nil {
+							t.Fatal("真实 WXGF 私有视觉复审清单校验失败")
+						}
+						payload, err := json.MarshalIndent(reviewCapture, "", "  ")
+						if err != nil {
+							t.Fatal("无法编码真实 WXGF 私有视觉复审清单")
+						}
+						capturePath := filepath.Join(reviewRoot, "capture.json")
+						if err := writeRealWXGFReviewFile(capturePath, append(payload, '\n')); err != nil {
+							t.Fatal("无法写入真实 WXGF 私有视觉复审清单")
+						}
+						createdReviewFiles = append(createdReviewFiles, capturePath)
+						reviewCaptureCommitted = true
+						t.Logf("真实 WXGF 私有视觉复审材料已写入：samples=%d path_disclosed=false", qualifiedCount)
 					}
 					t.Logf("真实 WXGF 解码矩阵达到目标：samples=%d zero_distance_fingerprints=%d minimum_perceptual_hamming_distance=%d indexed_files=%d",
 						qualifiedCount, zeroDistanceFingerprints, minimumVisualDistance, indexedFileCount)

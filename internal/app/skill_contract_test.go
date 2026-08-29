@@ -389,6 +389,84 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 	}
 }
 
+func TestWXGFVisualReviewQualificationContract(t *testing.T) {
+	root := repositoryRoot(t)
+	visualScript, err := os.ReadFile(filepath.Join(root, "scripts", "accept-windows-wxgf-visual-equivalence.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	visualText := string(visualScript)
+	for _, expected := range []string{
+		"[ValidateSet('Prompt', 'Skip')]",
+		"$HelperAction = if ($ReviewMode -ceq 'Skip') { 'inspect' } else { 'prepare' }",
+		"$Expected = \"CONFIRM-CONTENT-ORIENTATION-CROP-COLOR-$Challenge\"",
+		"Start-Process -FilePath $BundlePath",
+		"browser_cache_erasure_proven = $false",
+		"fixed_dimension_quality_gate = $false",
+		"source_producer_version_status = $SourceProducerVersionStatus",
+		"provider_binary_trust_status = $ProviderBinaryTrustStatus",
+		"production_ready = $false",
+		"temporary_artifact_cleanup_failed",
+	} {
+		if !strings.Contains(visualText, expected) {
+			t.Errorf("WXGF 人工复审脚本缺少边界：%s", expected)
+		}
+	}
+	for _, forbidden := range []string{
+		"--allow-network", "Invoke-WebRequest", "Invoke-RestMethod", "Start-BitsTransfer",
+		"MinImageLongEdge", "MinImageShortEdge", "source_original_quality_known = $true",
+	} {
+		if strings.Contains(visualText, forbidden) {
+			t.Errorf("WXGF 人工复审脚本包含越界能力或固定尺寸门槛：%s", forbidden)
+		}
+	}
+
+	sessionScript, err := os.ReadFile(filepath.Join(root, "scripts", "new-windows-wxgf-visual-review-session.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionText := string(sessionScript)
+	for _, expected := range []string{
+		"V_LOCAL_TEST_WXGF_REVIEW_ROOT",
+		"SetAccessRuleProtection($true, $false)",
+		"Assert-PrivateDirectoryAcl $RootBase",
+		"temporary_images_present = $false",
+		"reads_wechat_data = $false",
+		"opens_wechat_ui = $false",
+	} {
+		if !strings.Contains(sessionText, expected) {
+			t.Errorf("WXGF 私有复审目录脚本缺少边界：%s", expected)
+		}
+	}
+
+	reference, err := os.ReadFile(filepath.Join(root, "references", "wxgf-decoder-qualification.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"installed_package_at_review_not_source_provenance",
+		"hardlink_cache_filename_variant_not_source_quality",
+		"provider_binary_trust_status=unverified",
+		"browser_cache_erasure_proven=false",
+		"`production_ready=false`、`fixed_dimension_quality_gate=false`",
+		"本流程不操作微信 UI、不请求 CDN",
+		"两者仍都只命中 `medium`，没有观察到 `high` 本地缓存",
+		"`inconclusive/skipped`",
+	} {
+		if !bytes.Contains(reference, []byte(expected)) {
+			t.Errorf("WXGF 人工复审文档缺少证据边界：%s", expected)
+		}
+	}
+	acceptance, err := os.ReadFile(filepath.Join(root, "references", "windows-amd64-local-acceptance.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(acceptance, []byte("wxgf-decoder-qualification.md#人工视觉等价复审")) ||
+		!bytes.Contains(acceptance, []byte("只查看解码图但跳过参考图")) {
+		t.Fatal("Windows 真机验收没有链接 WXGF 人工复审及其跳过边界")
+	}
+}
+
 func TestImplementedFlagsMatchCommandSchema(t *testing.T) {
 	root := repositoryRoot(t)
 	commands := schemaCommands(t)
