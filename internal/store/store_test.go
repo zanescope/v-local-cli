@@ -245,6 +245,32 @@ func TestCrossChatSearchKeepsOnlyNewestGlobalMatchesWhileMerging(t *testing.T) {
 	}
 }
 
+func TestBoundedSearchResultsRetainOnlyNewestLimit(t *testing.T) {
+	results := newBoundedSearchResults(3)
+	for index := 0; index < 10000; index++ {
+		if err := results.emit(Message{SortKey: int64(index), EvidenceID: fmt.Sprintf("wechat:alice:%05d", index)}); err != nil {
+			t.Fatal(err)
+		}
+		if len(results.items) > 3 {
+			t.Fatalf("有限搜索在扫描期间保留了 %d 条消息", len(results.items))
+		}
+	}
+	values := results.values()
+	if len(values) != 3 || values[0].SortKey != 9999 || values[1].SortKey != 9998 || values[2].SortKey != 9997 {
+		t.Fatalf("有限搜索没有保留最新三条：%+v", values)
+	}
+
+	unbounded := newBoundedSearchResults(0)
+	for index := 0; index < 10; index++ {
+		if err := unbounded.emit(Message{SortKey: int64(index), EvidenceID: fmt.Sprintf("wechat:alice:%02d", index)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if values := unbounded.values(); len(values) != 10 || values[0].SortKey != 9 || values[9].SortKey != 0 {
+		t.Fatalf("显式无限搜索没有保留全部结果：%+v", values)
+	}
+}
+
 func TestSearchMatchesStructuredCardDetails(t *testing.T) {
 	root := t.TempDir()
 	messagePath := filepath.Join(root, "message", "message_0.db")
