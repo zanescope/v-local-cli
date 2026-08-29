@@ -52,7 +52,7 @@ CLI 会从当前不可变 generation 重新定位消息，以 `message_resource.
 v-local-cli export-media --account <account> [--force] --output <file> <input.dat>
 ```
 
-当前版本不调用 ffmpeg，也不转码 wxgf。若结果是 wxgf，`data.format` 会明确返回 `wxgf`，输出文件保留原容器。
+当前公开版本不调用 ffmpeg，也不转码 wxgf。若结果是 wxgf，`data.format` 会明确返回 `wxgf`，输出文件保留原容器。仓库内的 [WXGF 本地解码资格验证](wxgf-decoder-qualification.md) 只是未接入 CLI 的实验门禁；即使实验适配器成功输出 PNG，也固定保持 `production_ready=false`，不能据此改写当前能力声明。
 
 ## 朋友圈 CDN 图片
 
