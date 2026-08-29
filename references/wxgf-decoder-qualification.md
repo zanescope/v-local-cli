@@ -37,13 +37,15 @@ v-local-cli 的生产实现。这里的检查和真实样本试验均独立建�
 ## 实验适配协议
 
 `RunProviderTrial` 通过标准输入向一个本地进程发送单行 JSON。协议版本为
-`v-local-cli-image-decoder/2`；本阶段没有公开 CLI flag，也不会自动发现或下载适配器。
+`v-local-cli-image-decoder/1`；这些接口从未发布，因此宿主身份绑定后的最终草案直接
+收敛为 v1，不保留没有外部消费者的 v2。本阶段没有公开 CLI flag，也不会自动发现或
+下载适配器。
 
 宿主不再直接执行操作者给出的 provider 文件。provider 必须与 `ffmpeg.exe` 位于同一
 普通目录，并存在 `<provider>.manifest.json`。邻接清单协议为
 `v-local-cli/wxgf-provider-identity-manifest/v1`，固定记录两个文件名、两个 SHA-256，及
-`provider_source_status=unverified`、`decoder_source_status=unverified`、
-`decoder_distribution_license_status=not_qualified`。Windows 可用以下脚本在一个全新的
+固定的 `decoder_name=ffmpeg`。它不允许携带来源、签名或许可证结论；这些状态只能由
+宿主资格策略给出。Windows 可用以下脚本在一个全新的
 资格目录中独占创建清单；脚本拒绝覆盖、链接/reparse point、非邻接文件和非
 `ffmpeg.exe` 解码器，也拒绝 `\\server`、`//server` 与设备路径，避免路径解析触发
 网络访问：
@@ -62,13 +64,14 @@ provider，FFmpeg 也来自同一 staging；请求前和进程退出后再次计
 FFmpeg 三个摘要。源目录随后变化不会改变已经复制的本次 staging 字节；宿主前后检查能
 观察到的 staging 变化会阻断结果。但同一用户权限下的恶意 provider 仍可能篡改后恢复，
 也可能根本不调用邻接 FFmpeg，因此这不是执行路径证明。清单也未签名，仍不能证明来源
-可信或许可合规，`provider_binary_trust_status=unverified` 保持不变。
+可信或许可合规，`provider_binary_trust_status=unverified`、provider/decoder
+`signature_status=not_qualified` 均保持不变。
 
 请求示意：
 
 ```json
 {
-  "protocol": "v-local-cli-image-decoder/2",
+  "protocol": "v-local-cli-image-decoder/1",
   "request_id": "<一次性随机值>",
   "action": "decode_still",
   "input_path": "<私有临时目录/input.hevc>",
@@ -91,7 +94,7 @@ FFmpeg 三个摘要。源目录随后变化不会改变已经复制的本次 sta
 
 ```json
 {
-  "protocol": "v-local-cli-image-decoder/2",
+  "protocol": "v-local-cli-image-decoder/1",
   "request_id": "<原样回显>",
   "status": "decoded",
   "input_sha256": "<原样回显>",
@@ -137,20 +140,54 @@ Windows 资格验证进程另有一层可查询的 Job Object 约束：provider 
 [命令行文档](https://ffmpeg.org/ffmpeg.html)和
 [协议白名单文档](https://ffmpeg.org/ffmpeg-protocols.html)为准。
 
+## 来源、签名与许可证资格策略
+
+FFmpeg 的[官方下载页](https://ffmpeg.org/download.html)明确说明项目本身只提供源码，
+Windows EXE 链接指向第三方构建；因此“从 FFmpeg 官网点到”不等于“官方 Windows
+二进制”，第三方页面给出的摘要也只能绑定下载字节，不能证明本项目的发行来源。
+官方 release 源码另有 PGP 签名验证流程，可作为源码真实性的信任根，但它不会自动证明
+某个 `ffmpeg.exe` 由该源码构建。
+
+FFmpeg 的[许可说明](https://ffmpeg.org/legal.html)同时指出，默认主体为 LGPL 2.1+，
+启用 GPL 部分后整个 FFmpeg 适用 GPL，而 `--enable-nonfree` 构建不可再分发；外部库还会
+带来各自义务。SHA-256、`ffmpeg -version` 自报配置或一个 LICENSE 文件都不足以单独关闭
+许可证门禁。本项目采用下列发行前策略（不是法律意见）：
+
+1. 不把 gyan.dev、BtbN、PyPI wheel 或其他第三方预编译 EXE 直接升级为可分发组件；
+2. 从 FFmpeg 官方签名 release 源码做受控自建，固定源码摘要、签名验证结果、补丁、完整
+   构建命令、工具链与外部依赖；项目策略要求不启用 GPL/nonfree 组件；
+3. 随二进制保留精确对应源码包、构建说明、许可证/NOTICE、外部依赖清单与 SBOM，并在
+   与二进制同一发行位置提供；
+4. provider 与最终 `ffmpeg.exe` 都由项目固定的 Authenticode 叶证书签名并带可信时间戳，
+   发布前及离线运行时同时校验证书 SHA-256、文件 SHA-256 和 WinVerifyTrust；
+5. 构建 provenance 必须把 provider 绑定到仓库 commit，把 FFmpeg 绑定到已验签源码、
+   配方和产物摘要。操作者填写的 manifest 字段不能代替这些验证。
+
+当前仓库尚无这条受控 FFmpeg Windows 构建、签名和对应源码发布链。因此宿主固定报告
+`provider_source_status=unverified`、`decoder_source_status=unverified`、
+`provider_signature_status=not_qualified`、`decoder_signature_status=not_qualified`、
+`decoder_distribution_license_status=not_qualified`。身份清单若试图自行加入或升级这些字段，
+会因未知字段在进程启动前 fail closed。运行时也不会为取得构建件访问 CDN；未来下载渠道
+即使有短期 URL，也必须先下载到隔离发布流程、完成摘要/签名验证再形成固定发行资产，不能
+把 URL 当作持久信任根。
+
 ## 尚未关闭的发布门禁
 
 即使真实样本解码成功，实验结果仍固定为 `production_ready=false`，并保留以下门禁：
 
 1. WXGF 容器布局没有稳定公开规范，当前只能保守识别 HEVC 候选；
-2. provider/解码器摘要已绑定单次 staging 身份，但签名、发布者与来源尚未纳入发行信任链；
-3. `network_used=false` 目前是协议声明，尚无操作系统级网络隔离证明；
-4. 尚无操作系统级文件系统与用户凭据隔离证明；
-5. 非 Windows 平台、或 Windows Job Object 建立失败时，`CreateProcess` 子树与 Job 成员内存约束仍未建立；
-6. 真实夹具矩阵仍不足，尚未覆盖不同机器、微信版本、缓存档位和真实多帧 WXGF；
-7. 完整解码、颜色采样和感知哈希只能排除一部分明显故障，尚未与微信界面显示做视觉等价确认；
-8. 解码器的可分发构建、来源、许可组合和对应源码提供方式尚未验收。
+2. provider 来源尚未验证；
+3. FFmpeg 源码、构建配方与二进制之间的来源绑定尚未验证；
+4. provider 的 Authenticode 签名尚未验收；
+5. FFmpeg 的 Authenticode 签名尚未验收；
+6. `network_used=false` 目前是协议声明，尚无操作系统级网络隔离证明；
+7. 尚无操作系统级文件系统与用户凭据隔离证明；
+8. 非 Windows 平台、或 Windows Job Object 建立失败时，`CreateProcess` 子树与 Job 成员内存约束仍未建立；
+9. 真实夹具矩阵仍不足，尚未覆盖不同机器、微信版本、缓存档位和真实多帧 WXGF；
+10. 完整解码、颜色采样和感知哈希只能排除一部分明显故障，尚未与微信界面显示做视觉等价确认；
+11. 解码器的可分发许可组合、对应源码与 NOTICE 提供方式尚未验收。
 
-当前 Windows 实现只有第 5 项在 Job Object 成功建立后从结果中移除，其余 7 项继续
+当前 Windows 实现只有第 8 项在 Job Object 成功建立后从结果中移除，其余 10 项继续
 返回。任一 Job 创建、配置、分配或恢复步骤失败都会 fail closed，不会退化为无约束
 执行。
 
@@ -235,12 +272,14 @@ ID 或图片内容摘要。感知指纹只用于保守去重：矩阵同时要�
   由该版本生成，源文件生产版本仍为 `unknown`；
 - 档位依据固定为 `hardlink_cache_filename_variant_not_source_quality`；`high` 只是微信
   缓存命名层级，不证明发送前源图精度或质量；
-- v2 记录同时按宿主计算的清单、provider、FFmpeg SHA-256 分组，不把不同 provider 或
+- 最终 v1 记录同时按宿主计算的清单、provider、FFmpeg SHA-256 分组，不把不同 provider 或
   解码器构建拼成一组；provider 的响应只能精确回显宿主给定身份，不能选择矩阵身份；
-- v1 记录只含 provider 自报的相邻解码器摘要，评估时计入
-  `legacy_records_excluded`，不得静默补字段或升级为 v2 证据；
+- 首次发布前生成的早期记录虽然也使用草案 `/v1` 字符串，但只含 provider 自报的相邻
+  解码器摘要；只有同时使用旧 identity basis 且完全缺少宿主 manifest/provider 与资格
+  状态字段时，才计入 `pre_binding_records_excluded`，不得静默补字段或拼入最终 v1；
 - 清单仍未签名且来源/许可未验收，所以 `provider_binary_trust_status=unverified`、
   `provider_source_status=unverified`、`decoder_source_status=unverified`、
+  `provider_signature_status=not_qualified`、`decoder_signature_status=not_qualified`、
   `decoder_distribution_license_status=not_qualified`；
 - 矩阵即使为 `pass`，范围也只是 `human_visual_equivalence_only`，并固定
   `production_ready=false`、`fixed_dimension_quality_gate=false`。
@@ -352,14 +391,16 @@ SHA-256 与 PyPI 发布页给出的
 这条记录把“WXGF 中的 HEVC 在当前真实样本上可解码”从单样本提升为同版本多样本
 证据，并新增了两个具有独立微信参考图的正式人工视觉确认；两者仍不能关闭完整矩阵。
 记录同时关闭了 Windows 资格进程的“无 `CreateProcess` 子树/Job 成员内存约束”单项
-缺口。由于其余 7 个
-`production_ready` 阻断项仍存在，公开 CLI 继续返回 `decoder_unavailable`；本地解码
+缺口；其余 `production_ready` 阻断项仍存在，公开 CLI 继续返回
+`decoder_unavailable`；本地解码
 结论也不会改变 CDN 描述符的 `present_expiry_unknown` 状态或启用任何远端请求。
 
-随后身份协议升级为 provider v2、capture/record/matrix/helper 及脱敏 evidence report
-v2。上述两条正式人工确认是在升级前生成的 v1 历史证据：它们仍能说明当时两个样本的
-人工观察，但只绑定了未受信任 provider 自报的 FFmpeg 摘要。新 helper 会识别并计数这类记录为
-`legacy_records_excluded`，不会把它们拼入宿主计算的清单 + provider + FFmpeg 身份矩阵，
-也不会原地重写私有记录。因此当前 v2 矩阵尚未用真实样本评估；若以后确有必要继续资格
-验证，必须从新的宿主 staging capture 开始并重新取得独立参考图与一次性人工确认。
-这次协议升级不改变历史 v1 的 `high=0`、`medium=2` 观察，也不把它升级为生产证据。
+这些协议从未发布，因此宿主身份绑定完成后，provider、capture/record/matrix/helper 与
+脱敏 evidence report 直接收敛为最终 v1，不保留无外部消费者的 v2。上述两条正式人工
+确认是在宿主绑定前生成的早期草案记录：它们仍能说明当时两个样本的人工观察，但只绑定
+了未受信任 provider 自报的 FFmpeg 摘要。新 helper 按旧 identity basis、缺失宿主
+manifest/provider 字段及缺失资格状态字段识别它们，计入
+`pre_binding_records_excluded`，不会拼入最终 v1 身份矩阵，也不会原地重写私有记录。
+因此当前最终 v1 矩阵尚未用真实样本评估；若以后确有必要继续资格验证，必须从新的宿主
+staging capture 开始并重新取得独立参考图与一次性人工确认。这次收敛不改变早期记录的
+`high=0`、`medium=2` 观察，也不把它升级为生产证据。

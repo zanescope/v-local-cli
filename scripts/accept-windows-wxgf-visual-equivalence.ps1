@@ -34,14 +34,16 @@ param(
 
 Set-StrictMode -Version 3.0
 
-$HelperProtocol = 'v-local-cli/wxgf-visual-review-helper/v2'
-$RecordProtocol = 'v-local-cli/wxgf-visual-review-record/v2'
-$ReportProtocol = 'v-local-cli/windows-wxgf-visual-equivalence-evidence/v2'
-$ProviderProtocol = 'v-local-cli-image-decoder/2'
+$HelperProtocol = 'v-local-cli/wxgf-visual-review-helper/v1'
+$RecordProtocol = 'v-local-cli/wxgf-visual-review-record/v1'
+$ReportProtocol = 'v-local-cli/windows-wxgf-visual-equivalence-evidence/v1'
+$ProviderProtocol = 'v-local-cli-image-decoder/1'
 $ProviderIdentityManifestProtocol = 'v-local-cli/wxgf-provider-identity-manifest/v1'
 $DecoderIdentityBasis = 'host_staged_manifest_bound_provider_and_decoder_sha256'
 $ProviderSourceStatus = 'unverified'
 $DecoderSourceStatus = 'unverified'
+$ProviderSignatureStatus = 'not_qualified'
+$DecoderSignatureStatus = 'not_qualified'
 $DecoderDistributionLicenseStatus = 'not_qualified'
 $ProviderBinaryTrustStatus = 'unverified'
 $QualityTierBasis = 'hardlink_cache_filename_variant_not_source_quality'
@@ -795,6 +797,8 @@ function Invoke-SelfTest {
         version_coverage_basis = $VersionCoverageBasis
         source_producer_version_status = $SourceProducerVersionStatus
         provider_binary_trust_status = $ProviderBinaryTrustStatus
+        provider_signature_status = $ProviderSignatureStatus
+        decoder_signature_status = $DecoderSignatureStatus
         production_ready = $false
         network_access_performed = $false
         wechat_ui_automated = $false
@@ -816,6 +820,8 @@ function Invoke-SelfTest {
         browser_display_path_not_reported = $true
         browser_display_interactive_checked = $InteractiveChecked
         provider_binary_trust_status = $ProviderBinaryTrustStatus
+        provider_signature_status = $ProviderSignatureStatus
+        decoder_signature_status = $DecoderSignatureStatus
         production_ready = $false
         network = $false
         wechat_ui_automated = $false
@@ -862,6 +868,8 @@ $Report = [ordered]@{
         provider_sha256 = $null
         provider_source_status = $ProviderSourceStatus
         decoder_source_status = $DecoderSourceStatus
+        provider_signature_status = $ProviderSignatureStatus
+        decoder_signature_status = $DecoderSignatureStatus
         decoder_distribution_license_status = $DecoderDistributionLicenseStatus
         provider_binary_trust_status = $ProviderBinaryTrustStatus
     }
@@ -954,6 +962,8 @@ try {
         ($ProviderIdentityManifestSHA256 -cmatch '^[0-9a-f]{64}$') -and ($ProviderSHA256 -cmatch '^[0-9a-f]{64}$') -and
         ((Get-Field $Capture 'provider_source_status') -ceq $ProviderSourceStatus) -and
         ((Get-Field $Capture 'decoder_source_status') -ceq $DecoderSourceStatus) -and
+        ((Get-Field $Capture 'provider_signature_status') -ceq $ProviderSignatureStatus) -and
+        ((Get-Field $Capture 'decoder_signature_status') -ceq $DecoderSignatureStatus) -and
         ((Get-Field $Capture 'decoder_distribution_license_status') -ceq $DecoderDistributionLicenseStatus) -and
         ((Get-Field $Capture 'provider_binary_trust_status') -ceq $ProviderBinaryTrustStatus)) 'review_decoder_identity_invalid'
     $Report.sample_review.samples_presented = $Samples.Count
@@ -1088,6 +1098,8 @@ try {
                 provider_sha256 = $ProviderSHA256
                 provider_source_status = $ProviderSourceStatus
                 decoder_source_status = $DecoderSourceStatus
+                provider_signature_status = $ProviderSignatureStatus
+                decoder_signature_status = $DecoderSignatureStatus
                 decoder_distribution_license_status = $DecoderDistributionLicenseStatus
                 provider_binary_trust_status = $ProviderBinaryTrustStatus
                 quality_tier = [string](Get-Field $Sample 'quality_tier')

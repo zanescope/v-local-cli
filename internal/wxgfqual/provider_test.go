@@ -164,8 +164,6 @@ func providerIdentityFixture(t *testing.T) string {
 		Protocol: ProviderIdentityManifestProtocol, ProviderFileName: providerName,
 		ProviderSHA256: fileSHA256(providerPayload), DecoderName: "ffmpeg",
 		DecoderFileName: expectedProviderDecoderFileName(), DecoderSHA256: fileSHA256(decoderPayload),
-		ProviderSourceStatus: ProviderSourceStatus, DecoderSourceStatus: DecoderSourceStatus,
-		DecoderDistributionLicenseStatus: DecoderDistributionLicenseStatus,
 	}
 	payload, err := json.Marshal(manifest)
 	if err != nil {
@@ -226,13 +224,15 @@ func TestRunProviderTrialValidatesBoundPNG(t *testing.T) {
 		!validProviderSHA256(result.BinaryIdentity.DecoderSHA256) || !validProviderSHA256(result.BinaryIdentity.ManifestSHA256) ||
 		result.DecoderVersion != "sha256:"+result.BinaryIdentity.DecoderSHA256 ||
 		result.BinaryIdentity.ProviderSourceStatus != ProviderSourceStatus || result.BinaryIdentity.DecoderSourceStatus != DecoderSourceStatus ||
+		result.BinaryIdentity.ProviderSignatureStatus != ProviderSignatureStatus ||
+		result.BinaryIdentity.DecoderSignatureStatus != DecoderSignatureStatus ||
 		result.BinaryIdentity.DecoderDistributionLicenseStatus != DecoderDistributionLicenseStatus ||
 		result.BinaryIdentity.ProviderBinaryTrustStatus != ProviderBinaryTrustStatus {
 		t.Fatalf("WXGF provider 资格结果异常：%+v", result)
 	}
-	expectedBlockers := 8
+	expectedBlockers := 11
 	if runtime.GOOS == "windows" {
-		expectedBlockers = 7
+		expectedBlockers = 10
 		if !result.Isolation.CreateProcessTreeContained || !result.Isolation.JobMemberMemoryLimited || result.Isolation.NetworkIsolated ||
 			result.Isolation.FilesystemIsolated || result.Isolation.ActiveProcessLimit != providerActiveProcessLimit {
 			t.Fatalf("Windows Job Object 隔离声明异常：%+v", result.Isolation)
@@ -247,7 +247,10 @@ func TestRunProviderTrialValidatesBoundPNG(t *testing.T) {
 	}
 	requiredBlockers := []string{
 		"wxgf_container_layout_not_fully_specified",
-		"provider_binary_trust_not_verified",
+		"provider_source_not_verified",
+		"decoder_source_not_verified",
+		"provider_signature_not_qualified",
+		"decoder_signature_not_qualified",
 		"os_network_isolation_not_enforced",
 		"os_filesystem_credential_isolation_not_enforced",
 		"real_fixture_matrix_insufficient",
@@ -336,7 +339,7 @@ func TestRunProviderTrialRequiresRegularExecutableAndPrivateRoot(t *testing.T) {
 func TestRunProviderTrialRejectsMissingOrChangedIdentityBundle(t *testing.T) {
 	for _, mode := range []string{
 		"missing_manifest", "provider_changed", "decoder_changed", "manifest_unknown_field", "manifest_duplicate_field",
-		"manifest_overstated_source", "manifest_qualified_license",
+		"manifest_overstated_source", "manifest_qualified_signature", "manifest_qualified_license",
 	} {
 		t.Run(mode, func(t *testing.T) {
 			provider := providerIdentityFixture(t)
@@ -377,20 +380,19 @@ func TestRunProviderTrialRejectsMissingOrChangedIdentityBundle(t *testing.T) {
 				if err := os.WriteFile(manifestPath, payload, 0o400); err != nil {
 					t.Fatal(err)
 				}
-			case "manifest_overstated_source", "manifest_qualified_license":
+			case "manifest_overstated_source", "manifest_qualified_signature", "manifest_qualified_license":
 				payload, err := os.ReadFile(manifestPath)
 				if err != nil {
 					t.Fatal(err)
 				}
-				before, after := []byte(`"provider_source_status":"unverified"`), []byte(`"provider_source_status":"verified"`)
+				addition := `,"provider_source_status":"verified"}`
+				if mode == "manifest_qualified_signature" {
+					addition = `,"provider_signature_status":"qualified"}`
+				}
 				if mode == "manifest_qualified_license" {
-					before = []byte(`"decoder_distribution_license_status":"not_qualified"`)
-					after = []byte(`"decoder_distribution_license_status":"qualified"`)
+					addition = `,"decoder_distribution_license_status":"qualified"}`
 				}
-				payload = bytes.Replace(payload, before, after, 1)
-				if bytes.Contains(payload, before) || !bytes.Contains(payload, after) {
-					t.Fatal("测试无法改写 manifest 信任状态")
-				}
+				payload = append(bytes.TrimSuffix(payload, []byte("}")), []byte(addition)...)
 				if err := os.Chmod(manifestPath, 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -420,8 +422,6 @@ func TestProviderIdentityBundleRejectsProviderDecoderPathCollision(t *testing.T)
 	manifest := ProviderIdentityManifest{
 		Protocol: ProviderIdentityManifestProtocol, ProviderFileName: filepath.Base(provider), ProviderSHA256: fileSHA256(payload),
 		DecoderName: "ffmpeg", DecoderFileName: filepath.Base(provider), DecoderSHA256: fileSHA256(payload),
-		ProviderSourceStatus: ProviderSourceStatus, DecoderSourceStatus: DecoderSourceStatus,
-		DecoderDistributionLicenseStatus: DecoderDistributionLicenseStatus,
 	}
 	manifestPayload, err := json.Marshal(manifest)
 	if err != nil {

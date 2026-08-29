@@ -397,6 +397,10 @@ func TestWXGFVisualReviewQualificationContract(t *testing.T) {
 	}
 	visualText := string(visualScript)
 	for _, expected := range []string{
+		"$HelperProtocol = 'v-local-cli/wxgf-visual-review-helper/v1'",
+		"$RecordProtocol = 'v-local-cli/wxgf-visual-review-record/v1'",
+		"$ReportProtocol = 'v-local-cli/windows-wxgf-visual-equivalence-evidence/v1'",
+		"$ProviderProtocol = 'v-local-cli-image-decoder/1'",
 		"[ValidateSet('Prompt', 'Skip')]",
 		"[string]$BrowserDisplayRoot",
 		"$HelperAction = if ($ReviewMode -ceq 'Skip') { 'inspect' } else { 'prepare' }",
@@ -425,6 +429,8 @@ func TestWXGFVisualReviewQualificationContract(t *testing.T) {
 		"provider_identity_manifest_protocol = $ProviderIdentityManifestProtocol",
 		"provider_identity_manifest_sha256 = $ProviderIdentityManifestSHA256",
 		"provider_sha256 = $ProviderSHA256",
+		"provider_signature_status = $ProviderSignatureStatus",
+		"decoder_signature_status = $DecoderSignatureStatus",
 		"decoder_distribution_license_status = $DecoderDistributionLicenseStatus",
 		"production_ready = $false",
 		"temporary_artifact_cleanup_failed",
@@ -448,10 +454,10 @@ func TestWXGFVisualReviewQualificationContract(t *testing.T) {
 		"provider_decoder_not_adjacent",
 		"provider_decoder_same_file",
 		"decoder_file_name_invalid",
-		"provider_source_status = 'unverified'",
-		"decoder_source_status = 'unverified'",
-		"decoder_distribution_license_status = 'not_qualified'",
+		"self_test_manifest_contains_trust_claim",
+		"identity_only = $true",
 		"proves_provenance = $false",
+		"qualifies_signatures = $false",
 		"qualifies_distribution_license = $false",
 		"network = $false",
 	} {
@@ -513,9 +519,13 @@ func TestWXGFVisualReviewQualificationContract(t *testing.T) {
 		"hardlink_cache_filename_variant_not_source_quality",
 		"provider_binary_trust_status=unverified",
 		"host_staged_manifest_bound_provider_and_decoder_sha256",
-		"legacy_records_excluded",
+		"pre_binding_records_excluded",
+		"provider_signature_status=not_qualified",
+		"decoder_signature_status=not_qualified",
 		"decoder_distribution_license_status=not_qualified",
-		"当前 v2 矩阵尚未用真实样本评估",
+		"当前最终 v1 矩阵尚未用真实样本评估",
+		"项目本身只提供源码",
+		"不启用 GPL/nonfree 组件",
 		"browser_cache_erasure_proven=false",
 		"`production_ready=false`、`fixed_dimension_quality_gate=false`",
 		"本流程不操作微信 UI、不请求 CDN",
@@ -538,7 +548,7 @@ func TestWXGFVisualReviewQualificationContract(t *testing.T) {
 	}
 	if !bytes.Contains(acceptance, []byte("wxgf-decoder-qualification.md#人工视觉等价复审")) ||
 		!bytes.Contains(acceptance, []byte("只查看解码图但跳过参考图")) ||
-		!bytes.Contains(acceptance, []byte("legacy_records_excluded")) {
+		!bytes.Contains(acceptance, []byte("pre_binding_records_excluded")) {
 		t.Fatal("Windows 真机验收没有链接 WXGF 人工复审及其跳过边界")
 	}
 }

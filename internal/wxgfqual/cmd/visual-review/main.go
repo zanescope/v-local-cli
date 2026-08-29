@@ -241,7 +241,20 @@ func recordProtocol(payload []byte) (string, error) {
 	return protocol, nil
 }
 
-func recognizedLegacyRecord(payload []byte) bool {
+func recognizedPreBindingRecord(payload []byte) bool {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return false
+	}
+	for _, field := range []string{
+		"provider_identity_manifest_protocol", "provider_identity_manifest_sha256", "provider_sha256",
+		"provider_source_status", "decoder_source_status", "provider_signature_status", "decoder_signature_status",
+		"decoder_distribution_license_status",
+	} {
+		if _, exists := fields[field]; exists {
+			return false
+		}
+	}
 	var value struct {
 		Protocol                  string `json:"protocol"`
 		ReviewStatus              string `json:"review_status"`
@@ -251,7 +264,7 @@ func recognizedLegacyRecord(payload []byte) bool {
 		ProviderProtocol          string `json:"provider_protocol"`
 		ProviderBinaryTrustStatus string `json:"provider_binary_trust_status"`
 	}
-	if err := json.Unmarshal(payload, &value); err != nil || value.Protocol != wxgfqual.VisualReviewLegacyRecordProtocol ||
+	if err := json.Unmarshal(payload, &value); err != nil || value.Protocol != wxgfqual.VisualReviewRecordProtocol ||
 		value.ReviewStatus != "confirmed" || value.ReportedDecoder != "ffmpeg" ||
 		value.DecoderIdentityBasis != "provider_reported_adjacent_decoder_sha256_unattested_provider" ||
 		value.ProviderProtocol != "v-local-cli-image-decoder/1" || value.ProviderBinaryTrustStatus != "unverified" ||
@@ -271,7 +284,7 @@ func evaluate(recordRoot string, paths []string, target wxgfqual.VisualReviewTar
 		return helperResponse{}, errors.New("invalid_record_count")
 	}
 	records := make([]wxgfqual.VisualReviewRecord, 0, len(paths))
-	legacyRecords := 0
+	preBindingRecords := 0
 	seen := map[string]bool{}
 	for _, path := range paths {
 		if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) ||
@@ -298,15 +311,12 @@ func evaluate(recordRoot string, paths []string, target wxgfqual.VisualReviewTar
 		if err != nil {
 			return helperResponse{}, err
 		}
-		if protocol == wxgfqual.VisualReviewLegacyRecordProtocol {
-			if !recognizedLegacyRecord(payload) {
-				return helperResponse{}, errors.New("invalid_legacy_record")
-			}
-			legacyRecords++
-			continue
-		}
 		if protocol != wxgfqual.VisualReviewRecordProtocol {
 			return helperResponse{}, errors.New("invalid_record")
+		}
+		if recognizedPreBindingRecord(payload) {
+			preBindingRecords++
+			continue
 		}
 		var record wxgfqual.VisualReviewRecord
 		if err := decodeStrict(bytes.NewReader(payload), maximumRecordBytes, &record); err != nil {
@@ -318,7 +328,7 @@ func evaluate(recordRoot string, paths []string, target wxgfqual.VisualReviewTar
 	if err != nil {
 		return helperResponse{}, err
 	}
-	matrix.LegacyRecordsExcluded = legacyRecords
+	matrix.PreBindingRecordsExcluded = preBindingRecords
 	return helperResponse{Protocol: wxgfqual.VisualReviewHelperProtocol, Status: "evaluated", Matrix: &matrix}, nil
 }
 

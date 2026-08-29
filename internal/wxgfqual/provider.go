@@ -21,11 +21,13 @@ import (
 )
 
 const (
-	ProviderProtocol                 = "v-local-cli-image-decoder/2"
+	ProviderProtocol                 = "v-local-cli-image-decoder/1"
 	ProviderIdentityManifestProtocol = "v-local-cli/wxgf-provider-identity-manifest/v1"
 	ProviderIdentityBasis            = "host_staged_manifest_bound_provider_and_decoder_sha256"
 	ProviderSourceStatus             = "unverified"
 	DecoderSourceStatus              = "unverified"
+	ProviderSignatureStatus          = "not_qualified"
+	DecoderSignatureStatus           = "not_qualified"
 	DecoderDistributionLicenseStatus = "not_qualified"
 	ProviderBinaryTrustStatus        = "unverified"
 	maxProviderResponseBytes         = 64 * 1024
@@ -90,15 +92,12 @@ type providerResponse = ProviderResponse
 // signature or provenance root. The host independently hashes the named files,
 // stages the exact bytes it verified, and keeps the trust status unverified.
 type ProviderIdentityManifest struct {
-	Protocol                         string `json:"protocol"`
-	ProviderFileName                 string `json:"provider_file_name"`
-	ProviderSHA256                   string `json:"provider_sha256"`
-	DecoderName                      string `json:"decoder_name"`
-	DecoderFileName                  string `json:"decoder_file_name"`
-	DecoderSHA256                    string `json:"decoder_sha256"`
-	ProviderSourceStatus             string `json:"provider_source_status"`
-	DecoderSourceStatus              string `json:"decoder_source_status"`
-	DecoderDistributionLicenseStatus string `json:"decoder_distribution_license_status"`
+	Protocol         string `json:"protocol"`
+	ProviderFileName string `json:"provider_file_name"`
+	ProviderSHA256   string `json:"provider_sha256"`
+	DecoderName      string `json:"decoder_name"`
+	DecoderFileName  string `json:"decoder_file_name"`
+	DecoderSHA256    string `json:"decoder_sha256"`
 }
 
 type ProviderBinaryIdentity struct {
@@ -110,6 +109,8 @@ type ProviderBinaryIdentity struct {
 	IdentityBasis                    string `json:"identity_basis"`
 	ProviderSourceStatus             string `json:"provider_source_status"`
 	DecoderSourceStatus              string `json:"decoder_source_status"`
+	ProviderSignatureStatus          string `json:"provider_signature_status"`
+	DecoderSignatureStatus           string `json:"decoder_signature_status"`
 	DecoderDistributionLicenseStatus string `json:"decoder_distribution_license_status"`
 	ProviderBinaryTrustStatus        string `json:"provider_binary_trust_status"`
 }
@@ -168,7 +169,10 @@ type Result struct {
 func providerPromotionBlockers(isolation ProviderIsolation) []string {
 	blockers := []string{
 		"wxgf_container_layout_not_fully_specified",
-		"provider_binary_trust_not_verified",
+		"provider_source_not_verified",
+		"decoder_source_not_verified",
+		"provider_signature_not_qualified",
+		"decoder_signature_not_qualified",
 		"os_network_isolation_not_enforced",
 		"os_filesystem_credential_isolation_not_enforced",
 	}
@@ -441,9 +445,7 @@ func loadProviderBundle(path string) (providerBundle, error) {
 		!validProviderFileName(manifest.ProviderFileName) || !sameProviderFileName(manifest.ProviderFileName, filepath.Base(providerPath)) ||
 		!validProviderSHA256(manifest.ProviderSHA256) || manifest.DecoderName != "ffmpeg" ||
 		!validProviderFileName(manifest.DecoderFileName) || !sameProviderFileName(manifest.DecoderFileName, expectedProviderDecoderFileName()) ||
-		!validProviderSHA256(manifest.DecoderSHA256) || manifest.ProviderSourceStatus != ProviderSourceStatus ||
-		manifest.DecoderSourceStatus != DecoderSourceStatus ||
-		manifest.DecoderDistributionLicenseStatus != DecoderDistributionLicenseStatus {
+		!validProviderSHA256(manifest.DecoderSHA256) {
 		return providerBundle{}, fmt.Errorf("manifest_content: %w", ErrProviderIdentity)
 	}
 	decoderPath, err := canonicalProviderFile(filepath.Join(filepath.Dir(providerPath), manifest.DecoderFileName), maxDecoderExecutableBytes)
@@ -551,9 +553,11 @@ func stageProviderBundle(bundle providerBundle, stage string) (stagedProviderBun
 			ManifestProtocol: ProviderIdentityManifestProtocol,
 			ManifestSHA256:   fileSHA256(bundle.manifestPayload), ProviderSHA256: bundle.manifest.ProviderSHA256,
 			DecoderName: bundle.manifest.DecoderName, DecoderSHA256: bundle.manifest.DecoderSHA256,
-			IdentityBasis: ProviderIdentityBasis, ProviderSourceStatus: bundle.manifest.ProviderSourceStatus,
-			DecoderSourceStatus:              bundle.manifest.DecoderSourceStatus,
-			DecoderDistributionLicenseStatus: bundle.manifest.DecoderDistributionLicenseStatus,
+			IdentityBasis: ProviderIdentityBasis, ProviderSourceStatus: ProviderSourceStatus,
+			DecoderSourceStatus:              DecoderSourceStatus,
+			ProviderSignatureStatus:          ProviderSignatureStatus,
+			DecoderSignatureStatus:           DecoderSignatureStatus,
+			DecoderDistributionLicenseStatus: DecoderDistributionLicenseStatus,
 			ProviderBinaryTrustStatus:        ProviderBinaryTrustStatus,
 		},
 	}

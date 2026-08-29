@@ -153,9 +153,6 @@ function New-IdentityManifest {
         decoder_name = 'ffmpeg'
         decoder_file_name = 'ffmpeg.exe'
         decoder_sha256 = $DecoderSHA256
-        provider_source_status = 'unverified'
-        decoder_source_status = 'unverified'
-        decoder_distribution_license_status = 'not_qualified'
     }
     Write-ExclusiveUTF8 $ManifestPath ($Manifest | ConvertTo-Json -Compress)
     return [pscustomobject]@{
@@ -178,9 +175,19 @@ function Invoke-SelfTest {
         $Result = New-IdentityManifest $ProviderPath $DecoderPath
         $Value = Get-Content -LiteralPath $ManifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         if ($Value.protocol -cne $ManifestProtocol -or $Value.provider_sha256 -cne $Result.provider_sha256 -or
-            $Value.decoder_sha256 -cne $Result.decoder_sha256 -or $Value.provider_source_status -cne 'unverified' -or
-            $Value.decoder_distribution_license_status -cne 'not_qualified') {
+            $Value.decoder_sha256 -cne $Result.decoder_sha256) {
             Stop-Manifest 'self_test_manifest_invalid'
+        }
+        foreach ($ForbiddenTrustClaim in @(
+            'provider_source_status',
+            'decoder_source_status',
+            'provider_signature_status',
+            'decoder_signature_status',
+            'decoder_distribution_license_status'
+        )) {
+            if ($Value.PSObject.Properties.Name -contains $ForbiddenTrustClaim) {
+                Stop-Manifest 'self_test_manifest_contains_trust_claim'
+            }
         }
         $OverwriteRejected = $false
         try {
@@ -234,6 +241,7 @@ function Invoke-SelfTest {
         manifest_protocol = $ManifestProtocol
         host_rehash_required = $true
         proves_provenance = $false
+        qualifies_signatures = $false
         qualifies_distribution_license = $false
         network = $false
     } | ConvertTo-Json -Compress
@@ -256,9 +264,10 @@ try {
         status = 'created'
         protocol = $ManifestProtocol
         manifest_path_included = [bool]$ShowPaths
-        provider_source_status = 'unverified'
-        decoder_source_status = 'unverified'
-        decoder_distribution_license_status = 'not_qualified'
+        identity_only = $true
+        proves_provenance = $false
+        qualifies_signatures = $false
+        qualifies_distribution_license = $false
         network = $false
     }
     if ($ShowPaths) {

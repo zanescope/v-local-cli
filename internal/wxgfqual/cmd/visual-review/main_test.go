@@ -80,6 +80,8 @@ func TestPrepareCreatesBoundOfflineReviewBundle(t *testing.T) {
 		ProviderSHA256:                   helperSHA([]byte("provider-build")),
 		ProviderSourceStatus:             wxgfqual.ProviderSourceStatus,
 		DecoderSourceStatus:              wxgfqual.DecoderSourceStatus,
+		ProviderSignatureStatus:          wxgfqual.ProviderSignatureStatus,
+		DecoderSignatureStatus:           wxgfqual.DecoderSignatureStatus,
 		DecoderDistributionLicenseStatus: wxgfqual.DecoderDistributionLicenseStatus,
 		ProviderBinaryTrustStatus:        wxgfqual.VisualReviewProviderBinaryTrustStatus,
 		ContainsEvidenceIDs:              true, ContainsContentDigests: true,
@@ -155,6 +157,8 @@ func helperRecord(version, tier, suffix string) wxgfqual.VisualReviewRecord {
 		ProviderSHA256:                   helperSHA([]byte("provider-build")),
 		ProviderSourceStatus:             wxgfqual.ProviderSourceStatus,
 		DecoderSourceStatus:              wxgfqual.DecoderSourceStatus,
+		ProviderSignatureStatus:          wxgfqual.ProviderSignatureStatus,
+		DecoderSignatureStatus:           wxgfqual.DecoderSignatureStatus,
 		DecoderDistributionLicenseStatus: wxgfqual.DecoderDistributionLicenseStatus,
 		ProviderBinaryTrustStatus:        wxgfqual.VisualReviewProviderBinaryTrustStatus,
 		QualityTier:                      tier, QualityTierBasis: wxgfqual.VisualReviewQualityTierBasis,
@@ -167,6 +171,27 @@ func helperRecord(version, tier, suffix string) wxgfqual.VisualReviewRecord {
 		SourceOriginalQualityStatus: wxgfqual.VisualReviewSourceOriginalQualityStatus,
 		TemporaryReferenceRemoved:   true, TemporaryReviewBundleRemoved: true,
 	}
+}
+
+func helperPreBindingRecord(t *testing.T, record wxgfqual.VisualReviewRecord) map[string]any {
+	t.Helper()
+	payload, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(payload, &value); err != nil {
+		t.Fatal(err)
+	}
+	value["decoder_identity_basis"] = "provider_reported_adjacent_decoder_sha256_unattested_provider"
+	for _, field := range []string{
+		"provider_identity_manifest_protocol", "provider_identity_manifest_sha256", "provider_sha256",
+		"provider_source_status", "decoder_source_status", "provider_signature_status", "decoder_signature_status",
+		"decoder_distribution_license_status",
+	} {
+		delete(value, field)
+	}
+	return value
 }
 
 func TestEvaluateMatrixReturnsOnlySanitizedCoverage(t *testing.T) {
@@ -185,17 +210,14 @@ func TestEvaluateMatrixReturnsOnlySanitizedCoverage(t *testing.T) {
 		writeJSON(t, path, record)
 		paths = append(paths, path)
 	}
-	legacyDirectory := filepath.Join(root, "run-legacy")
-	if err := os.Mkdir(legacyDirectory, 0o700); err != nil {
+	preBindingDirectory := filepath.Join(root, "run-pre-binding")
+	if err := os.Mkdir(preBindingDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	legacy := helperRecord("4.0.0.0", "medium", "legacy")
-	legacy.Protocol = wxgfqual.VisualReviewLegacyRecordProtocol
-	legacy.DecoderIdentityBasis = "provider_reported_adjacent_decoder_sha256_unattested_provider"
-	legacy.ProviderProtocol = "v-local-cli-image-decoder/1"
-	legacyPath := filepath.Join(legacyDirectory, "record.json")
-	writeJSON(t, legacyPath, legacy)
-	paths = append(paths, legacyPath)
+	preBinding := helperPreBindingRecord(t, helperRecord("4.0.0.0", "medium", "pre-binding"))
+	preBindingPath := filepath.Join(preBindingDirectory, "record.json")
+	writeJSON(t, preBindingPath, preBinding)
+	paths = append(paths, preBindingPath)
 	request := helperRequest{
 		Protocol: wxgfqual.VisualReviewHelperProtocol, Action: "evaluate_matrix",
 		RecordRoot: root, RecordPaths: paths, ReportedDecoder: wxgfqual.VisualReviewDecoder,
@@ -216,7 +238,7 @@ func TestEvaluateMatrixReturnsOnlySanitizedCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	if response.Matrix == nil || response.Matrix.Status != "pass" || response.Matrix.DistinctWXGFSamples != 4 ||
-		response.Matrix.LegacyRecordsExcluded != 1 {
+		response.Matrix.PreBindingRecordsExcluded != 1 {
 		t.Fatalf("视觉复审矩阵 helper 结果异常：%+v", response)
 	}
 	for _, private := range []string{"wechat:private:one", helperRecord("4.1.12.55", "medium", "one").WXGFSHA256} {
@@ -231,12 +253,23 @@ func TestEvaluateMatrixReturnsOnlySanitizedCoverage(t *testing.T) {
 		t.Fatal("视觉复审矩阵 helper 接受了重复记录路径")
 	}
 
-	legacy.ReviewStatus = "not_confirmed"
-	writeJSON(t, legacyPath, legacy)
+	for _, forbiddenValue := range []any{helperSHA([]byte("forbidden-host-binding")), nil} {
+		preBinding["provider_sha256"] = forbiddenValue
+		writeJSON(t, preBindingPath, preBinding)
+		request.RecordPaths = paths
+		payload, _ = json.Marshal(request)
+		if err := run(bytes.NewReader(payload), &bytes.Buffer{}); err == nil {
+			t.Fatal("视觉复审矩阵 helper 把含宿主绑定字段的记录误判为 pre-binding")
+		}
+	}
+
+	delete(preBinding, "provider_sha256")
+	preBinding["review_status"] = "not_confirmed"
+	writeJSON(t, preBindingPath, preBinding)
 	request.RecordPaths = paths
 	payload, _ = json.Marshal(request)
 	if err := run(bytes.NewReader(payload), &bytes.Buffer{}); err == nil {
-		t.Fatal("视觉复审矩阵 helper 把无效 v1 标记计入 legacy_records_excluded")
+		t.Fatal("视觉复审矩阵 helper 把无效早期记录计入 pre_binding_records_excluded")
 	}
 }
 

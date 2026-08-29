@@ -16,12 +16,11 @@ import (
 )
 
 const (
-	VisualReviewCaptureProtocol      = "v-local-cli/wxgf-visual-review-capture/v2"
-	VisualReviewRecordProtocol       = "v-local-cli/wxgf-visual-review-record/v2"
-	VisualReviewLegacyRecordProtocol = "v-local-cli/wxgf-visual-review-record/v1"
-	VisualReviewMatrixProtocol       = "v-local-cli/wxgf-visual-review-matrix/v2"
-	VisualReviewHelperProtocol       = "v-local-cli/wxgf-visual-review-helper/v2"
-	VisualReviewDecoder              = "ffmpeg"
+	VisualReviewCaptureProtocol = "v-local-cli/wxgf-visual-review-capture/v1"
+	VisualReviewRecordProtocol  = "v-local-cli/wxgf-visual-review-record/v1"
+	VisualReviewMatrixProtocol  = "v-local-cli/wxgf-visual-review-matrix/v1"
+	VisualReviewHelperProtocol  = "v-local-cli/wxgf-visual-review-helper/v1"
+	VisualReviewDecoder         = "ffmpeg"
 
 	VisualReviewQualityTierBasis            = "hardlink_cache_filename_variant_not_source_quality"
 	VisualReviewSourceOriginalQualityStatus = "unknown"
@@ -65,6 +64,8 @@ type VisualReviewCapture struct {
 	ProviderSHA256                   string                      `json:"provider_sha256"`
 	ProviderSourceStatus             string                      `json:"provider_source_status"`
 	DecoderSourceStatus              string                      `json:"decoder_source_status"`
+	ProviderSignatureStatus          string                      `json:"provider_signature_status"`
+	DecoderSignatureStatus           string                      `json:"decoder_signature_status"`
 	DecoderDistributionLicenseStatus string                      `json:"decoder_distribution_license_status"`
 	ProviderBinaryTrustStatus        string                      `json:"provider_binary_trust_status"`
 	Samples                          []VisualReviewCaptureSample `json:"samples"`
@@ -104,6 +105,8 @@ type VisualReviewRecord struct {
 	ProviderSHA256                   string `json:"provider_sha256"`
 	ProviderSourceStatus             string `json:"provider_source_status"`
 	DecoderSourceStatus              string `json:"decoder_source_status"`
+	ProviderSignatureStatus          string `json:"provider_signature_status"`
+	DecoderSignatureStatus           string `json:"decoder_signature_status"`
 	DecoderDistributionLicenseStatus string `json:"decoder_distribution_license_status"`
 	ProviderBinaryTrustStatus        string `json:"provider_binary_trust_status"`
 	QualityTier                      string `json:"quality_tier"`
@@ -141,6 +144,8 @@ type VisualReviewMatrix struct {
 	ProviderSHA256                                  string         `json:"provider_sha256"`
 	ProviderSourceStatus                            string         `json:"provider_source_status"`
 	DecoderSourceStatus                             string         `json:"decoder_source_status"`
+	ProviderSignatureStatus                         string         `json:"provider_signature_status"`
+	DecoderSignatureStatus                          string         `json:"decoder_signature_status"`
 	DecoderDistributionLicenseStatus                string         `json:"decoder_distribution_license_status"`
 	ProviderBinaryTrustStatus                       string         `json:"provider_binary_trust_status"`
 	VersionCoverageBasis                            string         `json:"version_coverage_basis"`
@@ -153,7 +158,7 @@ type VisualReviewMatrix struct {
 	InstalledReviewVersionsWithRequiredTierCoverage int            `json:"installed_review_versions_with_required_tier_coverage"`
 	RequiredTiers                                   []string       `json:"required_tiers"`
 	ObservedTierCounts                              map[string]int `json:"observed_tier_counts"`
-	LegacyRecordsExcluded                           int            `json:"legacy_records_excluded"`
+	PreBindingRecordsExcluded                       int            `json:"pre_binding_records_excluded"`
 	OtherBinaryIdentityRecordsExcluded              int            `json:"other_binary_identity_records_excluded"`
 	Blockers                                        []string       `json:"blockers"`
 	ContainsEvidenceIDs                             bool           `json:"contains_evidence_ids"`
@@ -338,6 +343,7 @@ func ValidateVisualReviewCapture(value VisualReviewCapture) error {
 		value.ProviderIdentityManifestProtocol != ProviderIdentityManifestProtocol ||
 		!validReviewSHA256(value.ProviderIdentityManifestSHA256) || !validReviewSHA256(value.ProviderSHA256) ||
 		value.ProviderSourceStatus != ProviderSourceStatus || value.DecoderSourceStatus != DecoderSourceStatus ||
+		value.ProviderSignatureStatus != ProviderSignatureStatus || value.DecoderSignatureStatus != DecoderSignatureStatus ||
 		value.DecoderDistributionLicenseStatus != DecoderDistributionLicenseStatus ||
 		value.ProviderBinaryTrustStatus != VisualReviewProviderBinaryTrustStatus ||
 		len(value.Samples) == 0 || len(value.Samples) > 5 {
@@ -374,6 +380,7 @@ func validateVisualReviewRecord(value VisualReviewRecord) error {
 		value.ProviderIdentityManifestProtocol != ProviderIdentityManifestProtocol ||
 		!validReviewSHA256(value.ProviderIdentityManifestSHA256) || !validReviewSHA256(value.ProviderSHA256) ||
 		value.ProviderSourceStatus != ProviderSourceStatus || value.DecoderSourceStatus != DecoderSourceStatus ||
+		value.ProviderSignatureStatus != ProviderSignatureStatus || value.DecoderSignatureStatus != DecoderSignatureStatus ||
 		value.DecoderDistributionLicenseStatus != DecoderDistributionLicenseStatus ||
 		value.ProviderBinaryTrustStatus != VisualReviewProviderBinaryTrustStatus ||
 		!validLowerHex(value.RunNonce, 16) || !validReviewTime(value.ReviewedAtUTC) ||
@@ -420,6 +427,8 @@ func EvaluateVisualReviewMatrix(records []VisualReviewRecord, target VisualRevie
 		ProviderSHA256:                   target.ProviderSHA256,
 		ProviderSourceStatus:             ProviderSourceStatus,
 		DecoderSourceStatus:              DecoderSourceStatus,
+		ProviderSignatureStatus:          ProviderSignatureStatus,
+		DecoderSignatureStatus:           DecoderSignatureStatus,
 		DecoderDistributionLicenseStatus: DecoderDistributionLicenseStatus,
 		ProviderBinaryTrustStatus:        VisualReviewProviderBinaryTrustStatus,
 		VersionCoverageBasis:             VisualReviewVersionCoverageBasis,

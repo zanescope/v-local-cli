@@ -287,6 +287,8 @@ func TestRealWXGFQualificationFromSnapshot(t *testing.T) {
 		ProviderIdentityManifestProtocol: wxgfqual.ProviderIdentityManifestProtocol,
 		ProviderSourceStatus:             wxgfqual.ProviderSourceStatus,
 		DecoderSourceStatus:              wxgfqual.DecoderSourceStatus,
+		ProviderSignatureStatus:          wxgfqual.ProviderSignatureStatus,
+		DecoderSignatureStatus:           wxgfqual.DecoderSignatureStatus,
 		DecoderDistributionLicenseStatus: wxgfqual.DecoderDistributionLicenseStatus,
 		ProviderBinaryTrustStatus:        wxgfqual.VisualReviewProviderBinaryTrustStatus,
 		PrivateOnly:                      true, ContainsEvidenceIDs: true, ContainsContentDigests: true,

@@ -80,6 +80,8 @@ func visualReviewRecord(version, tier, suffix string) VisualReviewRecord {
 		ProviderSHA256:                   lowercaseSHA256([]byte("provider-build")),
 		ProviderSourceStatus:             ProviderSourceStatus,
 		DecoderSourceStatus:              DecoderSourceStatus,
+		ProviderSignatureStatus:          ProviderSignatureStatus,
+		DecoderSignatureStatus:           DecoderSignatureStatus,
 		DecoderDistributionLicenseStatus: DecoderDistributionLicenseStatus,
 		ProviderBinaryTrustStatus:        VisualReviewProviderBinaryTrustStatus,
 		QualityTier:                      tier, QualityTierBasis: VisualReviewQualityTierBasis,
@@ -116,7 +118,8 @@ func TestEvaluateVisualReviewMatrixRequiresTwoVersionTierGrid(t *testing.T) {
 		result.DistinctInstalledReviewVersions != 2 || result.InstalledReviewVersionsWithRequiredTierCoverage != 2 ||
 		len(result.Blockers) != 0 || result.FixedDimensionQualityGate || result.ProductionReady ||
 		result.ContainsEvidenceIDs || result.ContainsImageContentDigests ||
-		result.VersionCoverageBasis != VisualReviewVersionCoverageBasis || result.TierCoverageBasis != VisualReviewQualityTierBasis {
+		result.VersionCoverageBasis != VisualReviewVersionCoverageBasis || result.TierCoverageBasis != VisualReviewQualityTierBasis ||
+		result.ProviderSignatureStatus != ProviderSignatureStatus || result.DecoderSignatureStatus != DecoderSignatureStatus {
 		t.Fatalf("完整视觉复审矩阵没有通过：%+v", result)
 	}
 	payload, err := json.Marshal(result)
@@ -149,6 +152,11 @@ func TestEvaluateVisualReviewMatrixRejectsDuplicateGamingAndConflicts(t *testing
 	incomplete.CropConfirmed = false
 	if _, err := EvaluateVisualReviewMatrix([]VisualReviewRecord{incomplete}, visualReviewTarget(first)); err == nil {
 		t.Fatal("缺少裁剪确认的人工记录被接受")
+	}
+	overstated := first
+	overstated.DecoderSignatureStatus = "qualified"
+	if _, err := EvaluateVisualReviewMatrix([]VisualReviewRecord{overstated}, visualReviewTarget(first)); err == nil {
+		t.Fatal("人工记录自行升级了解码器签名资格")
 	}
 }
 
