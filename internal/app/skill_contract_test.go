@@ -196,8 +196,22 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 	}
 	if definition["quality_claim_scope"] != "wechat_cache_variant_only" ||
 		definition["source_original_dimensions_known"] != false ||
+		definition["source_original_quality_status"] != "unknown" ||
 		definition["dimensions_role"] != "decoded_output_observation_not_quality_gate" {
 		t.Fatalf("聊天图片质量声明超出可用证据：%v", definition)
+	}
+	recoverDefinition := schemaCommands(t)["recover-chat-image"].(map[string]any)
+	if recoverDefinition["network_default"] != false || recoverDefinition["network_authorization"] != "structured_one_time_challenge" ||
+		recoverDefinition["account_lock"] != true || recoverDefinition["account_lock_scope"] != "entire_offline_preflight_or_authorized_attempt" ||
+		recoverDefinition["authorization_scope"] != "single_account_message_image_candidate_attempt" ||
+		recoverDefinition["authorization_consumed_before_network"] != true || recoverDefinition["network_attempts_per_authorization"] != 1 ||
+		recoverDefinition["automatic_network_retries"] != 0 || recoverDefinition["wechat_ui_automation"] != false ||
+		recoverDefinition["direct_url_source"] != "current_snapshot_descriptor_only" || recoverDefinition["constructed_url_from_opaque_parameter"] != false ||
+		recoverDefinition["allowed_destination"] != "novac2c.cdn.weixin.qq.com" || recoverDefinition["https_required"] != true ||
+		recoverDefinition["redirects"] != false || recoverDefinition["ambient_proxy"] != false || recoverDefinition["external_dns_fallback"] != false ||
+		recoverDefinition["url_stored_in_consent"] != false || recoverDefinition["descriptor_secrets_output"] != false ||
+		recoverDefinition["lower_quality_fallback"] != false || recoverDefinition["source_original_quality_status"] != "unknown" {
+		t.Fatalf("聊天图片结构化联网恢复契约发生漂移：%v", recoverDefinition)
 	}
 
 	root := repositoryRoot(t)
@@ -212,7 +226,13 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 		"远端描述符可能已经过期或资源不可用",
 		"不要循环催促用户",
 		"synthetic_crypto_binding_harness_only",
-		"真实端点被代码禁止",
+		"只有当前快照直接携带",
+		"challenge 的作用域固定为 `single_account_message_image_candidate_attempt`",
+		"先原子消费后联网",
+		"授权聊天 CDN 请求不授权操作微信 UI",
+		"不做 DNSPod 回退",
+		"source_original_quality_status=unknown",
+		"run_recover_chat_image_offline_then_request_structured_consent",
 	} {
 		if !bytes.Contains(skill, []byte(expected)) {
 			t.Errorf("SKILL.md 缺少聊天图片恢复边界：%s", expected)
@@ -247,6 +267,8 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 		"remote_descriptor_parse_status = $RemoteParseStatus",
 		"pass_expected_decoder_unavailable",
 		"quality_claim_scope = 'wechat_cache_variant_only'",
+		"source_original_quality_status = 'unknown'",
+		"run_recover_chat_image_offline_then_request_structured_consent",
 	} {
 		if !strings.Contains(scriptText, expected) {
 			t.Errorf("Windows 图片验收脚本缺少恢复边界：%s", expected)
@@ -254,6 +276,27 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 	}
 	if strings.Contains(scriptText, "--allow-network") {
 		t.Fatal("Windows 图片验收脚本不得启用聊天图片联网")
+	}
+	consentScript, err := os.ReadFile(filepath.Join(root, "scripts", "test-chat-image-recovery-consent.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consentText := string(consentScript)
+	for _, expected := range []string{
+		"structured_one_time_challenge", "single_account_message_image_candidate_attempt",
+		"authorization_consumed_before_network", "automatic_network_retries", "current_snapshot_descriptor_only",
+		"constructed_url_from_opaque_parameter", "novac2c.cdn.weixin.qq.com", "external_dns_fallback",
+		"url_stored_in_consent", "descriptor_secrets_output", "lower_quality_fallback",
+		"source_original_quality_status", "observed_at", "retrieved_at", "authorization_expires_at",
+	} {
+		if !strings.Contains(consentText, expected) {
+			t.Errorf("聊天图片联网授权自检缺少边界：%s", expected)
+		}
+	}
+	for _, forbidden := range []string{"Invoke-WebRequest", "Invoke-RestMethod", "Start-BitsTransfer"} {
+		if strings.Contains(consentText, forbidden) {
+			t.Errorf("聊天图片联网授权 schema 自检不得联网：%s", forbidden)
+		}
 	}
 	for _, forbidden := range []string{"MinImageLongEdge", "MinImageShortEdge", "decodable_high_dimensions_failed", "recovered_high_dimensions_failed"} {
 		if strings.Contains(scriptText, forbidden) {
@@ -337,20 +380,27 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(auditWorkflow, []byte("inspect-windows-chat-cdn-xlog-structure.ps1 -SelfTest")) {
-		t.Fatal("Windows audit gate 未运行聊天 CDN xlog 结构检查器自检")
+	for _, expected := range []string{
+		"inspect-windows-chat-cdn-xlog-structure.ps1 -SelfTest",
+		"test-chat-image-recovery-consent.ps1 -SelfTest",
+		"test-chat-image-recovery-consent.ps1 -Cli",
+	} {
+		if !bytes.Contains(auditWorkflow, []byte(expected)) {
+			t.Errorf("Windows audit gate 未运行聊天图片自检：%s", expected)
+		}
 	}
 	acceptance, err := os.ReadFile(filepath.Join(root, "references", "windows-amd64-local-acceptance.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(acceptance, []byte("../scripts/accept-windows-chat-image-recovery.ps1")) ||
+		!bytes.Contains(acceptance, []byte("../scripts/test-chat-image-recovery-consent.ps1")) ||
 		!bytes.Contains(acceptance, []byte("../scripts/inspect-windows-chat-cdn-static-evidence.ps1")) ||
 		!bytes.Contains(acceptance, []byte("../scripts/inspect-windows-chat-cdn-xlog-structure.ps1")) ||
 		!bytes.Contains(acceptance, []byte("current_client_static_stack_present_unbound")) ||
 		!bytes.Contains(acceptance, []byte("direct_ilink_https_markers=not_observed_in_current_client_binaries")) ||
 		!bytes.Contains(acceptance, []byte("main_to_ilink_wrapper_static_reference=delay_import_observed_unbound")) ||
-		!bytes.Contains(acceptance, []byte("本轮不增加聊天图片 `--allow-network`")) ||
+		!bytes.Contains(acceptance, []byte("仍不增加聊天图片长期 `--allow-network`")) ||
 		!bytes.Contains(acceptance, []byte("encrypted_mars_xlog_private_key_required")) ||
 		!bytes.Contains(acceptance, []byte("退出码 `0`")) || !bytes.Contains(acceptance, []byte("`1` 表示")) ||
 		!bytes.Contains(acceptance, []byte("`2` 表示")) ||
@@ -365,7 +415,7 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"不能把字段值本身当作可直接请求的 HTTPS URL",
-		"不能据此断言桌面聊天描述符可复用",
+		"不能据此断言桌面十六进制描述符可复用",
 		"synthetic_crypto_binding_harness_only",
 		"仅作历史线索",
 		"不能证明 2026 年当前 Windows 桌面端",
@@ -376,12 +426,14 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 		"payload_decoding_performed=false",
 		"CdnCore::start_c2c_download -> CdnCore::_startDownloadMedia -> TaskFactory::CreateC2CImageDownloadTask",
 		"主模块确实 delay-import `ilink_wrapper.dll`",
-		"本轮不实现聊天图片直接 CDN 请求",
-		"当前受支持的自动恢复只有",
-		"描述符年龄、字段存在、HTTP 状态、缓存层级和像素尺寸都不能单独判定时效或质量",
+		"快照自带 full URL 可做单次、响应后验真的恢复",
+		"不透明桌面参数仍不得直连",
+		"描述符年龄、字段存在、HTTP 状态、LongEdge、ShortEdge、文件大小、缓存层级和像素尺寸都不能单独判定时效或原始质量",
 		"任何非 loopback 端点都会在请求前拒绝",
 		"重新取得单次授权",
 		"`429` 只表示限流",
+		"openclaw-weixin",
+		"`full_url`",
 	} {
 		if !bytes.Contains(mediaReference, []byte(expected)) {
 			t.Errorf("聊天 CDN 资格门禁文档缺少边界：%s", expected)

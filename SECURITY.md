@@ -21,7 +21,11 @@ Windows 原生 OCR 只从系统 Known Folder API 返回的 Program Files 根发�
 
 ## 隐私边界
 
-CLI 不上传遥测。普通查询和刷新不联网。只有用户对具体朋友圈媒体显式传入 `--allow-network` 时，才会把该记录自带的临时令牌发给它绑定的受限腾讯 CDN；只有用户对具体公众号文章显式传入 `--allow-network` 时，才会把从本地卡片重新验证并清理后的公开文章标识发送给 `mp.weixin.qq.com`。这两类请求都不使用浏览器 Cookie、不跟随重定向，也不会复用彼此的网络授权。
+CLI 不上传遥测。普通查询、聊天图片本地导出和刷新不联网。朋友圈媒体与公众号文章继续分别要求本次 `--allow-network`，且不会复用彼此的授权。
+
+聊天图片使用更窄的授权模型：`recover-chat-image` 第一次调用只离线检查当前不可变快照并创建五分钟有效的一次性 challenge；它不接受长期 `--allow-network` 开关。challenge 只保存摘要，绑定具体账号、消息、图片候选、generation、snapshot manifest 和输出目标。签发与消费都持有同账号快照事务锁并重新加载当前 state，防止并发 refresh 在检查后更换 generation；拿不到锁时在联网和消费 challenge 前返回 `snapshot_busy`。Agent 必须在用户对这一个 challenge 明确同意后才传入 `--consent`；challenge 在任何联网动作前原子消费，不能重放。该授权只允许向快照直接携带的 `novac2c.cdn.weixin.qq.com` HTTPS full URL 发起一次 GET，不授权操作微信 UI，也不能用于从十六进制桌面参数猜测或拼接 URL。
+
+聊天图片请求不使用环境代理、浏览器 Cookie、外部 DNS 回退或重定向。CLI 在写出前核对响应大小、MIME、完整图片结构、候选描述符摘要、消息绑定以及描述符提供的 MD5 或“长度 + 成对尺寸”。下载和解密缓冲区会清零；落盘临时文件在 Windows 使用只允许当前用户与 LocalSystem 的受保护 DACL，在 Unix 使用 owner-only `0600`。清理失败会显式报错并说明最终输出是否已经提交。URL、鉴权参数和描述符不作为长期信任根；结果分别记录 `observed_at`、`retrieved_at` 和 `descriptor_expiry_known=false`。即使成功，`source_original_quality_status` 仍为 `unknown`。
 
 ## 派生索引、增量游标与查询 daemon
 

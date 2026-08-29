@@ -8,7 +8,7 @@
 
 - `dong_zzc` 是目标联系人的稳定 username，不是本机登录微信账号。所有 `--account` 参数使用 `accounts` 返回的本机账号名或 account ID。
 - CLI 只读取用户本人拥有或已获明确授权的数据，不发送消息、不修改微信数据库、不自动登录、切换账号、重启或结束微信。
-- 基线流程不联网。朋友圈媒体只验收已缓存的本地强绑定候选；`export-moment-media --allow-network` 属独立可选验收，必须再次取得逐项授权。
+- 基线流程不联网。朋友圈媒体只验收已缓存的本地强绑定候选；`export-moment-media --allow-network` 与聊天图片 `recover-chat-image --consent` 都属独立可选验收，必须再次取得逐项授权。聊天图片授权不包含微信 UI 自动化。
 - 历史、收藏和朋友圈都只代表当前不可变 generation 中的本地留存范围。朋友圈的 `complete_remote_history=false` 和 `complete_interaction_history=false` 是正确边界，不是失败。
 - 原始查询 JSON、图片和聊天正文只留在本机私有目录，不进入 CI artifact、Issue、PR、聊天记录或 release evidence。可分享证据只保存版本、摘要、枚举、计数、宽高和布尔断言。
 - 密钥、候选、Credential Manager 内容、数据库正文、绝对微信路径、CDN token 和 Provider 原始响应不得写入验收证据。
@@ -25,7 +25,7 @@
 | W64-05 | 凭据复用 | 新 PowerShell 进程执行 `refresh --require-media`，只用 `saved_keychain`，不访问微信进程、不修改 secret |
 | W64-06 | 联系人绑定 | `resolve-contact` 唯一解析到区分大小写完全一致的 `dong_zzc` |
 | W64-07 | 历史记录 | 明确日期窗内达到预置最小条数，chat 精确为 `dong_zzc`，数据库 coverage complete，已知收发方向和图片消息存在 |
-| W64-08 | 聊天图片恢复矩阵 | 从历史消息的 `image_evidence_id` 导出；覆盖可解码较低层级但更高层级缺失、可解码 high、本地 WXGF 强候选、远端描述符时效未知四类；只在用户确认后自动 refresh，并对每个确认的 evidence 最多重试一次 |
+| W64-08 | 聊天图片恢复矩阵 | 从历史消息的 `image_evidence_id` 导出；覆盖本地较低层级、可解码 high、本地 WXGF、不透明桌面描述符，以及结构化 full URL 单次授权负向/正向门禁；人工打开原图回退最多 refresh/重试一次，full URL challenge 最多请求一次 |
 | W64-09 | 收藏 | `favorite.db/fav_db_item` source complete；达到预置最小条数，已知类型过滤结果一致 |
 | W64-10 | 朋友圈 | 精确作者、本地行和显式时间窗一致；无 identity conflict/unparsed；已知帖子、互动和本地媒体计数达到预置值 |
 | W64-11 | 朋友圈媒体 | 使用具体 `media.evidence_id` 本地导出，`network_access_performed=false`，容器严格验证成功 |
@@ -237,7 +237,7 @@ pwsh -NoProfile -File .\scripts\inspect-windows-chat-cdn-xlog-structure.ps1 `
 
 省略 `-LogPath` 时只检查当天 `mm_YYYYMMDD.xlog`；显式路径也必须位于当前用户 `Tencent\xwechat\log` 下。退出码 `0` 仅表示帧结构检查完整，不表示已经解码或取得 CDN 资格。`encrypted_mars_xlog_private_key_required` 表示没有未加密帧，官方无密钥脚本不适用；检查器不读取或猜测私钥，不输出正文、路径、嵌入公钥或指纹。无论结果如何，都必须保持 `plaintext_event_binding=not_observed`、`descriptor_to_runtime_request_binding=not_observed` 和 `endpoint_qualification=not_qualified`。该步骤不计入 W64-08 通过，只用于阻止把加密日志误交给过时第三方工具。
 
-2026-08-29 的哈希绑定静态调用链复审进一步观察到 `start_c2c_download -> _startDownloadMedia -> CreateC2CImageDownloadTask`，并要求 task/root/session 类材料；当前主模块没有稳定公开的 C2C 下载导出。系统连接元数据也不能把加密 TLS 请求绑定到某个消息描述符。结论是：本轮不增加聊天图片 `--allow-network`、直连 GET、包捕获观察器或进程注入路线；W64-08 支持并验收的是用户打开指定原图后，Agent 自动 refresh 并对同一 evidence 单次重试。
+2026-08-29 的哈希绑定静态调用链复审进一步观察到 `start_c2c_download -> _startDownloadMedia -> CreateC2CImageDownloadTask`，并要求 task/root/session 类材料；当前主模块没有稳定公开的 C2C 下载导出。系统连接元数据也不能把加密 TLS 请求绑定到某个消息描述符。因此仍不增加聊天图片长期 `--allow-network`、由十六进制参数构造 URL、包捕获观察器或进程注入路线。后续实现只对当前快照已经携带的严格 HTTPS full URL 提供 `recover-chat-image` 一次性 challenge；不透明参数继续使用用户手动打开指定原图后，Agent 自动 refresh 并对同一 evidence 单次重试。
 
 优先使用仓库内的[半自动验收脚本](../scripts/accept-windows-chat-image-recovery.ps1)。脚本要求 PowerShell 7（`pwsh`）；它会先在同一 generation 采集四个初始夹具。WXGF 若返回预期的 `chat_image_unavailable/decoder_unavailable`，失败响应本身也必须带同一 `generation_id` 和 manifest，不能被伪装成导出成功。脚本只对 `lower_tier_missing` 和 `expiry_unknown_descriptor` 各询问一次，并在每次询问前用当前 generation 重新预检该 evidence；用户输入脚本显示的精确确认词后，脚本自动执行一次 `refresh --require-media` 和一次同 evidence 重试。所有恢复结束后，脚本会在最新 generation 上重新探测四个夹具，避免拼接不同快照的结果：
 
@@ -254,7 +254,26 @@ pwsh -NoProfile -File .\scripts\accept-windows-chat-image-recovery.ps1 `
 
 默认私有图片位于 `%LOCALAPPDATA%\v-local\acceptance-private\<run-id>`，脱敏报告位于 `%LOCALAPPDATA%\v-local\acceptance-evidence\<run-id>\w64-08-chat-image-recovery.json`；两个新目录都会移除继承 ACL，只保留当前用户、SYSTEM 和 Administrators。默认控制台结果不显示绝对路径，只有本机操作者明确增加 `-ShowPaths` 才显示。报告不包含账号、evidence ID、图片 SHA-256、微信源路径、CDN URL、token 或 key；私有图片不会自动上传或删除。
 
-退出码 `0` 表示四项与恢复结果全部通过；`1` 表示安全或契约检查失败；`2` 表示用户没有确认、仅使用了 `-RecoveryMode Skip`、较低层级恢复仍未得到可验真的 high 缓存档位，或时效未知描述符夹具实际仍能恢复，因此证据不足。预期的 WXGF 解码错误只有在格式、恢复动作、无网络边界和快照代际全部匹配时才算该夹具通过。`Skip` 只用于无交互诊断，绝不能标为通过。开发者可用 `-SelfTest` 在不读取微信数据的情况下检查脚本内置四状态契约。脚本不会传入或接受聊天图片 `--allow-network`。
+退出码 `0` 表示四项本地/人工回退夹具与恢复结果全部通过；`1` 表示安全或契约检查失败；`2` 表示用户没有确认、仅使用了 `-RecoveryMode Skip`、较低层级恢复仍未得到可验真的 high 缓存档位，或时效未知描述符夹具实际仍能恢复，因此证据不足。预期的 WXGF 解码错误只有在格式、恢复动作、无网络边界和快照代际全部匹配时才算该夹具通过。`Skip` 只用于无交互诊断，绝不能标为通过。开发者可用 `-SelfTest` 在不读取微信数据的情况下检查脚本内置四状态契约。该脚本仍不联网；它不会传入聊天图片 `--allow-network` 或 `--consent`。结构化联网恢复使用下一节的独立门禁，不能把两组证据拼成一次真实请求。
+
+### W64-08R：结构化 full URL 恢复门禁
+
+`recover-chat-image` 的产品契约先由 Go 的 hermetic TLS/注入测试覆盖；真实 CDN 验收只有在当前快照确实包含 full URL 且用户对该条图片明确授权时才可选执行。无 full URL 不是失败，而是 `chat_image_recovery_protocol_unavailable` 的预期安全结果。先运行不读取微信数据、不联网的 [PowerShell schema 自检](../scripts/test-chat-image-recovery-consent.ps1)：
+
+```powershell
+pwsh -NoProfile -File .\scripts\test-chat-image-recovery-consent.ps1 `
+  -Cli 'C:\path\to\v-local-cli.exe'
+```
+
+自动化门禁必须覆盖：未授权零请求、challenge 重放、challenge 过期、snapshot generation/manifest 变化、同账号快照事务锁竞争时在消费 challenge 前停止、候选描述符错配、URL/主机/路径/查询越界、重定向拒绝且无第二请求、超大响应、伪造 MIME、下载中断、CDN 鉴权或资源不可用、明文 MD5/长度/成对尺寸错配、临时文件清理失败，以及只能得到同级或更低缓存候选。成功响应必须同时满足：
+
+- challenge scope 为 `single_account_message_image_candidate_attempt`，只消费一次且只发生一次网络尝试；
+- `observed_at` 来自授权所绑定快照，`retrieved_at` 来自本次已验证响应；
+- `remote_descriptor_status=verified_at_request_time`、`descriptor_expiry_known=false`、`descriptor_expiry_status=unknown_future`；
+- HTTPS、公网目标、零重定向、64 MiB 加一个 AES block 上限、MIME、完整解码和消息/候选绑定全部通过；
+- `quality_claim_scope=wechat_remote_variant_only`、`source_original_dimensions_known=false`、`source_original_quality_status=unknown`；LongEdge、ShortEdge、文件大小和 high/medium 名称均不参与原图证明。
+
+真实请求若返回 `401/403/404/410`，只记录 `unknown_unavailable_at_request_time`，刷新快照并生成新 challenge；不得写成“已确认过期”。`429` 只记录限流，传输失败保持时效未知。`snapshot_busy` 在消费前停止，等待事务完成后可原样重试；一旦 challenge 已消费，后续任何失败都不得复用授权、自动循环、跟随重定向或回退到缩略图声称成功。
 
 WXGF 的实验解码与人工视觉等价复审属于独立的[资格验证流程](wxgf-decoder-qualification.md#人工视觉等价复审)，不改变本节公开 CLI 的预期 `decoder_unavailable` 行为。该流程要求独立参考 PNG、内容/方向/裁剪/颜色四项人工确认、至少 4 个不同 WXGF 与感知指纹、两个复审时安装的微信版本及每版本 `high+medium` 覆盖；缓存档位和像素边长都不代表发送前源图质量。若操作者只查看解码图但跳过参考图，必须记录 `inconclusive/skipped`，不能关闭 W64-08 或任何发布门禁。
 这些资格协议从未发布，最终格式直接收敛为 v1。矩阵只接受同时绑定宿主计算的邻接清单、

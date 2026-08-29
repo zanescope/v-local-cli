@@ -283,6 +283,8 @@ func mainWithPolicy(args []string, stdout, stderr io.Writer, immutableOnly bool)
 		data, err = runExportMedia(args[1:])
 	case "export-chat-image":
 		data, err = runExportChatImage(args[1:])
+	case "recover-chat-image":
+		data, err = runRecoverChatImage(args[1:])
 	case "export-moment-media":
 		data, err = runExportMomentMedia(args[1:])
 	default:
@@ -792,10 +794,14 @@ func runCapabilities(args []string) (any, error) {
 			"local_images": true, "remote_images": []string{"jpeg", "png", "gif"},
 			"remote_video": []string{"mp4"}, "live_photo_video": false, "network_default": false,
 			"chat_image_quality_tiers": true, "chat_remote_descriptor_detection": true,
-			"chat_remote_descriptor_structural_parse": true, "chat_remote_protocol_qualification": "not_qualified",
-			"chat_remote_synthetic_harness_status": "crypto_binding_passed",
-			"chat_remote_synthetic_endpoint_scope": "literal_loopback_tls_only",
-			"chat_remote_real_endpoint_enabled":    false, "chat_remote_acquisition": false,
+			"chat_remote_descriptor_structural_parse": true,
+			"chat_remote_protocol_qualification":      "direct_https_full_url_response_verified_only; opaque_desktop_protocol_not_qualified",
+			"chat_remote_synthetic_harness_status":    "crypto_binding_passed",
+			"chat_remote_synthetic_endpoint_scope":    "literal_loopback_tls_only",
+			"chat_remote_real_endpoint_enabled":       true, "chat_remote_acquisition": "snapshot_direct_https_full_url_only",
+			"chat_remote_live_cdn_evidence_embedded":   false,
+			"chat_remote_production_readiness":         "requires_current_snapshot_full_url_and_user_authorized_live_acceptance",
+			"chat_remote_opaque_parameter_acquisition": false, "chat_remote_structured_consent_challenge": true,
 		},
 		"voice": map[string]any{
 			"preferred_source": "wechat_existing_index", "silk_decoder_bundled": true, "fallback_asr_engine": "optional_whisper_cpp_or_v-local-cli-asr_provider", "network": false,
@@ -1263,8 +1269,8 @@ func acquireSnapshotTransaction(accountID string) (*state.AccountLock, error) {
 	lock, err := state.AcquireAccountLock(accountID)
 	if errors.Is(err, state.ErrAccountBusy) {
 		return nil, &commandError{
-			typeName: "snapshot_busy", message: "该账号已有 setup 或 refresh 正在运行",
-			hint: "等待当前快照事务完成后重试；不要并发启动多个刷新。", code: 5,
+			typeName: "snapshot_busy", message: "该账号已有 setup、refresh 或其他快照绑定事务正在运行",
+			hint: "等待当前事务完成后重试；不要并发刷新或恢复同一账号。", code: 5,
 		}
 	}
 	if err != nil {
@@ -2209,6 +2215,8 @@ func runExportMedia(args []string) (any, error) {
 
 func chatImageRemoteAcquisitionStatus(descriptorStatus, protocolStatus string) string {
 	switch {
+	case descriptorStatus == "present_expiry_unknown" && protocolStatus == "direct_https_descriptor_response_unverified":
+		return "inspect_via_recover_chat_image_with_single_attempt_consent"
 	case descriptorStatus == "present_expiry_unknown" && protocolStatus == "unverified_desktop_protocol":
 		return "unavailable_unverified_protocol"
 	case descriptorStatus == "missing":
@@ -2229,6 +2237,15 @@ func chatImageRecoveryAction(kind string) string {
 	default:
 		return "manual_review"
 	}
+}
+
+func chatImageRecoveryActionWithRemote(localAction, localStatus, remoteProtocolStatus string) string {
+	if remoteProtocolStatus == "direct_https_descriptor_response_unverified" &&
+		(localAction == "ask_user_to_open_original_then_refresh_and_retry" || localStatus == "local_mapping_unavailable" ||
+			localStatus == "resource_descriptor_unavailable") {
+		return "run_recover_chat_image_offline_then_request_structured_consent"
+	}
+	return localAction
 }
 
 func chatImageCommandError(err error) error {
@@ -2253,9 +2270,12 @@ func chatImageCommandError(err error) error {
 	case "resource_descriptor_unavailable", "local_mapping_unavailable":
 		hint = "当前快照缺少一致的消息资源或 hardlink 证据；刷新快照后重新取得 image_evidence_id。"
 	}
+	recoveryAction := chatImageRecoveryActionWithRemote(
+		chatImageRecoveryAction(resolutionErr.Kind), resolutionErr.Kind, resolutionErr.RemoteProtocolStatus,
+	)
 	details := map[string]any{
 		"reason": resolutionErr.Error(), "local_resolution_status": resolutionErr.Kind,
-		"recovery_action":                chatImageRecoveryAction(resolutionErr.Kind),
+		"recovery_action":                recoveryAction,
 		"remote_descriptor_status":       resolutionErr.RemoteDescriptorStatus,
 		"remote_descriptor_parse_status": resolutionErr.RemoteDescriptorParseStatus,
 		"remote_protocol_status":         resolutionErr.RemoteProtocolStatus,
@@ -2271,6 +2291,7 @@ func chatImageCommandError(err error) error {
 		details["quality_claim_scope"] = "wechat_cache_variant_only"
 		details["source_original_dimensions_known"] = false
 	}
+	details["source_original_quality_status"] = "unknown"
 	if len(resolutionErr.RemoteDescriptorTiers) > 0 {
 		details["remote_descriptor_tiers"] = resolutionErr.RemoteDescriptorTiers
 	}
@@ -2336,9 +2357,10 @@ func runExportChatImage(args []string) (any, error) {
 		"source": "verified_local_chat_image", "resolution_status": image.ResolutionStatus,
 		"quality_tier": image.QualityTier, "quality_basis": image.QualityBasis,
 		"quality_claim_scope": "wechat_cache_variant_only", "source_original_dimensions_known": false,
+		"source_original_quality_status": "unknown",
 		"dimensions_role":                "decoded_output_observation_not_quality_gate",
 		"higher_quality_local_status":    image.HigherQualityLocalStatus,
-		"higher_quality_recovery_action": image.HigherQualityRecoveryAction,
+		"higher_quality_recovery_action": chatImageRecoveryActionWithRemote(image.HigherQualityRecoveryAction, image.HigherQualityLocalStatus, image.RemoteProtocolStatus),
 		"remote_descriptor_status":       image.RemoteDescriptorStatus,
 		"remote_descriptor_parse_status": image.RemoteDescriptorParseStatus,
 		"remote_protocol_status":         image.RemoteProtocolStatus,
@@ -2801,15 +2823,16 @@ func commandSchemas() map[string]any {
 			"writes_output": true, "output_exists_default": "reject", "evidence_binding": "message_resource_stem+hardlink_map", "container_validation": "full_decode",
 			"quality_tiers": []string{"high", "medium", "thumbnail", "unknown"}, "quality_basis": "hardlink_cache_filename_variant",
 			"quality_claim_scope": "wechat_cache_variant_only", "source_original_dimensions_known": false,
+			"source_original_quality_status":   "unknown",
 			"dimensions_role":                  "decoded_output_observation_not_quality_gate",
 			"higher_quality_local_statuses":    []string{"not_applicable", "missing", "decoder_unavailable", "validation_failed", "unknown"},
-			"higher_quality_recovery_actions":  []string{"none", "ask_user_to_open_original_then_refresh_and_retry", "do_not_request_redownload_same_candidate", "inspect_key_or_format_before_retry", "manual_review"},
+			"higher_quality_recovery_actions":  []string{"none", "run_recover_chat_image_offline_then_request_structured_consent", "ask_user_to_open_original_then_refresh_and_retry", "do_not_request_redownload_same_candidate", "inspect_key_or_format_before_retry", "manual_review"},
 			"local_resolution_statuses":        []string{"verified_local", "evidence_unavailable", "resource_descriptor_unavailable", "local_mapping_unavailable", "local_file_missing", "decoder_unavailable", "local_validation_failed", "content_conflict"},
-			"failure_recovery_actions":         []string{"ask_user_to_open_original_then_refresh_and_retry", "do_not_request_redownload_same_candidate", "inspect_key_or_format_before_retry", "manual_review"},
+			"failure_recovery_actions":         []string{"run_recover_chat_image_offline_then_request_structured_consent", "ask_user_to_open_original_then_refresh_and_retry", "do_not_request_redownload_same_candidate", "inspect_key_or_format_before_retry", "manual_review"},
 			"remote_descriptor_statuses":       []string{"present_expiry_unknown", "missing", "unknown"},
 			"remote_descriptor_parse_statuses": []string{"parsed_unverified_protocol", "parsed_partial_unverified_protocol", "present_incomplete", "present_invalid", "not_applicable", "not_evaluated"},
-			"remote_protocol_statuses":         []string{"unverified_desktop_protocol", "not_applicable", "not_evaluated"},
-			"remote_acquisition_statuses":      []string{"unavailable_unverified_protocol", "not_available_no_descriptor", "not_evaluated"},
+			"remote_protocol_statuses":         []string{"direct_https_descriptor_response_unverified", "unverified_desktop_protocol", "not_applicable", "not_evaluated"},
+			"remote_acquisition_statuses":      []string{"inspect_via_recover_chat_image_with_single_attempt_consent", "unavailable_unverified_protocol", "not_available_no_descriptor", "not_evaluated"},
 			"remote_descriptor_expiry":         "unknown_without_verified_request; may_already_be_expired",
 			"remote_protocol_qualification":    "not_qualified",
 			"remote_synthetic_harness_status":  "crypto_binding_passed",
@@ -2823,6 +2846,29 @@ func commandSchemas() map[string]any {
 				"network": false, "still_missing_outcome": "stop_and_report_remote_may_be_expired_or_unavailable",
 			},
 			"remote_acquisition_implemented": false, "network": false, "secrets_in_output": false,
+		},
+		"recover-chat-image": map[string]any{
+			"usage":         "v-local-cli recover-chat-image --output FILE [--account NAME] [--consent CHALLENGE] <image_evidence_id>",
+			"writes_output": true, "output_exists_default": "reject", "force_supported": false,
+			"local_first_inspection": true, "network_default": false, "account_lock": true,
+			"account_lock_scope":    "entire_offline_preflight_or_authorized_attempt",
+			"network_authorization": "structured_one_time_challenge", "authorization_option": "consent",
+			"authorization_scope": "single_account_message_image_candidate_attempt", "authorization_ttl_seconds": 300,
+			"authorization_replay_protected":        true,
+			"authorization_consumed_before_network": true,
+			"authorization_bindings":                []string{"account_id", "image_evidence_id", "message_binding_sha256", "generation_id", "snapshot_manifest_sha256", "local_quality_tier", "candidate_descriptor_sha256", "output_path_sha256"},
+			"network_attempts_per_authorization":    1, "automatic_network_retries": 0, "network_method": "GET", "wechat_ui_automation": false,
+			"direct_url_source": "current_snapshot_descriptor_only", "constructed_url_from_opaque_parameter": false,
+			"allowed_destination": "novac2c.cdn.weixin.qq.com", "https_required": true, "redirects": false,
+			"ambient_proxy": false, "cookies": false, "external_dns_fallback": false, "maximum_response_bytes": 67108880,
+			"url_stored_in_consent": false, "descriptor_secrets_output": false, "lower_quality_fallback": false,
+			"response_validation":            []string{"mime", "full_image_decode", "descriptor_md5_or_size_plus_dimensions", "message_binding", "candidate_descriptor_fingerprint"},
+			"source_original_quality_status": "unknown", "descriptor_expiry_default": "unknown_without_verified_request",
+			"time_fields":                    []string{"observed_at", "retrieved_at", "authorization_expires_at"},
+			"temporary_file_permissions":     "current_user_and_local_system_only_on_windows;0600_owner_only_on_unix",
+			"cleanup_failure_is_error":       true,
+			"opaque_desktop_protocol_status": "unavailable_unverified_desktop_protocol",
+			"opaque_desktop_fallback":        "manual_open_original_then_agent_refresh_and_retry_once",
 		},
 		"export-moment-media": map[string]any{
 			"usage":                 "v-local-cli export-moment-media --output FILE [--account NAME] [--fresh] [--allow-network] [--force] <media_evidence_id>",
@@ -2884,7 +2930,7 @@ func writeHelp(writer io.Writer) {
 		"history", "search", "voice-status", "voice-transcribe", "voice-search", "ocr-status", "ocr-file",
 		"ocr-recognize", "ocr-read", "ocr-search", "stats", "moments-contacts", "moments", "moments-search",
 		"official-accounts", "official-history", "official-search", "official-article", "export", "export-media",
-		"export-chat-image", "export-moment-media", "schema",
+		"export-chat-image", "recover-chat-image", "export-moment-media", "schema",
 	}
 	commands := commandSchemas()
 	for _, name := range order {

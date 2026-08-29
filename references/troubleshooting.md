@@ -42,7 +42,7 @@
 | `key_provider_unsupported` | 当前版本/架构/指纹无受支持 route；不要自动降级微信或扩大扫描范围。 |
 | `refresh_credentials_unavailable` | 在最初 setup 的同一桌面用户身份下重试；仍不可用时用 `--storage keychain` 重新 setup。 |
 | `refresh_account_unavailable` | 运行 `v-local-cli accounts` 检查原账号目录；重新登录微信或打开新消息后重试，不要自动改用同名账号。 |
-| `snapshot_busy` | 等待同账号当前 setup/refresh 结束后重试；操作系统会在进程退出时释放锁状态，不要删除锁文件。 |
+| `snapshot_busy` | 等待同账号当前 setup、refresh 或聊天图片恢复等快照绑定事务结束后重试；操作系统会在进程退出时释放锁状态，不要删除锁文件。聊天图片 challenge 尚未消费时可在事务结束后原样重试。 |
 | `snapshot_coverage_regression` | 当前快照未被替换。稍后重试；若源数据库确已删除且明确接受范围缩小，再重新 setup 并增加 `--allow-coverage-regression`。 |
 | `fresh_failed` | 本次查询没有取得新快照；先单独运行 `refresh` 并按其错误恢复，不要把旧结果称为最新数据。 |
 | `state_recovery_failed`、`state_commit_failed` | 上一代仍应保留。先运行 `v-local-cli doctor`，不要直接修改状态文件；需要交给维护者时使用 `doctor --bundle FILE`。只有用户确认放弃现有 v-local-cli 数据时才走 `forget --dry-run` 与确认删除流程。 |
@@ -63,7 +63,24 @@
 | `ocr_text_not_cached` | 微信兼容索引和 v-local-cli 私有缓存都没有该图片文字；对具体 `image_evidence_id` 运行 `ocr-recognize`，取得本次私有 IPC 明确授权后再增加 `--allow-private-ipc`。不要把零结果解释为图片没有文字。 |
 | `image_evidence_unavailable` | 重新从当前快照的 `history` 取得 `kind=image` 的 `evidence_id`，不要按文件名或时间猜测。 |
 | `ocr_input_invalid` | 只选择 64 MiB 内、结构验证通过的普通 JPEG、PNG 或 GIF 文件；不要改扩展名绕过。 |
-| `chat_image_unavailable` | 失败先看 `details.local_resolution_status`：`local_file_missing` 才在微信打开该图片并运行 `refresh --require-media`；`decoder_unavailable` 表示 WXGF 等强关联候选已存在但本构建缺少已验收解码器，错误响应在账号已解析后仍应带 `meta.generation_id`/manifest，不能伪装成成功图片；`local_validation_failed` 检查图片密钥与容器；`content_conflict`、`resource_descriptor_unavailable`、`local_mapping_unavailable` 都要停止猜测并重新取证。若 `medium|thumbnail` 已成功，应改看 `higher_quality_local_status` 与 `higher_quality_recovery_action`：只有 `missing` / `ask_user_to_open_original_then_refresh_and_retry` 才询问用户；确认后用新私有输出路径自动 refresh，并对同一 evidence 最多重试一次，仍缺失就停止。`decoder_unavailable` / `do_not_request_redownload_same_candidate` 不要要求重复点开。`remote_descriptor_parse_status=parsed_unverified_protocol` 只代表本地结构检查通过；`remote_descriptor_status=present_expiry_unknown` 仍不代表当前可下载。真实端点被禁用，聊天远端协议尚未验收且不会联网。 |
+| `chat_image_unavailable` | 失败先看 `details.local_resolution_status` 与结构化恢复动作：`run_recover_chat_image_offline_then_request_structured_consent` 表示先运行不带 `--consent` 的离线预检，只有返回 challenge 才询问联网授权；只有 `ask_user_to_open_original_then_refresh_and_retry` 才请用户在微信打开该图片并运行 `refresh --require-media`。`decoder_unavailable` 表示 WXGF 等强关联候选已存在但本构建缺少已验收解码器，错误响应在账号已解析后仍应带 `meta.generation_id`/manifest，不能伪装成成功图片；`local_validation_failed` 检查图片密钥与容器；`content_conflict` 要停止猜测并重新取证。若 `medium|thumbnail` 已成功，应改看 `higher_quality_local_status` 与 `higher_quality_recovery_action`。所有结果都必须保持 `source_original_quality_status=unknown`；high/medium、边长和文件大小不能证明原图。 |
+| `chat_image_recovery_network_authorization_required` | 命令仍未联网。向用户说明 `consent_challenge` 中的账号、消息、候选、generation、目标域名、`observed_at`、五分钟到期时间和单次 GET；此时 `descriptor_expiry_status=unknown_without_verified_request`。只在用户对本次 challenge 明确同意后增加 `--consent <id>`。该授权不包含微信 UI 自动化。 |
+| `chat_image_recovery_consent_replayed`、`chat_image_recovery_consent_expired`、`chat_image_recovery_consent_not_found`、`chat_image_recovery_consent_invalid` | challenge 已使用、过期、缺失或损坏；不得复用。重新运行不带 `--consent` 的预检，并取得新的明确授权。 |
+| `chat_image_recovery_consent_scope_mismatch`、`chat_image_recovery_snapshot_changed`、`chat_image_recovery_descriptor_changed` | 账号、消息、图片、输出目标、generation、manifest 或候选描述符不再与授权一致；CLI 已在联网前停止并消费旧 challenge。基于当前快照重新预检和授权。 |
+| `chat_image_recovery_consent_issue_failed`、`chat_image_recovery_consent_state_failed` | 无法安全创建或原子消费账号私有 challenge；检查私有状态目录权限和重解析点，不要把 challenge 改存到项目目录或手工编辑。 |
+| `chat_image_recovery_protocol_unavailable` | 当前只有十六进制不透明桌面参数，不能拼接 iLink URL。若 `recovery_action=ask_user_to_open_original_then_refresh_and_retry_once`，请用户手动打开这一张原图；确认后 Agent 只 refresh 并重试一次。CLI 不自动操作微信 UI。 |
+| `chat_image_recovery_descriptor_unavailable`、`chat_image_recovery_no_higher_variant`、`chat_image_recovery_local_quality_unknown` | 当前没有可安全尝试的更高缓存层级 full URL、只有同级/更低候选，或本地层级未知。停止联网恢复；刷新快照或人工复核，不能把低层级缓存、LongEdge/ShortEdge 或文件大小升级成成功。 |
+| `chat_image_recovery_evidence_unavailable`、`chat_image_remote_candidate_unavailable`、`chat_image_remote_descriptor_binding_insufficient` | 当前 generation 中消息不存在、授权候选已不可用，或描述符缺少 MD5 /“长度 + 成对尺寸”绑定材料。CLI 不联网；刷新快照并重新取得 evidence，不能放宽消息归属校验。 |
+| `chat_image_remote_url_rejected` | 当前快照中的 full URL 不再满足精确 HTTPS 主机、路径和唯一查询参数策略。CLI 不联网，不接受用户手工替换 URL；刷新快照重新预检。 |
+| `chat_image_remote_authorization_rejected`、`chat_image_remote_resource_unavailable` | URL 或鉴权参数可能已经失效，但 `401/403/404/410` 只证明本次不可用，`descriptor_expiry_known` 仍为 false。刷新快照取得新描述符，生成新 challenge 并重新授权。 |
+| `chat_image_remote_redirect_rejected`、`chat_image_remote_non_public_address`、`chat_image_remote_synthetic_proxy_address`、`chat_image_remote_invalid_address` | 保持拒绝；CLI 不跟随重定向，也不把鉴权参数发送到非公网、代理 fake-IP 或越界目标。不要改用通用下载器。 |
+| `chat_image_remote_dns_failed`、`chat_image_remote_connection_failed`、`chat_image_remote_request_failed`、`chat_image_remote_request_build_failed`、`chat_image_remote_response_read_failed` | DNS、连接、请求构造或响应读取失败；描述符时效未知且授权已消费。不得无限重试；重新预检并取得新的单次授权。聊天图片不会使用外部 DNS 回退。 |
+| `chat_image_remote_direct_dns_failed`、`chat_image_remote_direct_dns_transport_failed` | 聊天图片生产下载器没有外部 DNS fallback，正常路径不会产生这两个兼容分类；若观察到，停止并检查构建/契约漂移，不能据此启用 DNSPod 或代理。 |
+| `chat_image_remote_rate_limited`、`chat_image_remote_http_status` | `429` 只表示限流，其他 HTTP 错误也不能证明过期。稍后重新生成 challenge 并授权，不要并发或循环请求。 |
+| `chat_image_remote_response_size_invalid`、`chat_image_remote_mime_invalid`、`chat_image_remote_mime_mismatch`、`chat_image_remote_decrypt_failed`、`chat_image_remote_container_invalid` | 响应为空、超限、MIME 伪造、解密失败或不是完整图片；不生成输出，也不回退到缩略图声称成功。 |
+| `chat_image_remote_descriptor_size_mismatch`、`chat_image_remote_descriptor_dimensions_mismatch`、`chat_image_remote_descriptor_md5_mismatch`、`chat_image_remote_descriptor_mismatch`、`chat_image_remote_message_binding_mismatch`、`chat_image_recovery_download_binding_mismatch` | 下载内容、当前消息或候选描述符与授权不一致；视为 `response_unverified` 或请求前绑定变化，清理数据并停止。重新取证，不要降低绑定要求。 |
+| `chat_image_recovery_temporary_cleanup_failed` | 私有明文临时文件未可靠删除；立即停止其他恢复，查看 `details.output_committed` 判断最终输出是否已发布，并人工清理同目录的 `.v-local-cli-output-*.tmp`。 |
+| `chat_image_recovery_output_failed`、`chat_image_recovery_failed` | 没有安全发布可信输出；授权已经消费。修复输出目录或运行 `doctor`，然后生成新 challenge，不要复用旧授权。 |
 | `ocr_temporary_cleanup_failed` | OCR 已返回但临时明文图片未能删除；停止处理其他图片并运行 `doctor` 检查账号私有临时目录。 |
 | `wechat_native_ocr_authorization_required` | 说明这次会启动已安装微信的私有 OCR 子进程、能力与微信版本耦合；只在用户对这一个本地图片明确同意后增加 `--allow-private-ipc`。 |
 | `wechat_native_ocr_unavailable` | 用 `ocr-status` 检查平台和已安装微信组件；该实验后端只支持 Windows amd64。不要从非微信安装目录下载或补齐 DLL/模型。 |
@@ -106,6 +123,8 @@
 | `daemon_request_failed` | 请求未通过 token、协议、大小、deadline 或 immutable 查询白名单；先直接运行同一只读查询定位参数，不要放宽 daemon 权限。 |
 | `daemon_serve_failed` | 检查当前用户私有状态目录与 loopback 监听能力；不要改为公网或局域网地址。 |
 | `internal_error` | 停止扩大操作范围，生成脱敏诊断包交给维护者；不要自动归因于数据库损坏。 |
+
+聊天图片恢复在没有取得可验证内容的失败路径中保留描述符的 `observed_at`，并明确返回 `retrieved_at=null`；快照变化还分开报告授权时的 `observed_at` 与 `current_snapshot_observed_at`。这些字段不能被 HTTP 状态、缓存层级或文件尺寸替代。
 
 系统凭据按桌面用户身份隔离。若 CLI 在不同用户、服务或沙箱身份下运行，`refresh` 可能看不到原身份保存的凭据；不要把密钥复制到项目文件来绕过隔离，应切回同一桌面用户身份，或重新 setup。
 

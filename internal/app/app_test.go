@@ -331,6 +331,11 @@ func TestCapabilitiesDoNotPromoteBuildTargetsWithoutEmbeddedEvidence(t *testing.
 	if providerCapabilities["automatic_key_access_validation"] != "requires_signed_live_release_evidence" || providerCapabilities["user_supplied_candidate_file"] != true {
 		t.Fatalf("provider validation boundary is ambiguous: %v", providerCapabilities)
 	}
+	mediaCapabilities := capabilities["media"].(map[string]any)
+	if mediaCapabilities["chat_remote_real_endpoint_enabled"] != true || mediaCapabilities["chat_remote_live_cdn_evidence_embedded"] != false ||
+		mediaCapabilities["chat_remote_production_readiness"] != "requires_current_snapshot_full_url_and_user_authorized_live_acceptance" {
+		t.Fatalf("chat image live CDN validation boundary is ambiguous: %v", mediaCapabilities)
+	}
 	ocrCapabilities := capabilities["ocr"].(map[string]any)
 	targets, ok := ocrCapabilities["native_backend_implementation_targets"].([]string)
 	if !ok || len(targets) != 1 || targets[0] != "windows/amd64" {
@@ -363,8 +368,26 @@ func TestSchemaOnlyListsImplementedCommands(t *testing.T) {
 		t.Fatalf("schema 缺少朋友圈媒体严格校验边界：%v", momentMedia)
 	}
 	chatImage := commands["export-chat-image"].(map[string]any)
-	if chatImage["evidence_binding"] != "message_resource_stem+hardlink_map" || chatImage["container_validation"] != "full_decode" || chatImage["network"] != false {
+	if chatImage["evidence_binding"] != "message_resource_stem+hardlink_map" || chatImage["container_validation"] != "full_decode" || chatImage["network"] != false ||
+		chatImage["source_original_quality_status"] != "unknown" {
 		t.Fatalf("schema 缺少聊天图片强绑定与离线校验边界：%v", chatImage)
+	}
+	recoverChatImage := commands["recover-chat-image"].(map[string]any)
+	bindings, bindingsOK := recoverChatImage["authorization_bindings"].([]any)
+	validation, validationOK := recoverChatImage["response_validation"].([]any)
+	if recoverChatImage["network_default"] != false || recoverChatImage["network_authorization"] != "structured_one_time_challenge" ||
+		recoverChatImage["account_lock"] != true || recoverChatImage["account_lock_scope"] != "entire_offline_preflight_or_authorized_attempt" ||
+		recoverChatImage["authorization_scope"] != "single_account_message_image_candidate_attempt" ||
+		recoverChatImage["authorization_replay_protected"] != true || recoverChatImage["authorization_consumed_before_network"] != true ||
+		recoverChatImage["network_attempts_per_authorization"] != float64(1) || recoverChatImage["automatic_network_retries"] != float64(0) ||
+		recoverChatImage["network_method"] != "GET" ||
+		recoverChatImage["wechat_ui_automation"] != false || recoverChatImage["constructed_url_from_opaque_parameter"] != false ||
+		recoverChatImage["https_required"] != true || recoverChatImage["redirects"] != false || recoverChatImage["ambient_proxy"] != false ||
+		recoverChatImage["external_dns_fallback"] != false || recoverChatImage["url_stored_in_consent"] != false ||
+		recoverChatImage["descriptor_secrets_output"] != false || recoverChatImage["lower_quality_fallback"] != false ||
+		recoverChatImage["source_original_quality_status"] != "unknown" || recoverChatImage["cleanup_failure_is_error"] != true ||
+		!bindingsOK || len(bindings) != 8 || !validationOK || len(validation) != 5 {
+		t.Fatalf("schema 缺少聊天图片单次授权恢复边界：%v", recoverChatImage)
 	}
 	refresh := commands["refresh"].(map[string]any)
 	if refresh["reads_saved_keychain"] != true || refresh["reads_process"] != false || refresh["network"] != false || refresh["writes_snapshot"] != true || refresh["modifies_saved_secrets"] != false || refresh["account_lock"] != true || refresh["prevents_coverage_regression"] != true {
@@ -391,7 +414,7 @@ func TestSchemaOnlyListsImplementedCommands(t *testing.T) {
 		commands["ocr-search"].(map[string]any)["source"] != "wechat_index_probe+v-local-cli_private_cache" {
 		t.Fatal("schema 缺少 OCR 私有缓存或原生 OCR 授权边界")
 	}
-	if len(commands) != 42 {
+	if len(commands) != 43 {
 		t.Fatalf("schema 命令数量异常：%d", len(commands))
 	}
 }

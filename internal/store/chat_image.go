@@ -474,6 +474,9 @@ func parseChatImageRemotePositiveInteger(value string, maximum int64) (int64, bo
 
 func parseChatImageRemoteParameter(value string) (string, string, bool) {
 	value = strings.TrimSpace(value)
+	if target, valid := parseDirectChatImageURL(value); valid {
+		return target, "direct_https_url", true
+	}
 	if len(value) < 64 || len(value) > maxChatImageRemoteParameterBytes || len(value)%2 != 0 {
 		return "", "", false
 	}
@@ -533,7 +536,7 @@ func parseChatImageRemoteDescriptor(content string) chatImageRemoteDescriptor {
 	descriptor := chatImageRemoteDescriptor{
 		status: "present_expiry_unknown", parseStatus: "present_incomplete", protocolStatus: "unverified_desktop_protocol",
 	}
-	incomplete, invalid := false, false
+	incomplete, invalid, directHTTPS := false, false, false
 	for _, definition := range definitions {
 		rawParameter := image.attribute(definition.parameterAttribute)
 		if rawParameter == "" {
@@ -580,6 +583,9 @@ func parseChatImageRemoteDescriptor(content string) chatImageRemoteDescriptor {
 			clear(candidate.aesKey[:])
 			continue
 		}
+		if parameterEncoding == "direct_https_url" {
+			directHTTPS = true
+		}
 		descriptor.candidates = append(descriptor.candidates, candidate)
 	}
 	if len(descriptor.tiers) == 0 {
@@ -594,6 +600,9 @@ func parseChatImageRemoteDescriptor(content string) chatImageRemoteDescriptor {
 		descriptor.parseStatus = "present_invalid"
 	default:
 		descriptor.parseStatus = "present_incomplete"
+	}
+	if directHTTPS {
+		descriptor.protocolStatus = "direct_https_descriptor_response_unverified"
 	}
 	return descriptor
 }

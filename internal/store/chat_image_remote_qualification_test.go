@@ -339,7 +339,7 @@ func TestSyntheticChatImageQualificationRejectsOversizedResponseAndKeepsTranspor
 	descriptor := syntheticChatImageDescriptor(t, plain, parameter, strings.Repeat("01", 16), 32, 24)
 	defer descriptor.clear()
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
-		response.Header().Set("Content-Length", strconv.FormatInt(maxSyntheticChatImageRemoteResponseBytes+1, 10))
+		response.Header().Set("Content-Length", strconv.FormatInt(maxChatImageRemoteResponseBytes+1, 10))
 		response.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
