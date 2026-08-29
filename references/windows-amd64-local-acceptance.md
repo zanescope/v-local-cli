@@ -254,7 +254,7 @@ pwsh -NoProfile -File .\scripts\accept-windows-chat-image-recovery.ps1 `
 
 默认私有图片位于 `%LOCALAPPDATA%\v-local\acceptance-private\<run-id>`，脱敏报告位于 `%LOCALAPPDATA%\v-local\acceptance-evidence\<run-id>\w64-08-chat-image-recovery.json`；两个新目录都会移除继承 ACL，只保留当前用户、SYSTEM 和 Administrators。默认控制台结果不显示绝对路径，只有本机操作者明确增加 `-ShowPaths` 才显示。报告不包含账号、evidence ID、图片 SHA-256、微信源路径、CDN URL、token 或 key；私有图片不会自动上传或删除。
 
-退出码 `0` 表示四项本地/人工回退夹具与恢复结果全部通过；`1` 表示安全或契约检查失败；`2` 表示用户没有确认、仅使用了 `-RecoveryMode Skip`、较低层级恢复仍未得到可验真的 high 缓存档位，或时效未知描述符夹具实际仍能恢复，因此证据不足。预期的 WXGF 解码错误只有在格式、恢复动作、无网络边界和快照代际全部匹配时才算该夹具通过。`Skip` 只用于无交互诊断，绝不能标为通过。开发者可用 `-SelfTest` 在不读取微信数据的情况下检查脚本内置四状态契约。该脚本仍不联网；它不会传入聊天图片 `--allow-network` 或 `--consent`。结构化联网恢复使用下一节的独立门禁，不能把两组证据拼成一次真实请求。
+退出码 `0` 表示四项本地/人工回退夹具与恢复结果全部通过；`1` 表示安全或契约检查失败；`2` 表示用户没有确认、仅使用了 `-RecoveryMode Skip`、较低层级恢复仍未得到可验真的 high 缓存档位，或时效未知描述符夹具实际仍能恢复，因此证据不足。预期的 WXGF 解码错误只有在格式、恢复动作、无网络边界和快照代际全部匹配时才算该夹具通过。两种 WXGF 响应还必须分别给出 `decoder_diagnostics` 或 `higher_quality_decoder_diagnostics`：公共 CLI 的 `binary_presence_status=not_evaluated`、`binary_presence_reason=public_cli_does_not_inspect_path` 和 `path_auto_discovery=false` 明示它没有判断操作系统是否存在 FFmpeg；`public_cli_integration_status=not_wired`、`qualification_interface_status=explicit_test_only`、`production_qualification_status=not_qualified` 才是当前产品状态。不得把前者改写成“解码器缺失”，也不得因资格测试通过就把后两者升级为成功。`Skip` 只用于无交互诊断，绝不能标为通过。开发者可用 `-SelfTest` 在不读取微信数据的情况下检查脚本内置四状态契约。该脚本仍不联网；它不会传入聊天图片 `--allow-network` 或 `--consent`。结构化联网恢复使用下一节的独立门禁，不能把两组证据拼成一次真实请求。
 
 ### W64-08R：结构化 full URL 恢复门禁
 
@@ -275,7 +275,7 @@ pwsh -NoProfile -File .\scripts\test-chat-image-recovery-consent.ps1 `
 
 真实请求若返回 `401/403/404/410`，只记录 `unknown_unavailable_at_request_time`，刷新快照并生成新 challenge；不得写成“已确认过期”。`429` 只记录限流，传输失败保持时效未知。`snapshot_busy` 在消费前停止，等待事务完成后可原样重试；一旦 challenge 已消费，后续任何失败都不得复用授权、自动循环、跟随重定向或回退到缩略图声称成功。
 
-WXGF 的实验解码与人工视觉等价复审属于独立的[资格验证流程](wxgf-decoder-qualification.md#人工视觉等价复审)，不改变本节公开 CLI 的预期 `decoder_unavailable` 行为。该流程要求独立参考 PNG、内容/方向/裁剪/颜色四项人工确认、至少 4 个不同 WXGF 与感知指纹、两个复审时安装的微信版本及每版本 `high+medium` 覆盖；缓存档位和像素边长都不代表发送前源图质量。若操作者只查看解码图但跳过参考图，必须记录 `inconclusive/skipped`，不能关闭 W64-08 或任何发布门禁。
+WXGF 的实验解码与人工视觉等价复审属于独立的[资格验证流程](wxgf-decoder-qualification.md#人工视觉等价复审)，不改变本节公开 CLI 的预期 `decoder_unavailable` 行为。2026-08-29 的[最终 v1 宿主绑定结构资格复核](wxgf-decoder-qualification.md#2026-08-29-最终-v1-宿主绑定结构资格复核)证明显式测试入口能在本机对 3 个真实 `medium` WXGF 完成结构解码，但没有独立参考图或视觉确认，且来源、签名、隔离、样本矩阵和许可证门禁仍未关闭。该流程要求独立参考 PNG、内容/方向/裁剪/颜色四项人工确认、至少 4 个不同 WXGF 与感知指纹、两个复审时安装的微信版本及每版本 `high+medium` 覆盖；缓存档位和像素边长都不代表发送前源图质量。若操作者只查看解码图但跳过参考图，必须记录 `inconclusive/skipped`，不能关闭 W64-08 或任何发布门禁。
 这些资格协议从未发布，最终格式直接收敛为 v1。矩阵只接受同时绑定宿主计算的邻接清单、
 provider 与 FFmpeg SHA-256 的最终 v1 记录；宿主绑定前的早期草案记录只有在使用旧
 identity basis 且缺少全部宿主绑定/资格状态字段时，才计入
@@ -300,6 +300,9 @@ if ($FixtureId -eq 'wxgf-candidate' -and $imageExitCode -eq 5) {
   if ($imageExport.command_status -cne 'failed' -or $imageExport.error.type -cne 'chat_image_unavailable' -or
       $imageExport.error.details.local_resolution_status -cne 'decoder_unavailable' -or
       $imageExport.error.details.detected_format -cne 'wxgf' -or
+      $imageExport.error.details.decoder_diagnostics.binary_presence_status -cne 'not_evaluated' -or
+      $imageExport.error.details.decoder_diagnostics.public_cli_integration_status -cne 'not_wired' -or
+      $imageExport.error.details.decoder_diagnostics.production_qualification_status -cne 'not_qualified' -or
       [string]::IsNullOrWhiteSpace([string]$imageExport.meta.generation_id)) { throw 'WXGF failure contract or generation binding failed' }
 } elseif ($imageExitCode -ne 0 -or $imageExport.command_status -cne 'succeeded') {
   throw 'evidence-bound chat image export failed'
@@ -312,7 +315,7 @@ if ($FixtureId -eq 'wxgf-candidate' -and $imageExitCode -eq 5) {
 | --- | --- |
 | 可解码较低层级、更高层级缺失 | `quality_tier=medium|thumbnail`、`higher_quality_local_status=missing`、`higher_quality_recovery_action=ask_user_to_open_original_then_refresh_and_retry`；两种较低层级语义相同，无论是否有描述符都必须 `network_access_performed=false` |
 | 可解码 high 缓存层级 | 选择 `quality_tier=high`、`quality_claim_scope=wechat_cache_variant_only`、`source_original_dimensions_known=false`；不设置固定像素门槛；即使较低层级与 high 层级 SHA-256 不同也不构成冲突；同一 high 层级若出现不同内容才必须 `content_conflict` |
-| 本地 WXGF 强候选 | 若另有可解码较低层级，成功响应必须带 `higher_quality_local_status=decoder_unavailable`、`higher_quality_detected_format=wxgf`；若没有可解码回退，则必须以退出码 `5` 返回 `chat_image_unavailable`，并在 `error.details` 中给出 `local_resolution_status=decoder_unavailable`、`detected_format=wxgf`、`recovery_action=do_not_request_redownload_same_candidate`。两种形态都必须绑定 generation、保持无网络，且不得再次要求用户打开原图 |
+| 本地 WXGF 强候选 | 若另有可解码较低层级，成功响应必须带 `higher_quality_local_status=decoder_unavailable`、`higher_quality_detected_format=wxgf` 和 `higher_quality_decoder_diagnostics`；若没有可解码回退，则必须以退出码 `5` 返回 `chat_image_unavailable`，并在 `error.details` 中给出 `local_resolution_status=decoder_unavailable`、`detected_format=wxgf`、`recovery_action=do_not_request_redownload_same_candidate` 和 `decoder_diagnostics`。两个诊断对象都必须保持 `binary_presence_status=not_evaluated`、`path_auto_discovery=false`、`public_cli_integration_status=not_wired`、`qualification_interface_status=explicit_test_only`、`production_qualification_status=not_qualified`。两种形态都必须绑定 generation、保持无网络，且不得再次要求用户打开原图 |
 | 描述符时效未知/资源可能不可用 | 描述符存在且结构完整时返回 `remote_descriptor_status=present_expiry_unknown`、`remote_descriptor_parse_status=parsed_unverified_protocol`；后者不证明时效或协议。仍必须为 `remote_protocol_status=unverified_desktop_protocol`、`remote_acquisition_status=unavailable_unverified_protocol`；用户确认后只 refresh/重试一次，仍缺失就停止并报告“可能过期或不可用”，不得声称已经验证过期，也不得联网 |
 
 只有成功返回 `higher_quality_local_status=missing` 的场景（任一可解码较低层级，或用于验证时效未知描述符边界的夹具）允许进入询问流程。Agent 先在当前 generation 重新预检同一 evidence，再明确请用户只在微信中打开该条原图；没有用户确认就停在此处。用户确认后，Agent 自动执行下列步骤，不让用户复制命令：

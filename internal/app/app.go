@@ -802,6 +802,7 @@ func runCapabilities(args []string) (any, error) {
 			"chat_remote_live_cdn_evidence_embedded":   false,
 			"chat_remote_production_readiness":         "requires_current_snapshot_full_url_and_user_authorized_live_acceptance",
 			"chat_remote_opaque_parameter_acquisition": false, "chat_remote_structured_consent_challenge": true,
+			"wxgf_decoder": chatImageWXGFDecoderDiagnostics(),
 		},
 		"voice": map[string]any{
 			"preferred_source": "wechat_existing_index", "silk_decoder_bundled": true, "fallback_asr_engine": "optional_whisper_cpp_or_v-local-cli-asr_provider", "network": false,
@@ -2226,6 +2227,20 @@ func chatImageRemoteAcquisitionStatus(descriptorStatus, protocolStatus string) s
 	}
 }
 
+func chatImageWXGFDecoderDiagnostics() map[string]any {
+	return map[string]any{
+		"format":                                      "wxgf",
+		"status_scope":                                "public_cli_build",
+		"binary_presence_status":                      "not_evaluated",
+		"binary_presence_reason":                      "public_cli_does_not_inspect_path",
+		"path_auto_discovery":                         false,
+		"public_cli_integration_status":               "not_wired",
+		"qualification_interface_status":              "explicit_test_only",
+		"production_qualification_status":             "not_qualified",
+		"qualification_success_enables_public_export": false,
+	}
+}
+
 func chatImageRecoveryAction(kind string) string {
 	switch kind {
 	case "local_file_missing":
@@ -2262,7 +2277,7 @@ func chatImageCommandError(err error) error {
 	case "local_file_missing":
 		hint = "本地强关联文件尚未落盘；若微信仍能取得原图，可打开这一张，随后运行 refresh --require-media 并重试。远端描述符可能已经失效，不能保证补取成功。"
 	case "decoder_unavailable":
-		hint = "本地已有强关联容器，但当前构建没有通过验收的解码器；再次打开原图未必能解决。"
+		hint = "本地已有强关联容器，但公共 CLI 当前没有接入通过生产验收的解码器；它不会检查 PATH，因此本错误不表示操作系统缺少解码器。资格测试成功也不会自动启用导出；再次打开原图未必能解决。"
 	case "local_validation_failed":
 		hint = "本地候选未通过解密或完整容器验证；检查图片密钥，并用当前微信版本真机夹具复核格式。"
 	case "content_conflict":
@@ -2284,6 +2299,9 @@ func chatImageCommandError(err error) error {
 	}
 	if resolutionErr.DetectedFormat != "" {
 		details["detected_format"] = resolutionErr.DetectedFormat
+	}
+	if resolutionErr.DetectedFormat == "wxgf" {
+		details["decoder_diagnostics"] = chatImageWXGFDecoderDiagnostics()
 	}
 	if resolutionErr.QualityTier != "" {
 		details["quality_tier"] = resolutionErr.QualityTier
@@ -2372,6 +2390,9 @@ func runExportChatImage(args []string) (any, error) {
 	}
 	if image.HigherQualityDetectedFormat != "" {
 		data["higher_quality_detected_format"] = image.HigherQualityDetectedFormat
+	}
+	if image.HigherQualityDetectedFormat == "wxgf" {
+		data["higher_quality_decoder_diagnostics"] = chatImageWXGFDecoderDiagnostics()
 	}
 	return outputWithGeneration(data, value), nil
 }
@@ -2823,12 +2844,16 @@ func commandSchemas() map[string]any {
 			"writes_output": true, "output_exists_default": "reject", "evidence_binding": "message_resource_stem+hardlink_map", "container_validation": "full_decode",
 			"quality_tiers": []string{"high", "medium", "thumbnail", "unknown"}, "quality_basis": "hardlink_cache_filename_variant",
 			"quality_claim_scope": "wechat_cache_variant_only", "source_original_dimensions_known": false,
-			"source_original_quality_status":   "unknown",
-			"dimensions_role":                  "decoded_output_observation_not_quality_gate",
-			"higher_quality_local_statuses":    []string{"not_applicable", "missing", "decoder_unavailable", "validation_failed", "unknown"},
-			"higher_quality_recovery_actions":  []string{"none", "run_recover_chat_image_offline_then_request_structured_consent", "ask_user_to_open_original_then_refresh_and_retry", "do_not_request_redownload_same_candidate", "inspect_key_or_format_before_retry", "manual_review"},
-			"local_resolution_statuses":        []string{"verified_local", "evidence_unavailable", "resource_descriptor_unavailable", "local_mapping_unavailable", "local_file_missing", "decoder_unavailable", "local_validation_failed", "content_conflict"},
-			"failure_recovery_actions":         []string{"run_recover_chat_image_offline_then_request_structured_consent", "ask_user_to_open_original_then_refresh_and_retry", "do_not_request_redownload_same_candidate", "inspect_key_or_format_before_retry", "manual_review"},
+			"source_original_quality_status":  "unknown",
+			"dimensions_role":                 "decoded_output_observation_not_quality_gate",
+			"higher_quality_local_statuses":   []string{"not_applicable", "missing", "decoder_unavailable", "validation_failed", "unknown"},
+			"higher_quality_recovery_actions": []string{"none", "run_recover_chat_image_offline_then_request_structured_consent", "ask_user_to_open_original_then_refresh_and_retry", "do_not_request_redownload_same_candidate", "inspect_key_or_format_before_retry", "manual_review"},
+			"local_resolution_statuses":       []string{"verified_local", "evidence_unavailable", "resource_descriptor_unavailable", "local_mapping_unavailable", "local_file_missing", "decoder_unavailable", "local_validation_failed", "content_conflict"},
+			"failure_recovery_actions":        []string{"run_recover_chat_image_offline_then_request_structured_consent", "ask_user_to_open_original_then_refresh_and_retry", "do_not_request_redownload_same_candidate", "inspect_key_or_format_before_retry", "manual_review"},
+			"wxgf_decoder_diagnostics_contract": map[string]any{
+				"failure_field": "decoder_diagnostics", "higher_quality_field": "higher_quality_decoder_diagnostics",
+				"value": chatImageWXGFDecoderDiagnostics(),
+			},
 			"remote_descriptor_statuses":       []string{"present_expiry_unknown", "missing", "unknown"},
 			"remote_descriptor_parse_statuses": []string{"parsed_unverified_protocol", "parsed_partial_unverified_protocol", "present_incomplete", "present_invalid", "not_applicable", "not_evaluated"},
 			"remote_protocol_statuses":         []string{"direct_https_descriptor_response_unverified", "unverified_desktop_protocol", "not_applicable", "not_evaluated"},

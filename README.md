@@ -86,6 +86,8 @@ v-local-cli export-chat-image --account <account> --output <image-file> <image_e
 # Agent 必须向用户说明范围并取得本次明确同意，随后才可原样提交 challenge：
 v-local-cli recover-chat-image --account <account> --output <image-file> <image_evidence_id>
 v-local-cli recover-chat-image --account <account> --output <image-file> --consent <challenge_id> <image_evidence_id>
+# WXGF 返回 decoder_unavailable 时读取 decoder_diagnostics；公共 CLI 不扫描 PATH，
+# 因而 binary_presence_status=not_evaluated 不表示本机缺少 FFmpeg。
 v-local-cli search --chat <chat_username> "关键词"
 v-local-cli sessions --limit 100
 v-local-cli unread --limit 100

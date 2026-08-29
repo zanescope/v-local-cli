@@ -336,6 +336,7 @@ func TestCapabilitiesDoNotPromoteBuildTargetsWithoutEmbeddedEvidence(t *testing.
 		mediaCapabilities["chat_remote_production_readiness"] != "requires_current_snapshot_full_url_and_user_authorized_live_acceptance" {
 		t.Fatalf("chat image live CDN validation boundary is ambiguous: %v", mediaCapabilities)
 	}
+	assertWXGFDecoderDiagnostics(t, mediaCapabilities["wxgf_decoder"])
 	ocrCapabilities := capabilities["ocr"].(map[string]any)
 	targets, ok := ocrCapabilities["native_backend_implementation_targets"].([]string)
 	if !ok || len(targets) != 1 || targets[0] != "windows/amd64" {
@@ -372,6 +373,11 @@ func TestSchemaOnlyListsImplementedCommands(t *testing.T) {
 		chatImage["source_original_quality_status"] != "unknown" {
 		t.Fatalf("schema 缺少聊天图片强绑定与离线校验边界：%v", chatImage)
 	}
+	decoderContract := chatImage["wxgf_decoder_diagnostics_contract"].(map[string]any)
+	if decoderContract["failure_field"] != "decoder_diagnostics" || decoderContract["higher_quality_field"] != "higher_quality_decoder_diagnostics" {
+		t.Fatalf("schema 缺少 WXGF 解码器诊断字段：%v", decoderContract)
+	}
+	assertWXGFDecoderDiagnostics(t, decoderContract["value"])
 	recoverChatImage := commands["recover-chat-image"].(map[string]any)
 	bindings, bindingsOK := recoverChatImage["authorization_bindings"].([]any)
 	validation, validationOK := recoverChatImage["response_validation"].([]any)

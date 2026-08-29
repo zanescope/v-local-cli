@@ -65,6 +65,39 @@ function Get-Field {
     return $Property.Value
 }
 
+function New-WXGFDecoderDiagnosticsFixture {
+    return [pscustomobject]@{
+        format = 'wxgf'
+        status_scope = 'public_cli_build'
+        binary_presence_status = 'not_evaluated'
+        binary_presence_reason = 'public_cli_does_not_inspect_path'
+        path_auto_discovery = $false
+        public_cli_integration_status = 'not_wired'
+        qualification_interface_status = 'explicit_test_only'
+        production_qualification_status = 'not_qualified'
+        qualification_success_enables_public_export = $false
+    }
+}
+
+function Assert-WXGFDecoderDiagnostics {
+    param(
+        [Parameter(Mandatory = $true)][object]$Container,
+        [Parameter(Mandatory = $true)][string]$FieldName,
+        [Parameter(Mandatory = $true)][string]$Code
+    )
+    $Diagnostics = Get-Field $Container $FieldName
+    Assert-Acceptance (($null -ne $Diagnostics) -and
+        ([string](Get-Field $Diagnostics 'format') -ceq 'wxgf') -and
+        ([string](Get-Field $Diagnostics 'status_scope') -ceq 'public_cli_build') -and
+        ([string](Get-Field $Diagnostics 'binary_presence_status') -ceq 'not_evaluated') -and
+        ([string](Get-Field $Diagnostics 'binary_presence_reason') -ceq 'public_cli_does_not_inspect_path') -and
+        ((Get-Field $Diagnostics 'path_auto_discovery') -eq $false) -and
+        ([string](Get-Field $Diagnostics 'public_cli_integration_status') -ceq 'not_wired') -and
+        ([string](Get-Field $Diagnostics 'qualification_interface_status') -ceq 'explicit_test_only') -and
+        ([string](Get-Field $Diagnostics 'production_qualification_status') -ceq 'not_qualified') -and
+        ((Get-Field $Diagnostics 'qualification_success_enables_public_export') -eq $false)) $Code
+}
+
 function Assert-PrivateIdentifier {
     param(
         [Parameter(Mandatory = $true)][string]$Value,
@@ -232,6 +265,9 @@ function Assert-KnownProbeEnums {
         'decoder_unavailable' {
             Assert-Acceptance (($RecoveryAction -ceq 'do_not_request_redownload_same_candidate') -and
                 (@('wxgf', 'webp') -ccontains [string](Get-Field $Data 'higher_quality_detected_format'))) 'probe_quality_state_inconsistent'
+            if ([string](Get-Field $Data 'higher_quality_detected_format') -ceq 'wxgf') {
+                Assert-WXGFDecoderDiagnostics $Data 'higher_quality_decoder_diagnostics' 'probe_higher_decoder_diagnostics_invalid'
+            }
         }
         'validation_failed' { Assert-Acceptance ($RecoveryAction -ceq 'inspect_key_or_format_before_retry') 'probe_quality_state_inconsistent' }
         'unknown' { Assert-Acceptance ($RecoveryAction -ceq 'manual_review') 'probe_quality_state_inconsistent' }
@@ -274,6 +310,7 @@ function Assert-FixtureState {
             Assert-Acceptance ((@('medium', 'thumbnail') -ccontains $Quality) -and ($HigherStatus -ceq 'decoder_unavailable') -and
                 ([string](Get-Field $Data 'higher_quality_detected_format') -ceq 'wxgf') -and
                 ($RecoveryAction -ceq 'do_not_request_redownload_same_candidate')) 'wxgf_candidate_contract_failed'
+            Assert-WXGFDecoderDiagnostics $Data 'higher_quality_decoder_diagnostics' 'wxgf_candidate_decoder_diagnostics_failed'
         }
         'expiry_unknown_descriptor' {
             Assert-Acceptance ((@('medium', 'thumbnail') -ccontains $Quality) -and ($HigherStatus -ceq 'missing') -and
@@ -311,6 +348,7 @@ function Assert-DecoderUnavailableProbe {
         ([string](Get-Field $Details 'local_resolution_status') -ceq 'decoder_unavailable') -and
         ([string](Get-Field $Details 'detected_format') -ceq 'wxgf') -and
         ([string](Get-Field $Details 'recovery_action') -ceq 'do_not_request_redownload_same_candidate')) 'wxgf_error_contract_failed'
+    Assert-WXGFDecoderDiagnostics $Details 'decoder_diagnostics' 'wxgf_error_decoder_diagnostics_failed'
     Assert-Acceptance (([string](Get-Field $Details 'quality_basis') -ceq 'hardlink_cache_filename_variant') -and
         ([string](Get-Field $Details 'quality_claim_scope') -ceq 'wechat_cache_variant_only') -and
         ((Get-Field $Details 'source_original_dimensions_known') -eq $false) -and
@@ -357,6 +395,7 @@ function Assert-DecoderUnavailableProbe {
             higher_quality_local_status = $null
             higher_quality_recovery_action = [string](Get-Field $Details 'recovery_action')
             detected_format = 'wxgf'
+            decoder_diagnostics = Get-Field $Details 'decoder_diagnostics'
             remote_descriptor_status = $RemoteStatus
             remote_descriptor_parse_status = $RemoteParseStatus
             remote_protocol_status = $ProtocolStatus
@@ -416,6 +455,7 @@ function Assert-ImageProbe {
             local_resolution_status = 'verified_local'
             higher_quality_local_status = [string](Get-Field $Data 'higher_quality_local_status')
             higher_quality_recovery_action = [string](Get-Field $Data 'higher_quality_recovery_action')
+            higher_quality_decoder_diagnostics = Get-Field $Data 'higher_quality_decoder_diagnostics'
             remote_descriptor_status = [string](Get-Field $Data 'remote_descriptor_status')
             remote_descriptor_parse_status = [string](Get-Field $Data 'remote_descriptor_parse_status')
             remote_protocol_status = [string](Get-Field $Data 'remote_protocol_status')
@@ -587,6 +627,10 @@ function New-MockProbeData {
             default { 'not_evaluated' }
         }
     }
+    $HigherDecoderDiagnostics = $null
+    if (($HigherStatus -ceq 'decoder_unavailable') -and ($HigherFormat -ceq 'wxgf')) {
+        $HigherDecoderDiagnostics = New-WXGFDecoderDiagnosticsFixture
+    }
     return [pscustomobject]@{
         quality_tier = $Quality
         quality_basis = 'hardlink_cache_filename_variant'
@@ -597,6 +641,7 @@ function New-MockProbeData {
         higher_quality_local_status = $HigherStatus
         higher_quality_recovery_action = $RecoveryAction
         higher_quality_detected_format = $HigherFormat
+        higher_quality_decoder_diagnostics = $HigherDecoderDiagnostics
         remote_descriptor_status = $RemoteStatus
         remote_descriptor_parse_status = $RemoteParseStatus
         remote_protocol_status = $ProtocolStatus
@@ -647,6 +692,7 @@ function Invoke-SelfTest {
                     local_resolution_status = 'decoder_unavailable'
                     recovery_action = 'do_not_request_redownload_same_candidate'
                     detected_format = 'wxgf'
+                    decoder_diagnostics = (New-WXGFDecoderDiagnosticsFixture)
                     quality_tier = 'medium'
                     quality_basis = 'hardlink_cache_filename_variant'
                     quality_claim_scope = 'wechat_cache_variant_only'
@@ -669,6 +715,16 @@ function Invoke-SelfTest {
     $FailureProbe = Assert-DecoderUnavailableProbe $MockFailure $MissingOutput
     Assert-Acceptance (($FailureProbe.LocalResolutionStatus -ceq 'decoder_unavailable') -and
         ($FailureProbe.Generation -ceq 'self-test-generation')) 'self_test_wxgf_error_not_generation_bound'
+    $Rejected = $false
+    try {
+        $UnsafeWXGF = New-MockProbeData 'medium' 'decoder_unavailable' 'do_not_request_redownload_same_candidate' -HigherFormat 'wxgf'
+        $UnsafeWXGF.higher_quality_decoder_diagnostics = $null
+        Assert-KnownProbeEnums $UnsafeWXGF
+    }
+    catch {
+        $Rejected = $_.Exception.Message -ceq 'acceptance:probe_higher_decoder_diagnostics_invalid'
+    }
+    Assert-Acceptance $Rejected 'self_test_missing_wxgf_decoder_diagnostics_not_rejected'
     $Public = [ordered]@{
         schema_version = 1
         maximum_automatic_retries = 1

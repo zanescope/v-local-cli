@@ -167,6 +167,11 @@ func TestSkillContractMatchesCommandSchema(t *testing.T) {
 
 func TestChatImageAgentRecoveryContract(t *testing.T) {
 	definition := schemaCommands(t)["export-chat-image"].(map[string]any)
+	decoderContract := definition["wxgf_decoder_diagnostics_contract"].(map[string]any)
+	if decoderContract["failure_field"] != "decoder_diagnostics" || decoderContract["higher_quality_field"] != "higher_quality_decoder_diagnostics" {
+		t.Fatalf("WXGF 解码器诊断契约发生漂移：%v", decoderContract)
+	}
+	assertWXGFDecoderDiagnostics(t, decoderContract["value"])
 	recovery := definition["agent_recovery"].(map[string]any)
 	if recovery["requires_user_confirmation"] != true || recovery["refresh_command"] != "refresh --require-media" ||
 		recovery["retry_evidence_binding"] != "same_image_evidence_id" || recovery["maximum_automatic_retries"] != 1 ||
@@ -266,6 +271,10 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 		"dimensions_role = 'decoded_output_observation_not_quality_gate'",
 		"remote_descriptor_parse_status = $RemoteParseStatus",
 		"pass_expected_decoder_unavailable",
+		"binary_presence_status",
+		"public_cli_integration_status",
+		"production_qualification_status",
+		"self_test_missing_wxgf_decoder_diagnostics_not_rejected",
 		"quality_claim_scope = 'wechat_cache_variant_only'",
 		"source_original_quality_status = 'unknown'",
 		"run_recover_chat_image_offline_then_request_structured_consent",
@@ -406,6 +415,8 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 		!bytes.Contains(acceptance, []byte("`2` 表示")) ||
 		!bytes.Contains(acceptance, []byte("不要设置固定像素门槛")) ||
 		!bytes.Contains(acceptance, []byte("WXGF 若返回预期的 `chat_image_unavailable/decoder_unavailable`")) ||
+		!bytes.Contains(acceptance, []byte("binary_presence_status=not_evaluated")) ||
+		!bytes.Contains(acceptance, []byte("最终 v1 宿主绑定结构资格复核")) ||
 		!bytes.Contains(acceptance, []byte("每次询问前用当前 generation 重新预检")) {
 		t.Fatal("Windows 真机验收文档没有公开脚本入口或退出状态")
 	}
@@ -424,6 +435,8 @@ func TestChatImageAgentRecoveryContract(t *testing.T) {
 		"descriptor_to_runtime_request_binding=not_observed",
 		"encrypted_mars_xlog_private_key_required",
 		"payload_decoding_performed=false",
+		"binary_presence_status=not_evaluated",
+		"public_cli_integration_status=not_wired",
 		"CdnCore::start_c2c_download -> CdnCore::_startDownloadMedia -> TaskFactory::CreateC2CImageDownloadTask",
 		"主模块确实 delay-import `ilink_wrapper.dll`",
 		"快照自带 full URL 可做单次、响应后验真的恢复",
