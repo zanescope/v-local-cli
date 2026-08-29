@@ -75,8 +75,14 @@ func visualReviewRecord(version, tier, suffix string) VisualReviewRecord {
 		SourceProducerVersionStatus: VisualReviewSourceProducerVersionStatus,
 		ReportedDecoder:             VisualReviewDecoder, ReportedDecoderVersion: "sha256:" + lowercaseSHA256([]byte("ffmpeg-build")),
 		DecoderIdentityBasis: VisualReviewDecoderIdentityBasis, ProviderProtocol: ProviderProtocol,
-		ProviderBinaryTrustStatus: VisualReviewProviderBinaryTrustStatus,
-		QualityTier:               tier, QualityTierBasis: VisualReviewQualityTierBasis,
+		ProviderIdentityManifestProtocol: ProviderIdentityManifestProtocol,
+		ProviderIdentityManifestSHA256:   lowercaseSHA256([]byte("identity-manifest")),
+		ProviderSHA256:                   lowercaseSHA256([]byte("provider-build")),
+		ProviderSourceStatus:             ProviderSourceStatus,
+		DecoderSourceStatus:              DecoderSourceStatus,
+		DecoderDistributionLicenseStatus: DecoderDistributionLicenseStatus,
+		ProviderBinaryTrustStatus:        VisualReviewProviderBinaryTrustStatus,
+		QualityTier:                      tier, QualityTierBasis: VisualReviewQualityTierBasis,
 		EvidenceID: "wechat:private:" + suffix, GenerationID: "generation-" + suffix,
 		SnapshotManifestSHA256: digest("manifest"), WXGFSHA256: digest("wxgf"),
 		DecodedSHA256: digest("decoded"), DecodedVisualFingerprint: digest("visual")[:16], ReferenceSHA256: digest("reference"),
@@ -87,6 +93,14 @@ func visualReviewRecord(version, tier, suffix string) VisualReviewRecord {
 	}
 }
 
+func visualReviewTarget(record VisualReviewRecord) VisualReviewTargetIdentity {
+	return VisualReviewTargetIdentity{
+		ReportedDecoder: record.ReportedDecoder, ReportedDecoderVersion: record.ReportedDecoderVersion,
+		ProviderIdentityManifestSHA256: record.ProviderIdentityManifestSHA256,
+		ProviderSHA256:                 record.ProviderSHA256,
+	}
+}
+
 func TestEvaluateVisualReviewMatrixRequiresTwoVersionTierGrid(t *testing.T) {
 	records := []VisualReviewRecord{
 		visualReviewRecord("4.1.12.55", "medium", "one"),
@@ -94,7 +108,7 @@ func TestEvaluateVisualReviewMatrixRequiresTwoVersionTierGrid(t *testing.T) {
 		visualReviewRecord("4.2.0.1", "medium", "three"),
 		visualReviewRecord("4.2.0.1", "high", "four"),
 	}
-	result, err := EvaluateVisualReviewMatrix(records, records[0].ReportedDecoder, records[0].ReportedDecoderVersion)
+	result, err := EvaluateVisualReviewMatrix(records, visualReviewTarget(records[0]))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +133,7 @@ func TestEvaluateVisualReviewMatrixRequiresTwoVersionTierGrid(t *testing.T) {
 func TestEvaluateVisualReviewMatrixRejectsDuplicateGamingAndConflicts(t *testing.T) {
 	first := visualReviewRecord("4.1.12.55", "medium", "same")
 	duplicate := first
-	result, err := EvaluateVisualReviewMatrix([]VisualReviewRecord{first, duplicate, duplicate, duplicate}, first.ReportedDecoder, first.ReportedDecoderVersion)
+	result, err := EvaluateVisualReviewMatrix([]VisualReviewRecord{first, duplicate, duplicate, duplicate}, visualReviewTarget(first))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,12 +142,12 @@ func TestEvaluateVisualReviewMatrixRejectsDuplicateGamingAndConflicts(t *testing
 	}
 	conflict := first
 	conflict.DecodedSHA256 = lowercaseSHA256([]byte("conflict"))
-	if _, err := EvaluateVisualReviewMatrix([]VisualReviewRecord{first, conflict}, first.ReportedDecoder, first.ReportedDecoderVersion); err == nil {
+	if _, err := EvaluateVisualReviewMatrix([]VisualReviewRecord{first, conflict}, visualReviewTarget(first)); err == nil {
 		t.Fatal("同一 WXGF 的冲突记录没有被拒绝")
 	}
 	incomplete := first
 	incomplete.CropConfirmed = false
-	if _, err := EvaluateVisualReviewMatrix([]VisualReviewRecord{incomplete}, first.ReportedDecoder, first.ReportedDecoderVersion); err == nil {
+	if _, err := EvaluateVisualReviewMatrix([]VisualReviewRecord{incomplete}, visualReviewTarget(first)); err == nil {
 		t.Fatal("缺少裁剪确认的人工记录被接受")
 	}
 }
@@ -147,7 +161,8 @@ func TestEvaluateVisualReviewMatrixSeparatesDecoderBuildsAndVisualDuplicates(t *
 	}
 	targetVersion := records[0].ReportedDecoderVersion
 	records[3].ReportedDecoderVersion = "sha256:" + lowercaseSHA256([]byte("another-ffmpeg-build"))
-	result, err := EvaluateVisualReviewMatrix(records, VisualReviewDecoder, targetVersion)
+	target := visualReviewTarget(records[0])
+	result, err := EvaluateVisualReviewMatrix(records, target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,8 +171,28 @@ func TestEvaluateVisualReviewMatrixSeparatesDecoderBuildsAndVisualDuplicates(t *
 	}
 
 	records[3].ReportedDecoderVersion = targetVersion
+	records[3].ProviderSHA256 = lowercaseSHA256([]byte("another-provider-build"))
+	result, err = EvaluateVisualReviewMatrix(records, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "insufficient" || result.DistinctWXGFSamples != 3 || result.OtherBinaryIdentityRecordsExcluded != 1 {
+		t.Fatalf("不同 provider 构建错误拼入当前矩阵：%+v", result)
+	}
+
+	records[3].ProviderSHA256 = target.ProviderSHA256
+	records[3].ProviderIdentityManifestSHA256 = lowercaseSHA256([]byte("another-identity-manifest"))
+	result, err = EvaluateVisualReviewMatrix(records, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "insufficient" || result.DistinctWXGFSamples != 3 || result.OtherBinaryIdentityRecordsExcluded != 1 {
+		t.Fatalf("不同身份清单错误拼入当前矩阵：%+v", result)
+	}
+
+	records[3].ProviderIdentityManifestSHA256 = target.ProviderIdentityManifestSHA256
 	records[3].DecodedVisualFingerprint = records[0].DecodedVisualFingerprint
-	result, err = EvaluateVisualReviewMatrix(records, VisualReviewDecoder, targetVersion)
+	result, err = EvaluateVisualReviewMatrix(records, target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +214,7 @@ func TestEvaluateVisualReviewMatrixDoesNotUseThumbnailsForDiversityGate(t *testi
 		records = append(records, visualReviewRecord("4.2.0.1", "thumbnail", suffix))
 	}
 
-	result, err := EvaluateVisualReviewMatrix(records, medium.ReportedDecoder, medium.ReportedDecoderVersion)
+	result, err := EvaluateVisualReviewMatrix(records, visualReviewTarget(medium))
 	if err != nil {
 		t.Fatal(err)
 	}

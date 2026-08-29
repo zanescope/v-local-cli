@@ -257,6 +257,8 @@ pwsh -NoProfile -File .\scripts\accept-windows-chat-image-recovery.ps1 `
 退出码 `0` 表示四项与恢复结果全部通过；`1` 表示安全或契约检查失败；`2` 表示用户没有确认、仅使用了 `-RecoveryMode Skip`、较低层级恢复仍未得到可验真的 high 缓存档位，或时效未知描述符夹具实际仍能恢复，因此证据不足。预期的 WXGF 解码错误只有在格式、恢复动作、无网络边界和快照代际全部匹配时才算该夹具通过。`Skip` 只用于无交互诊断，绝不能标为通过。开发者可用 `-SelfTest` 在不读取微信数据的情况下检查脚本内置四状态契约。脚本不会传入或接受聊天图片 `--allow-network`。
 
 WXGF 的实验解码与人工视觉等价复审属于独立的[资格验证流程](wxgf-decoder-qualification.md#人工视觉等价复审)，不改变本节公开 CLI 的预期 `decoder_unavailable` 行为。该流程要求独立参考 PNG、内容/方向/裁剪/颜色四项人工确认、至少 4 个不同 WXGF 与感知指纹、两个复审时安装的微信版本及每版本 `high+medium` 覆盖；缓存档位和像素边长都不代表发送前源图质量。若操作者只查看解码图但跳过参考图，必须记录 `inconclusive/skipped`，不能关闭 W64-08 或任何发布门禁。
+矩阵只接受同时绑定宿主计算的邻接清单、provider 与 FFmpeg SHA-256 的 v2 记录；旧版
+provider 自报身份的 v1 记录只计入 `legacy_records_excluded`，不得静默升级或与 v2 拼接。
 
 下面保留等价的人工步骤，供审阅脚本输出或定位失败阶段。
 

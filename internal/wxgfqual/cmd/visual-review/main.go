@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,13 +28,15 @@ const (
 var validatePrivateReviewRoot = state.ValidatePrivateDirectorySecurity
 
 type helperRequest struct {
-	Protocol               string   `json:"protocol"`
-	Action                 string   `json:"action"`
-	ReviewRoot             string   `json:"review_root,omitempty"`
-	RecordRoot             string   `json:"record_root,omitempty"`
-	RecordPaths            []string `json:"record_paths,omitempty"`
-	ReportedDecoder        string   `json:"reported_decoder,omitempty"`
-	ReportedDecoderVersion string   `json:"reported_decoder_version,omitempty"`
+	Protocol                       string   `json:"protocol"`
+	Action                         string   `json:"action"`
+	ReviewRoot                     string   `json:"review_root,omitempty"`
+	RecordRoot                     string   `json:"record_root,omitempty"`
+	RecordPaths                    []string `json:"record_paths,omitempty"`
+	ReportedDecoder                string   `json:"reported_decoder,omitempty"`
+	ReportedDecoderVersion         string   `json:"reported_decoder_version,omitempty"`
+	ProviderIdentityManifestSHA256 string   `json:"provider_identity_manifest_sha256,omitempty"`
+	ProviderSHA256                 string   `json:"provider_sha256,omitempty"`
 }
 
 type preparedSample struct {
@@ -217,11 +220,58 @@ func prepare(root string, createBundles bool) (helperResponse, error) {
 	return response, nil
 }
 
-func evaluate(recordRoot string, paths []string, reportedDecoder, reportedDecoderVersion string) (helperResponse, error) {
+func recordProtocol(payload []byte) (string, error) {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	var value map[string]json.RawMessage
+	if err := decoder.Decode(&value); err != nil {
+		return "", errors.New("invalid_record")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return "", errors.New("invalid_record")
+	}
+	raw, ok := value["protocol"]
+	if !ok {
+		return "", errors.New("invalid_record")
+	}
+	var protocol string
+	if err := json.Unmarshal(raw, &protocol); err != nil || protocol == "" {
+		return "", errors.New("invalid_record")
+	}
+	return protocol, nil
+}
+
+func recognizedLegacyRecord(payload []byte) bool {
+	var value struct {
+		Protocol                  string `json:"protocol"`
+		ReviewStatus              string `json:"review_status"`
+		ReportedDecoder           string `json:"reported_decoder"`
+		ReportedDecoderVersion    string `json:"reported_decoder_version"`
+		DecoderIdentityBasis      string `json:"decoder_identity_basis"`
+		ProviderProtocol          string `json:"provider_protocol"`
+		ProviderBinaryTrustStatus string `json:"provider_binary_trust_status"`
+	}
+	if err := json.Unmarshal(payload, &value); err != nil || value.Protocol != wxgfqual.VisualReviewLegacyRecordProtocol ||
+		value.ReviewStatus != "confirmed" || value.ReportedDecoder != "ffmpeg" ||
+		value.DecoderIdentityBasis != "provider_reported_adjacent_decoder_sha256_unattested_provider" ||
+		value.ProviderProtocol != "v-local-cli-image-decoder/1" || value.ProviderBinaryTrustStatus != "unverified" ||
+		!strings.HasPrefix(value.ReportedDecoderVersion, "sha256:") {
+		return false
+	}
+	digest := strings.TrimPrefix(value.ReportedDecoderVersion, "sha256:")
+	if len(digest) != 64 || strings.ToLower(digest) != digest {
+		return false
+	}
+	_, err := hex.DecodeString(digest)
+	return err == nil
+}
+
+func evaluate(recordRoot string, paths []string, target wxgfqual.VisualReviewTargetIdentity) (helperResponse, error) {
 	if len(paths) == 0 || len(paths) > 100 {
 		return helperResponse{}, errors.New("invalid_record_count")
 	}
 	records := make([]wxgfqual.VisualReviewRecord, 0, len(paths))
+	legacyRecords := 0
 	seen := map[string]bool{}
 	for _, path := range paths {
 		if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) ||
@@ -244,16 +294,31 @@ func evaluate(recordRoot string, paths []string, reportedDecoder, reportedDecode
 		if err != nil {
 			return helperResponse{}, err
 		}
+		protocol, err := recordProtocol(payload)
+		if err != nil {
+			return helperResponse{}, err
+		}
+		if protocol == wxgfqual.VisualReviewLegacyRecordProtocol {
+			if !recognizedLegacyRecord(payload) {
+				return helperResponse{}, errors.New("invalid_legacy_record")
+			}
+			legacyRecords++
+			continue
+		}
+		if protocol != wxgfqual.VisualReviewRecordProtocol {
+			return helperResponse{}, errors.New("invalid_record")
+		}
 		var record wxgfqual.VisualReviewRecord
 		if err := decodeStrict(bytes.NewReader(payload), maximumRecordBytes, &record); err != nil {
 			return helperResponse{}, errors.New("invalid_record")
 		}
 		records = append(records, record)
 	}
-	matrix, err := wxgfqual.EvaluateVisualReviewMatrix(records, reportedDecoder, reportedDecoderVersion)
+	matrix, err := wxgfqual.EvaluateVisualReviewMatrix(records, target)
 	if err != nil {
 		return helperResponse{}, err
 	}
+	matrix.LegacyRecordsExcluded = legacyRecords
 	return helperResponse{Protocol: wxgfqual.VisualReviewHelperProtocol, Status: "evaluated", Matrix: &matrix}, nil
 }
 
@@ -267,7 +332,8 @@ func run(stdin io.Reader, stdout io.Writer) error {
 	switch request.Action {
 	case "prepare":
 		if request.RecordRoot != "" || len(request.RecordPaths) != 0 ||
-			request.ReportedDecoder != "" || request.ReportedDecoderVersion != "" {
+			request.ReportedDecoder != "" || request.ReportedDecoderVersion != "" ||
+			request.ProviderIdentityManifestSHA256 != "" || request.ProviderSHA256 != "" {
 			return errors.New("invalid_request")
 		}
 		root, rootErr := privateRoot(request.ReviewRoot)
@@ -277,7 +343,8 @@ func run(stdin io.Reader, stdout io.Writer) error {
 		response, err = prepare(root, true)
 	case "inspect":
 		if request.RecordRoot != "" || len(request.RecordPaths) != 0 ||
-			request.ReportedDecoder != "" || request.ReportedDecoderVersion != "" {
+			request.ReportedDecoder != "" || request.ReportedDecoderVersion != "" ||
+			request.ProviderIdentityManifestSHA256 != "" || request.ProviderSHA256 != "" {
 			return errors.New("invalid_request")
 		}
 		root, rootErr := privateRoot(request.ReviewRoot)
@@ -293,7 +360,11 @@ func run(stdin io.Reader, stdout io.Writer) error {
 		if rootErr != nil {
 			return rootErr
 		}
-		response, err = evaluate(root, request.RecordPaths, request.ReportedDecoder, request.ReportedDecoderVersion)
+		response, err = evaluate(root, request.RecordPaths, wxgfqual.VisualReviewTargetIdentity{
+			ReportedDecoder: request.ReportedDecoder, ReportedDecoderVersion: request.ReportedDecoderVersion,
+			ProviderIdentityManifestSHA256: request.ProviderIdentityManifestSHA256,
+			ProviderSHA256:                 request.ProviderSHA256,
+		})
 	default:
 		return errors.New("invalid_action")
 	}

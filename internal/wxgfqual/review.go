@@ -16,18 +16,19 @@ import (
 )
 
 const (
-	VisualReviewCaptureProtocol = "v-local-cli/wxgf-visual-review-capture/v1"
-	VisualReviewRecordProtocol  = "v-local-cli/wxgf-visual-review-record/v1"
-	VisualReviewMatrixProtocol  = "v-local-cli/wxgf-visual-review-matrix/v1"
-	VisualReviewHelperProtocol  = "v-local-cli/wxgf-visual-review-helper/v1"
-	VisualReviewDecoder         = "ffmpeg"
+	VisualReviewCaptureProtocol      = "v-local-cli/wxgf-visual-review-capture/v2"
+	VisualReviewRecordProtocol       = "v-local-cli/wxgf-visual-review-record/v2"
+	VisualReviewLegacyRecordProtocol = "v-local-cli/wxgf-visual-review-record/v1"
+	VisualReviewMatrixProtocol       = "v-local-cli/wxgf-visual-review-matrix/v2"
+	VisualReviewHelperProtocol       = "v-local-cli/wxgf-visual-review-helper/v2"
+	VisualReviewDecoder              = "ffmpeg"
 
 	VisualReviewQualityTierBasis            = "hardlink_cache_filename_variant_not_source_quality"
 	VisualReviewSourceOriginalQualityStatus = "unknown"
 	VisualReviewSourceProducerVersionStatus = "unknown"
 	VisualReviewVersionCoverageBasis        = "installed_package_at_review_not_source_provenance"
-	VisualReviewDecoderIdentityBasis        = "provider_reported_adjacent_decoder_sha256_unattested_provider"
-	VisualReviewProviderBinaryTrustStatus   = "unverified"
+	VisualReviewDecoderIdentityBasis        = ProviderIdentityBasis
+	VisualReviewProviderBinaryTrustStatus   = ProviderBinaryTrustStatus
 	VisualReviewQualificationScope          = "human_visual_equivalence_only"
 
 	MinimumVisualReviewSamples  = 4
@@ -52,18 +53,24 @@ type VisualReviewCaptureSample struct {
 }
 
 type VisualReviewCapture struct {
-	Protocol                  string                      `json:"protocol"`
-	GenerationID              string                      `json:"generation_id"`
-	SnapshotManifestSHA256    string                      `json:"snapshot_manifest_sha256"`
-	ReportedDecoder           string                      `json:"reported_decoder"`
-	ReportedDecoderVersion    string                      `json:"reported_decoder_version"`
-	DecoderIdentityBasis      string                      `json:"decoder_identity_basis"`
-	ProviderProtocol          string                      `json:"provider_protocol"`
-	ProviderBinaryTrustStatus string                      `json:"provider_binary_trust_status"`
-	Samples                   []VisualReviewCaptureSample `json:"samples"`
-	PrivateOnly               bool                        `json:"private_only"`
-	ContainsEvidenceIDs       bool                        `json:"contains_evidence_ids"`
-	ContainsContentDigests    bool                        `json:"contains_content_digests"`
+	Protocol                         string                      `json:"protocol"`
+	GenerationID                     string                      `json:"generation_id"`
+	SnapshotManifestSHA256           string                      `json:"snapshot_manifest_sha256"`
+	ReportedDecoder                  string                      `json:"reported_decoder"`
+	ReportedDecoderVersion           string                      `json:"reported_decoder_version"`
+	DecoderIdentityBasis             string                      `json:"decoder_identity_basis"`
+	ProviderProtocol                 string                      `json:"provider_protocol"`
+	ProviderIdentityManifestProtocol string                      `json:"provider_identity_manifest_protocol"`
+	ProviderIdentityManifestSHA256   string                      `json:"provider_identity_manifest_sha256"`
+	ProviderSHA256                   string                      `json:"provider_sha256"`
+	ProviderSourceStatus             string                      `json:"provider_source_status"`
+	DecoderSourceStatus              string                      `json:"decoder_source_status"`
+	DecoderDistributionLicenseStatus string                      `json:"decoder_distribution_license_status"`
+	ProviderBinaryTrustStatus        string                      `json:"provider_binary_trust_status"`
+	Samples                          []VisualReviewCaptureSample `json:"samples"`
+	PrivateOnly                      bool                        `json:"private_only"`
+	ContainsEvidenceIDs              bool                        `json:"contains_evidence_ids"`
+	ContainsContentDigests           bool                        `json:"contains_content_digests"`
 }
 
 type VisualReviewImage struct {
@@ -80,40 +87,46 @@ type VisualReviewBundle struct {
 }
 
 type VisualReviewRecord struct {
-	Protocol                     string `json:"protocol"`
-	ReviewStatus                 string `json:"review_status"`
-	ReviewMethod                 string `json:"review_method"`
-	RunNonce                     string `json:"run_nonce"`
-	ReviewedAtUTC                string `json:"reviewed_at_utc"`
-	WeChatVersion                string `json:"wechat_version"`
-	ClientVersionObservation     string `json:"client_version_observation"`
-	SourceProducerVersionStatus  string `json:"source_producer_version_status"`
-	ReportedDecoder              string `json:"reported_decoder"`
-	ReportedDecoderVersion       string `json:"reported_decoder_version"`
-	DecoderIdentityBasis         string `json:"decoder_identity_basis"`
-	ProviderProtocol             string `json:"provider_protocol"`
-	ProviderBinaryTrustStatus    string `json:"provider_binary_trust_status"`
-	QualityTier                  string `json:"quality_tier"`
-	QualityTierBasis             string `json:"quality_tier_basis"`
-	EvidenceID                   string `json:"evidence_id"`
-	GenerationID                 string `json:"generation_id"`
-	SnapshotManifestSHA256       string `json:"snapshot_manifest_sha256"`
-	WXGFSHA256                   string `json:"wxgf_sha256"`
-	DecodedSHA256                string `json:"decoded_sha256"`
-	DecodedVisualFingerprint     string `json:"decoded_visual_fingerprint"`
-	ReferenceSHA256              string `json:"reference_sha256"`
-	DecodedWidth                 int    `json:"decoded_width"`
-	DecodedHeight                int    `json:"decoded_height"`
-	ReferenceWidth               int    `json:"reference_width"`
-	ReferenceHeight              int    `json:"reference_height"`
-	SameContentConfirmed         bool   `json:"same_content_confirmed"`
-	OrientationConfirmed         bool   `json:"orientation_confirmed"`
-	CropConfirmed                bool   `json:"crop_confirmed"`
-	ColorAndArtifactsConfirmed   bool   `json:"color_and_artifacts_confirmed"`
-	SourceOriginalQualityStatus  string `json:"source_original_quality_status"`
-	TemporaryDecodedRemoved      bool   `json:"temporary_decoded_removed"`
-	TemporaryReferenceRemoved    bool   `json:"temporary_reference_removed"`
-	TemporaryReviewBundleRemoved bool   `json:"temporary_review_bundle_removed"`
+	Protocol                         string `json:"protocol"`
+	ReviewStatus                     string `json:"review_status"`
+	ReviewMethod                     string `json:"review_method"`
+	RunNonce                         string `json:"run_nonce"`
+	ReviewedAtUTC                    string `json:"reviewed_at_utc"`
+	WeChatVersion                    string `json:"wechat_version"`
+	ClientVersionObservation         string `json:"client_version_observation"`
+	SourceProducerVersionStatus      string `json:"source_producer_version_status"`
+	ReportedDecoder                  string `json:"reported_decoder"`
+	ReportedDecoderVersion           string `json:"reported_decoder_version"`
+	DecoderIdentityBasis             string `json:"decoder_identity_basis"`
+	ProviderProtocol                 string `json:"provider_protocol"`
+	ProviderIdentityManifestProtocol string `json:"provider_identity_manifest_protocol"`
+	ProviderIdentityManifestSHA256   string `json:"provider_identity_manifest_sha256"`
+	ProviderSHA256                   string `json:"provider_sha256"`
+	ProviderSourceStatus             string `json:"provider_source_status"`
+	DecoderSourceStatus              string `json:"decoder_source_status"`
+	DecoderDistributionLicenseStatus string `json:"decoder_distribution_license_status"`
+	ProviderBinaryTrustStatus        string `json:"provider_binary_trust_status"`
+	QualityTier                      string `json:"quality_tier"`
+	QualityTierBasis                 string `json:"quality_tier_basis"`
+	EvidenceID                       string `json:"evidence_id"`
+	GenerationID                     string `json:"generation_id"`
+	SnapshotManifestSHA256           string `json:"snapshot_manifest_sha256"`
+	WXGFSHA256                       string `json:"wxgf_sha256"`
+	DecodedSHA256                    string `json:"decoded_sha256"`
+	DecodedVisualFingerprint         string `json:"decoded_visual_fingerprint"`
+	ReferenceSHA256                  string `json:"reference_sha256"`
+	DecodedWidth                     int    `json:"decoded_width"`
+	DecodedHeight                    int    `json:"decoded_height"`
+	ReferenceWidth                   int    `json:"reference_width"`
+	ReferenceHeight                  int    `json:"reference_height"`
+	SameContentConfirmed             bool   `json:"same_content_confirmed"`
+	OrientationConfirmed             bool   `json:"orientation_confirmed"`
+	CropConfirmed                    bool   `json:"crop_confirmed"`
+	ColorAndArtifactsConfirmed       bool   `json:"color_and_artifacts_confirmed"`
+	SourceOriginalQualityStatus      string `json:"source_original_quality_status"`
+	TemporaryDecodedRemoved          bool   `json:"temporary_decoded_removed"`
+	TemporaryReferenceRemoved        bool   `json:"temporary_reference_removed"`
+	TemporaryReviewBundleRemoved     bool   `json:"temporary_review_bundle_removed"`
 }
 
 type VisualReviewMatrix struct {
@@ -123,6 +136,12 @@ type VisualReviewMatrix struct {
 	ReportedDecoder                                 string         `json:"reported_decoder"`
 	ReportedDecoderVersion                          string         `json:"reported_decoder_version"`
 	DecoderIdentityBasis                            string         `json:"decoder_identity_basis"`
+	ProviderIdentityManifestProtocol                string         `json:"provider_identity_manifest_protocol"`
+	ProviderIdentityManifestSHA256                  string         `json:"provider_identity_manifest_sha256"`
+	ProviderSHA256                                  string         `json:"provider_sha256"`
+	ProviderSourceStatus                            string         `json:"provider_source_status"`
+	DecoderSourceStatus                             string         `json:"decoder_source_status"`
+	DecoderDistributionLicenseStatus                string         `json:"decoder_distribution_license_status"`
 	ProviderBinaryTrustStatus                       string         `json:"provider_binary_trust_status"`
 	VersionCoverageBasis                            string         `json:"version_coverage_basis"`
 	TierCoverageBasis                               string         `json:"tier_coverage_basis"`
@@ -134,11 +153,20 @@ type VisualReviewMatrix struct {
 	InstalledReviewVersionsWithRequiredTierCoverage int            `json:"installed_review_versions_with_required_tier_coverage"`
 	RequiredTiers                                   []string       `json:"required_tiers"`
 	ObservedTierCounts                              map[string]int `json:"observed_tier_counts"`
+	LegacyRecordsExcluded                           int            `json:"legacy_records_excluded"`
+	OtherBinaryIdentityRecordsExcluded              int            `json:"other_binary_identity_records_excluded"`
 	Blockers                                        []string       `json:"blockers"`
 	ContainsEvidenceIDs                             bool           `json:"contains_evidence_ids"`
 	ContainsImageContentDigests                     bool           `json:"contains_image_content_digests"`
 	FixedDimensionQualityGate                       bool           `json:"fixed_dimension_quality_gate"`
 	ProductionReady                                 bool           `json:"production_ready"`
+}
+
+type VisualReviewTargetIdentity struct {
+	ReportedDecoder                string `json:"reported_decoder"`
+	ReportedDecoderVersion         string `json:"reported_decoder_version"`
+	ProviderIdentityManifestSHA256 string `json:"provider_identity_manifest_sha256"`
+	ProviderSHA256                 string `json:"provider_sha256"`
 }
 
 func lowercaseSHA256(payload []byte) string {
@@ -268,6 +296,22 @@ func validVisualReviewDecoderIdentity(decoder, version string) bool {
 	return decoder == VisualReviewDecoder && strings.HasPrefix(version, "sha256:") && validReviewSHA256(strings.TrimPrefix(version, "sha256:"))
 }
 
+func validVisualReviewTargetIdentity(value VisualReviewTargetIdentity) bool {
+	return validVisualReviewDecoderIdentity(value.ReportedDecoder, value.ReportedDecoderVersion) &&
+		validReviewSHA256(value.ProviderIdentityManifestSHA256) && validReviewSHA256(value.ProviderSHA256)
+}
+
+func visualReviewRecordIdentity(value VisualReviewRecord) VisualReviewTargetIdentity {
+	return VisualReviewTargetIdentity{
+		ReportedDecoder: value.ReportedDecoder, ReportedDecoderVersion: value.ReportedDecoderVersion,
+		ProviderIdentityManifestSHA256: value.ProviderIdentityManifestSHA256, ProviderSHA256: value.ProviderSHA256,
+	}
+}
+
+func sameVisualReviewTargetIdentity(left, right VisualReviewTargetIdentity) bool {
+	return left == right
+}
+
 func validLowerHex(value string, bytes int) bool {
 	if len(value) != bytes*2 || strings.ToLower(value) != value {
 		return false
@@ -291,6 +335,10 @@ func ValidateVisualReviewCapture(value VisualReviewCapture) error {
 		!validReviewToken(value.GenerationID, 128) || !validReviewSHA256(value.SnapshotManifestSHA256) ||
 		!validVisualReviewDecoderIdentity(value.ReportedDecoder, value.ReportedDecoderVersion) ||
 		value.DecoderIdentityBasis != VisualReviewDecoderIdentityBasis || value.ProviderProtocol != ProviderProtocol ||
+		value.ProviderIdentityManifestProtocol != ProviderIdentityManifestProtocol ||
+		!validReviewSHA256(value.ProviderIdentityManifestSHA256) || !validReviewSHA256(value.ProviderSHA256) ||
+		value.ProviderSourceStatus != ProviderSourceStatus || value.DecoderSourceStatus != DecoderSourceStatus ||
+		value.DecoderDistributionLicenseStatus != DecoderDistributionLicenseStatus ||
 		value.ProviderBinaryTrustStatus != VisualReviewProviderBinaryTrustStatus ||
 		len(value.Samples) == 0 || len(value.Samples) > 5 {
 		return errors.New("WXGF 私有视觉复审清单无效")
@@ -323,6 +371,10 @@ func validateVisualReviewRecord(value VisualReviewRecord) error {
 		value.SourceProducerVersionStatus != VisualReviewSourceProducerVersionStatus ||
 		!validVisualReviewDecoderIdentity(value.ReportedDecoder, value.ReportedDecoderVersion) ||
 		value.DecoderIdentityBasis != VisualReviewDecoderIdentityBasis || value.ProviderProtocol != ProviderProtocol ||
+		value.ProviderIdentityManifestProtocol != ProviderIdentityManifestProtocol ||
+		!validReviewSHA256(value.ProviderIdentityManifestSHA256) || !validReviewSHA256(value.ProviderSHA256) ||
+		value.ProviderSourceStatus != ProviderSourceStatus || value.DecoderSourceStatus != DecoderSourceStatus ||
+		value.DecoderDistributionLicenseStatus != DecoderDistributionLicenseStatus ||
 		value.ProviderBinaryTrustStatus != VisualReviewProviderBinaryTrustStatus ||
 		!validLowerHex(value.RunNonce, 16) || !validReviewTime(value.ReviewedAtUTC) ||
 		!validReviewToken(value.WeChatVersion, 64) || !validPrivateReviewIdentifier(value.EvidenceID, "wechat:", 4096) ||
@@ -354,22 +406,28 @@ func validateVisualReviewRecord(value VisualReviewRecord) error {
 	return nil
 }
 
-func EvaluateVisualReviewMatrix(records []VisualReviewRecord, reportedDecoder, reportedDecoderVersion string) (VisualReviewMatrix, error) {
-	if !validVisualReviewDecoderIdentity(reportedDecoder, reportedDecoderVersion) {
+func EvaluateVisualReviewMatrix(records []VisualReviewRecord, target VisualReviewTargetIdentity) (VisualReviewMatrix, error) {
+	if !validVisualReviewTargetIdentity(target) {
 		return VisualReviewMatrix{}, errors.New("WXGF 人工视觉复审目标解码器身份无效")
 	}
 	result := VisualReviewMatrix{
 		Protocol: VisualReviewMatrixProtocol, Status: "insufficient",
 		QualificationScope: VisualReviewQualificationScope,
-		ReportedDecoder:    reportedDecoder, ReportedDecoderVersion: reportedDecoderVersion,
-		DecoderIdentityBasis:        VisualReviewDecoderIdentityBasis,
-		ProviderBinaryTrustStatus:   VisualReviewProviderBinaryTrustStatus,
-		VersionCoverageBasis:        VisualReviewVersionCoverageBasis,
-		TierCoverageBasis:           VisualReviewQualityTierBasis,
-		SourceOriginalQualityStatus: VisualReviewSourceOriginalQualityStatus,
-		SourceProducerVersionStatus: VisualReviewSourceProducerVersionStatus,
-		RequiredTiers:               append([]string(nil), requiredVisualReviewTiers...),
-		ObservedTierCounts:          map[string]int{}, Blockers: []string{},
+		ReportedDecoder:    target.ReportedDecoder, ReportedDecoderVersion: target.ReportedDecoderVersion,
+		DecoderIdentityBasis:             VisualReviewDecoderIdentityBasis,
+		ProviderIdentityManifestProtocol: ProviderIdentityManifestProtocol,
+		ProviderIdentityManifestSHA256:   target.ProviderIdentityManifestSHA256,
+		ProviderSHA256:                   target.ProviderSHA256,
+		ProviderSourceStatus:             ProviderSourceStatus,
+		DecoderSourceStatus:              DecoderSourceStatus,
+		DecoderDistributionLicenseStatus: DecoderDistributionLicenseStatus,
+		ProviderBinaryTrustStatus:        VisualReviewProviderBinaryTrustStatus,
+		VersionCoverageBasis:             VisualReviewVersionCoverageBasis,
+		TierCoverageBasis:                VisualReviewQualityTierBasis,
+		SourceOriginalQualityStatus:      VisualReviewSourceOriginalQualityStatus,
+		SourceProducerVersionStatus:      VisualReviewSourceProducerVersionStatus,
+		RequiredTiers:                    append([]string(nil), requiredVisualReviewTiers...),
+		ObservedTierCounts:               map[string]int{}, Blockers: []string{},
 		ContainsEvidenceIDs: false, ContainsImageContentDigests: false,
 		FixedDimensionQualityGate: false, ProductionReady: false,
 	}
@@ -388,7 +446,8 @@ func EvaluateVisualReviewMatrix(records []VisualReviewRecord, reportedDecoder, r
 		if err := validateVisualReviewRecord(record); err != nil {
 			return VisualReviewMatrix{}, err
 		}
-		if record.ReportedDecoder != reportedDecoder || record.ReportedDecoderVersion != reportedDecoderVersion {
+		if !sameVisualReviewTargetIdentity(visualReviewRecordIdentity(record), target) {
+			result.OtherBinaryIdentityRecordsExcluded++
 			continue
 		}
 		if previous, exists := sourceOutputs[record.WXGFSHA256]; exists {

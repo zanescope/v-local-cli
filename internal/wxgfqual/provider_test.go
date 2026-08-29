@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -64,7 +65,7 @@ func TestImageDecoderProviderHelperProcess(t *testing.T) {
 		os.Exit(0)
 	}
 	if mode == "unknown_field" {
-		_, _ = os.Stdout.Write([]byte(`{"protocol":"v-local-cli-image-decoder/1","unknown":true}`))
+		_, _ = os.Stdout.Write([]byte(`{"protocol":"` + ProviderProtocol + `","unknown":true}`))
 		os.Exit(0)
 	}
 	if mode == "stderr_overflow" {
@@ -115,10 +116,14 @@ func TestImageDecoderProviderHelperProcess(t *testing.T) {
 	response := providerResponse{
 		Protocol: ProviderProtocol, RequestID: request.RequestID, Status: "decoded",
 		InputSHA256: inputDigest, OutputSHA256: fileSHA256(output), OutputFormat: "png",
-		FrameCount: frameCount, NetworkUsed: &networkUsed, Decoder: "test-hevc", DecoderVersion: "1.0.0",
+		FrameCount: frameCount, NetworkUsed: &networkUsed, Decoder: request.DecoderName,
+		DecoderVersion: "sha256:" + request.DecoderSHA256,
 	}
 	if mode == "unsafe_metadata" {
 		response.Decoder = "test-hevc\ninjected"
+	}
+	if mode == "wrong_decoder_identity" {
+		response.DecoderVersion = "sha256:" + fileSHA256([]byte("wrong-decoder"))
 	}
 	if mode == "missing_network_claim" {
 		response.NetworkUsed = nil
@@ -138,6 +143,40 @@ func TestImageDecoderProviderHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func providerIdentityFixture(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	providerName := "provider-test"
+	if runtime.GOOS == "windows" {
+		providerName += ".exe"
+	}
+	providerPath := filepath.Join(root, providerName)
+	providerPayload := []byte("provider-fixture")
+	decoderPayload := []byte("decoder-fixture")
+	if err := os.WriteFile(providerPath, providerPayload, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	decoderPath := filepath.Join(root, expectedProviderDecoderFileName())
+	if err := os.WriteFile(decoderPath, decoderPayload, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	manifest := ProviderIdentityManifest{
+		Protocol: ProviderIdentityManifestProtocol, ProviderFileName: providerName,
+		ProviderSHA256: fileSHA256(providerPayload), DecoderName: "ffmpeg",
+		DecoderFileName: expectedProviderDecoderFileName(), DecoderSHA256: fileSHA256(decoderPayload),
+		ProviderSourceStatus: ProviderSourceStatus, DecoderSourceStatus: DecoderSourceStatus,
+		DecoderDistributionLicenseStatus: DecoderDistributionLicenseStatus,
+	}
+	payload, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(providerPath+".manifest.json", payload, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	return providerPath
+}
+
 func withProviderHelper(t *testing.T, mode string) {
 	t.Helper()
 	previous := newImageDecoderProviderCommand
@@ -155,8 +194,9 @@ func runProviderTest(t *testing.T, mode string, timeout time.Duration) (Result, 
 	t.Helper()
 	withProviderHelper(t, mode)
 	root := t.TempDir()
+	provider := providerIdentityFixture(t)
 	result, err := RunProviderTrial(context.Background(), singlePictureFixture(), ProviderOptions{
-		Executable: os.Args[0], TemporaryRoot: root, Timeout: timeout,
+		Executable: provider, TemporaryRoot: root, Timeout: timeout,
 	})
 	return result, err, root
 }
@@ -179,7 +219,15 @@ func TestRunProviderTrialValidatesBoundPNG(t *testing.T) {
 	}
 	assertStageCleaned(t, root)
 	if result.Validation.Format != "png" || result.Validation.Width != 3 || result.Validation.Height != 2 ||
-		result.Decoder != "test-hevc" || result.ProductionReady {
+		result.Decoder != "ffmpeg" || result.ProductionReady ||
+		result.BinaryIdentity.ManifestProtocol != ProviderIdentityManifestProtocol ||
+		result.BinaryIdentity.DecoderName != "ffmpeg" ||
+		result.BinaryIdentity.IdentityBasis != ProviderIdentityBasis || !validProviderSHA256(result.BinaryIdentity.ProviderSHA256) ||
+		!validProviderSHA256(result.BinaryIdentity.DecoderSHA256) || !validProviderSHA256(result.BinaryIdentity.ManifestSHA256) ||
+		result.DecoderVersion != "sha256:"+result.BinaryIdentity.DecoderSHA256 ||
+		result.BinaryIdentity.ProviderSourceStatus != ProviderSourceStatus || result.BinaryIdentity.DecoderSourceStatus != DecoderSourceStatus ||
+		result.BinaryIdentity.DecoderDistributionLicenseStatus != DecoderDistributionLicenseStatus ||
+		result.BinaryIdentity.ProviderBinaryTrustStatus != ProviderBinaryTrustStatus {
 		t.Fatalf("WXGF provider 资格结果异常：%+v", result)
 	}
 	expectedBlockers := 8
@@ -222,7 +270,7 @@ func TestRunProviderTrialValidatesBoundPNG(t *testing.T) {
 func TestRunProviderTrialRejectsUntrustedProviderClaims(t *testing.T) {
 	for _, mode := range []string{
 		"network", "missing_network_claim", "wrong_input_digest", "wrong_output_digest", "uppercase_output_digest",
-		"multiple_frames", "unsafe_metadata", "unknown_field", "trailing_response", "oversize_response",
+		"multiple_frames", "unsafe_metadata", "wrong_decoder_identity", "unknown_field", "trailing_response", "oversize_response",
 		"stderr_overflow", "mutate_input",
 	} {
 		t.Run(mode, func(t *testing.T) {
@@ -282,6 +330,170 @@ func TestRunProviderTrialRequiresRegularExecutableAndPrivateRoot(t *testing.T) {
 		Executable: os.Args[0], TemporaryRoot: file,
 	}); err == nil {
 		t.Fatal("非目录临时根未被拒绝")
+	}
+}
+
+func TestRunProviderTrialRejectsMissingOrChangedIdentityBundle(t *testing.T) {
+	for _, mode := range []string{
+		"missing_manifest", "provider_changed", "decoder_changed", "manifest_unknown_field", "manifest_duplicate_field",
+		"manifest_overstated_source", "manifest_qualified_license",
+	} {
+		t.Run(mode, func(t *testing.T) {
+			provider := providerIdentityFixture(t)
+			manifestPath := provider + ".manifest.json"
+			switch mode {
+			case "missing_manifest":
+				if err := os.Chmod(manifestPath, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(manifestPath); err != nil {
+					t.Fatal(err)
+				}
+			case "provider_changed":
+				if err := os.WriteFile(provider, []byte("changed-provider"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "decoder_changed":
+				decoder := filepath.Join(filepath.Dir(provider), expectedProviderDecoderFileName())
+				if err := os.Chmod(decoder, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(decoder, []byte("changed-decoder"), 0o500); err != nil {
+					t.Fatal(err)
+				}
+			case "manifest_unknown_field", "manifest_duplicate_field":
+				payload, err := os.ReadFile(manifestPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				addition := `,"unknown":true}`
+				if mode == "manifest_duplicate_field" {
+					addition = `,"provider_sha256":"` + strings.Repeat("0", 64) + `"}`
+				}
+				payload = append(bytes.TrimSuffix(payload, []byte("}")), []byte(addition)...)
+				if err := os.Chmod(manifestPath, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(manifestPath, payload, 0o400); err != nil {
+					t.Fatal(err)
+				}
+			case "manifest_overstated_source", "manifest_qualified_license":
+				payload, err := os.ReadFile(manifestPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, after := []byte(`"provider_source_status":"unverified"`), []byte(`"provider_source_status":"verified"`)
+				if mode == "manifest_qualified_license" {
+					before = []byte(`"decoder_distribution_license_status":"not_qualified"`)
+					after = []byte(`"decoder_distribution_license_status":"qualified"`)
+				}
+				payload = bytes.Replace(payload, before, after, 1)
+				if bytes.Contains(payload, before) || !bytes.Contains(payload, after) {
+					t.Fatal("测试无法改写 manifest 信任状态")
+				}
+				if err := os.Chmod(manifestPath, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(manifestPath, payload, 0o400); err != nil {
+					t.Fatal(err)
+				}
+			}
+			root := t.TempDir()
+			_, err := RunProviderTrial(context.Background(), singlePictureFixture(), ProviderOptions{
+				Executable: provider, TemporaryRoot: root, Timeout: time.Second,
+			})
+			if !errors.Is(err, ErrProviderIdentity) {
+				t.Fatalf("身份包异常未被绑定错误拒绝：mode=%s err=%v", mode, err)
+			}
+			assertStageCleaned(t, root)
+		})
+	}
+}
+
+func TestProviderIdentityBundleRejectsProviderDecoderPathCollision(t *testing.T) {
+	root := t.TempDir()
+	provider := filepath.Join(root, expectedProviderDecoderFileName())
+	payload := []byte("same-provider-decoder-fixture")
+	if err := os.WriteFile(provider, payload, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := ProviderIdentityManifest{
+		Protocol: ProviderIdentityManifestProtocol, ProviderFileName: filepath.Base(provider), ProviderSHA256: fileSHA256(payload),
+		DecoderName: "ffmpeg", DecoderFileName: filepath.Base(provider), DecoderSHA256: fileSHA256(payload),
+		ProviderSourceStatus: ProviderSourceStatus, DecoderSourceStatus: DecoderSourceStatus,
+		DecoderDistributionLicenseStatus: DecoderDistributionLicenseStatus,
+	}
+	manifestPayload, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(provider+".manifest.json", manifestPayload, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadProviderBundle(provider); !errors.Is(err, ErrProviderIdentity) {
+		t.Fatalf("provider/decoder 路径碰撞未被拒绝：%v", err)
+	}
+}
+
+func TestRunProviderTrialDetectsStagedIdentityReplacement(t *testing.T) {
+	for _, target := range []string{"provider", "decoder", "manifest"} {
+		t.Run(target, func(t *testing.T) {
+			provider := providerIdentityFixture(t)
+			root := t.TempDir()
+			previous := newImageDecoderProviderCommand
+			var mutationErr error
+			newImageDecoderProviderCommand = func(ctx context.Context, stagedProvider string) *exec.Cmd {
+				path := stagedProvider
+				switch target {
+				case "decoder":
+					path = filepath.Join(filepath.Dir(stagedProvider), expectedProviderDecoderFileName())
+				case "manifest":
+					path = stagedProvider + ".manifest.json"
+				}
+				if err := os.Chmod(path, 0o700); err != nil {
+					mutationErr = err
+				} else {
+					mutationErr = os.WriteFile(path, []byte("staged-identity-replaced"), 0o700)
+				}
+				return exec.CommandContext(ctx, os.Args[0], "-test.run=^TestImageDecoderProviderHelperProcess$", "--", "success")
+			}
+			t.Cleanup(func() { newImageDecoderProviderCommand = previous })
+			_, err := RunProviderTrial(context.Background(), singlePictureFixture(), ProviderOptions{
+				Executable: provider, TemporaryRoot: root, Timeout: 3 * time.Second,
+			})
+			if mutationErr != nil {
+				t.Fatalf("测试无法替换 staging %s：%v", target, mutationErr)
+			}
+			if !errors.Is(err, ErrProviderIdentity) {
+				t.Fatalf("staging %s 替换未被拒绝：%v", target, err)
+			}
+			assertStageCleaned(t, root)
+		})
+	}
+}
+
+func TestProviderIdentityBundleRejectsLinksWhenSupported(t *testing.T) {
+	provider := providerIdentityFixture(t)
+	manifest := provider + ".manifest.json"
+	target := manifest + ".target"
+	payload, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, payload, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, manifest); err != nil {
+		t.Skipf("当前环境不能创建符号链接：%v", err)
+	}
+	if _, err := loadProviderBundle(provider); !errors.Is(err, ErrProviderIdentity) {
+		t.Fatalf("链接身份清单未被拒绝：%v", err)
 	}
 }
 

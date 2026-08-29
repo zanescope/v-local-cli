@@ -19,6 +19,9 @@ func validTestRequest() wxgfqual.ProviderRequest {
 		InputPath: "input.hevc", InputFormat: "hevc_annex_b", InputSHA256: strings.Repeat("b", 64),
 		OutputPath: "output.png", OutputFormat: "png", MaximumFrames: 1,
 		MaximumPixels: cryptoutil.MaxDecodedImagePixels, NetworkAllowed: false,
+		ProviderIdentityManifestSHA256: strings.Repeat("c", 64), ProviderSHA256: strings.Repeat("d", 64),
+		DecoderName: "ffmpeg", DecoderSHA256: strings.Repeat("e", 64),
+		DecoderIdentityBasis: wxgfqual.ProviderIdentityBasis,
 	}
 }
 
@@ -34,7 +37,7 @@ func TestDecodeRequestIsStrict(t *testing.T) {
 	}
 	for _, invalid := range [][]byte{
 		append(payload, []byte("{}")...),
-		[]byte(`{"protocol":"v-local-cli-image-decoder/1","unknown":true}`),
+		[]byte(`{"protocol":"` + wxgfqual.ProviderProtocol + `","unknown":true}`),
 	} {
 		if _, err := decodeRequest(bytes.NewReader(invalid)); err == nil {
 			t.Fatal("非严格请求未被拒绝")
@@ -44,6 +47,12 @@ func TestDecodeRequestIsStrict(t *testing.T) {
 	payload, _ = json.Marshal(request)
 	if _, err := decodeRequest(bytes.NewReader(payload)); err == nil {
 		t.Fatal("允许网络的请求未被拒绝")
+	}
+	request = validTestRequest()
+	request.ProviderSHA256 = strings.ToUpper(request.ProviderSHA256)
+	payload, _ = json.Marshal(request)
+	if _, err := decodeRequest(bytes.NewReader(payload)); err == nil {
+		t.Fatal("非规范 provider 摘要未被拒绝")
 	}
 }
 

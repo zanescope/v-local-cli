@@ -421,11 +421,60 @@ func TestWXGFVisualReviewQualificationContract(t *testing.T) {
 		"fixed_dimension_quality_gate = $false",
 		"source_producer_version_status = $SourceProducerVersionStatus",
 		"provider_binary_trust_status = $ProviderBinaryTrustStatus",
+		"host_staged_manifest_bound_provider_and_decoder_sha256",
+		"provider_identity_manifest_protocol = $ProviderIdentityManifestProtocol",
+		"provider_identity_manifest_sha256 = $ProviderIdentityManifestSHA256",
+		"provider_sha256 = $ProviderSHA256",
+		"decoder_distribution_license_status = $DecoderDistributionLicenseStatus",
 		"production_ready = $false",
 		"temporary_artifact_cleanup_failed",
 	} {
 		if !strings.Contains(visualText, expected) {
 			t.Errorf("WXGF 人工复审脚本缺少边界：%s", expected)
+		}
+	}
+
+	manifestScript, err := os.ReadFile(filepath.Join(root, "scripts", "new-windows-wxgf-provider-identity-manifest.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestText := string(manifestScript)
+	for _, expected := range []string{
+		"v-local-cli/wxgf-provider-identity-manifest/v1",
+		"[System.IO.FileMode]::CreateNew",
+		"Get-StableSHA256",
+		"Assert-NoReparsePoint",
+		"StartsWith('//')",
+		"provider_decoder_not_adjacent",
+		"provider_decoder_same_file",
+		"decoder_file_name_invalid",
+		"provider_source_status = 'unverified'",
+		"decoder_source_status = 'unverified'",
+		"decoder_distribution_license_status = 'not_qualified'",
+		"proves_provenance = $false",
+		"qualifies_distribution_license = $false",
+		"network = $false",
+	} {
+		if !strings.Contains(manifestText, expected) {
+			t.Errorf("WXGF provider 身份清单脚本缺少边界：%s", expected)
+		}
+	}
+	for _, forbidden := range []string{"Invoke-WebRequest", "Invoke-RestMethod", "Start-BitsTransfer", "Copy-Item"} {
+		if strings.Contains(manifestText, forbidden) {
+			t.Errorf("WXGF provider 身份清单脚本包含越界能力：%s", forbidden)
+		}
+	}
+	auditWorkflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "audit-gates.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"new-windows-wxgf-provider-identity-manifest.ps1 -SelfTest",
+		"new-windows-wxgf-visual-review-session.ps1 -SelfTest",
+		"accept-windows-wxgf-visual-equivalence.ps1 -SelfTest",
+	} {
+		if !bytes.Contains(auditWorkflow, []byte(expected)) {
+			t.Errorf("Windows audit gate 未运行 WXGF 自检：%s", expected)
 		}
 	}
 	for _, forbidden := range []string{
@@ -463,6 +512,10 @@ func TestWXGFVisualReviewQualificationContract(t *testing.T) {
 		"installed_package_at_review_not_source_provenance",
 		"hardlink_cache_filename_variant_not_source_quality",
 		"provider_binary_trust_status=unverified",
+		"host_staged_manifest_bound_provider_and_decoder_sha256",
+		"legacy_records_excluded",
+		"decoder_distribution_license_status=not_qualified",
+		"当前 v2 矩阵尚未用真实样本评估",
 		"browser_cache_erasure_proven=false",
 		"`production_ready=false`、`fixed_dimension_quality_gate=false`",
 		"本流程不操作微信 UI、不请求 CDN",
@@ -484,7 +537,8 @@ func TestWXGFVisualReviewQualificationContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(acceptance, []byte("wxgf-decoder-qualification.md#人工视觉等价复审")) ||
-		!bytes.Contains(acceptance, []byte("只查看解码图但跳过参考图")) {
+		!bytes.Contains(acceptance, []byte("只查看解码图但跳过参考图")) ||
+		!bytes.Contains(acceptance, []byte("legacy_records_excluded")) {
 		t.Fatal("Windows 真机验收没有链接 WXGF 人工复审及其跳过边界")
 	}
 }

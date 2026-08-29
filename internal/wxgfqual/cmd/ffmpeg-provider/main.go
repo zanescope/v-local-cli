@@ -76,7 +76,8 @@ func decodeRequest(reader io.Reader) (wxgfqual.ProviderRequest, error) {
 	if request.Protocol != wxgfqual.ProviderProtocol || request.Action != "decode_still" ||
 		request.InputFormat != "hevc_annex_b" || request.OutputFormat != "png" ||
 		request.MaximumFrames != 1 || request.MaximumPixels != cryptoutil.MaxDecodedImagePixels || request.NetworkAllowed ||
-		len(request.RequestID) != 32 || len(request.InputSHA256) != sha256.Size*2 {
+		len(request.RequestID) != 32 || len(request.InputSHA256) != sha256.Size*2 ||
+		request.DecoderName != "ffmpeg" || request.DecoderIdentityBasis != wxgfqual.ProviderIdentityBasis {
 		return wxgfqual.ProviderRequest{}, errors.New("invalid_request")
 	}
 	if _, err := hex.DecodeString(request.RequestID); err != nil {
@@ -84,6 +85,14 @@ func decodeRequest(reader io.Reader) (wxgfqual.ProviderRequest, error) {
 	}
 	if _, err := hex.DecodeString(request.InputSHA256); err != nil || strings.ToLower(request.InputSHA256) != request.InputSHA256 {
 		return wxgfqual.ProviderRequest{}, errors.New("invalid_request")
+	}
+	for _, digest := range []string{request.ProviderIdentityManifestSHA256, request.ProviderSHA256, request.DecoderSHA256} {
+		if len(digest) != sha256.Size*2 || strings.ToLower(digest) != digest {
+			return wxgfqual.ProviderRequest{}, errors.New("invalid_request")
+		}
+		if _, err := hex.DecodeString(digest); err != nil {
+			return wxgfqual.ProviderRequest{}, errors.New("invalid_request")
+		}
 	}
 	return request, nil
 }
@@ -142,6 +151,19 @@ func adjacentFFmpeg() (string, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 {
 		return "", errors.New("ffmpeg_unavailable")
+	}
+	return path, nil
+}
+
+func adjacentIdentityManifest() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", errors.New("identity_manifest_unavailable")
+	}
+	path := executable + ".manifest.json"
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > 64*1024 {
+		return "", errors.New("identity_manifest_unavailable")
 	}
 	return path, nil
 }
@@ -238,15 +260,31 @@ func run() int {
 	if err != nil || inputDigest != request.InputSHA256 {
 		return fail("input_binding_failed")
 	}
+	providerPath, err := os.Executable()
+	if err != nil {
+		return fail("provider_identity_unavailable")
+	}
+	providerDigest, err := digestRegularFile(providerPath, 256*1024*1024)
+	if err != nil || providerDigest != request.ProviderSHA256 {
+		return fail("provider_identity_mismatch")
+	}
+	manifestPath, err := adjacentIdentityManifest()
+	if err != nil {
+		return fail("identity_manifest_unavailable")
+	}
+	manifestDigest, err := digestRegularFile(manifestPath, 64*1024)
+	if err != nil || manifestDigest != request.ProviderIdentityManifestSHA256 {
+		return fail("identity_manifest_mismatch")
+	}
 	ffmpegPath, err := adjacentFFmpeg()
 	if err != nil {
 		return fail("ffmpeg_unavailable")
 	}
 	ffmpegDigest, err := digestRegularFile(ffmpegPath, 1024*1024*1024)
-	if err != nil {
+	if err != nil || ffmpegDigest != request.DecoderSHA256 {
 		return fail("ffmpeg_unavailable")
 	}
-	decoderVersion := "sha256:" + ffmpegDigest
+	decoderVersion := "sha256:" + request.DecoderSHA256
 	framehashPath := filepath.Join(stage, "frames.sha256")
 	defer os.Remove(framehashPath)
 	if _, err := os.Lstat(framehashPath); !os.IsNotExist(err) {
@@ -269,9 +307,12 @@ func run() int {
 	if err := runFFmpeg(ctx, ffmpegPath, stage, pngArguments(inputPath, outputPath)); err != nil {
 		return fail("ffmpeg_png_failed")
 	}
-	ffmpegDigestAfter, err := digestRegularFile(ffmpegPath, 1024*1024*1024)
-	if err != nil || ffmpegDigestAfter != ffmpegDigest {
-		return fail("ffmpeg_changed_during_decode")
+	ffmpegDigestAfter, ffmpegErr := digestRegularFile(ffmpegPath, 1024*1024*1024)
+	providerDigestAfter, providerErr := digestRegularFile(providerPath, 256*1024*1024)
+	manifestDigestAfter, manifestErr := digestRegularFile(manifestPath, 64*1024)
+	if ffmpegErr != nil || providerErr != nil || manifestErr != nil || ffmpegDigestAfter != request.DecoderSHA256 ||
+		providerDigestAfter != request.ProviderSHA256 || manifestDigestAfter != request.ProviderIdentityManifestSHA256 {
+		return fail("binary_identity_changed_during_decode")
 	}
 	outputDigest, err := digestRegularFile(outputPath, maximumOutputBytes)
 	if err != nil {
@@ -281,7 +322,7 @@ func run() int {
 	response := wxgfqual.ProviderResponse{
 		Protocol: wxgfqual.ProviderProtocol, RequestID: request.RequestID, Status: "decoded",
 		InputSHA256: request.InputSHA256, OutputSHA256: outputDigest, OutputFormat: "png",
-		FrameCount: 1, NetworkUsed: &networkUsed, Decoder: "ffmpeg", DecoderVersion: decoderVersion,
+		FrameCount: 1, NetworkUsed: &networkUsed, Decoder: request.DecoderName, DecoderVersion: decoderVersion,
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(response); err != nil {
 		return fail("response_failed")

@@ -56,7 +56,7 @@ func TestWindowsProviderJobKillsDescendantOnClose(t *testing.T) {
 	}
 	t.Cleanup(func() { newImageDecoderProviderCommand = previous })
 	result, err := RunProviderTrial(context.Background(), singlePictureFixture(), ProviderOptions{
-		Executable: os.Args[0], TemporaryRoot: t.TempDir(), Timeout: 3 * time.Second,
+		Executable: providerIdentityFixture(t), TemporaryRoot: t.TempDir(), Timeout: 3 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)

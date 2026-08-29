@@ -281,11 +281,15 @@ func TestRealWXGFQualificationFromSnapshot(t *testing.T) {
 	}
 	reviewCapture := wxgfqual.VisualReviewCapture{
 		Protocol: wxgfqual.VisualReviewCaptureProtocol, GenerationID: value.GenerationID,
-		SnapshotManifestSHA256:    value.SnapshotManifestSHA256,
-		DecoderIdentityBasis:      wxgfqual.VisualReviewDecoderIdentityBasis,
-		ProviderProtocol:          wxgfqual.ProviderProtocol,
-		ProviderBinaryTrustStatus: wxgfqual.VisualReviewProviderBinaryTrustStatus,
-		PrivateOnly:               true, ContainsEvidenceIDs: true, ContainsContentDigests: true,
+		SnapshotManifestSHA256:           value.SnapshotManifestSHA256,
+		DecoderIdentityBasis:             wxgfqual.VisualReviewDecoderIdentityBasis,
+		ProviderProtocol:                 wxgfqual.ProviderProtocol,
+		ProviderIdentityManifestProtocol: wxgfqual.ProviderIdentityManifestProtocol,
+		ProviderSourceStatus:             wxgfqual.ProviderSourceStatus,
+		DecoderSourceStatus:              wxgfqual.DecoderSourceStatus,
+		DecoderDistributionLicenseStatus: wxgfqual.DecoderDistributionLicenseStatus,
+		ProviderBinaryTrustStatus:        wxgfqual.VisualReviewProviderBinaryTrustStatus,
+		PrivateOnly:                      true, ContainsEvidenceIDs: true, ContainsContentDigests: true,
 	}
 	createdReviewFiles := []string{}
 	reviewCaptureCommitted := false
@@ -416,8 +420,12 @@ func TestRealWXGFQualificationFromSnapshot(t *testing.T) {
 					if reviewCapture.ReportedDecoder == "" {
 						reviewCapture.ReportedDecoder = result.Decoder
 						reviewCapture.ReportedDecoderVersion = result.DecoderVersion
-					} else if reviewCapture.ReportedDecoder != result.Decoder || reviewCapture.ReportedDecoderVersion != result.DecoderVersion {
-						t.Fatal("真实 WXGF 私有视觉复审样本混用了不同解码器身份")
+						reviewCapture.ProviderIdentityManifestSHA256 = result.BinaryIdentity.ManifestSHA256
+						reviewCapture.ProviderSHA256 = result.BinaryIdentity.ProviderSHA256
+					} else if reviewCapture.ReportedDecoder != result.Decoder || reviewCapture.ReportedDecoderVersion != result.DecoderVersion ||
+						reviewCapture.ProviderIdentityManifestSHA256 != result.BinaryIdentity.ManifestSHA256 ||
+						reviewCapture.ProviderSHA256 != result.BinaryIdentity.ProviderSHA256 {
+						t.Fatal("真实 WXGF 私有视觉复审样本混用了不同 provider/解码器身份")
 					}
 					decodedReview, err := wxgfqual.InspectVisualReviewPNG(result.OutputPNG)
 					if err != nil || decodedReview.SHA256 == "" || decodedReview.VisualFingerprint != fmt.Sprintf("%016x", visualHash) {

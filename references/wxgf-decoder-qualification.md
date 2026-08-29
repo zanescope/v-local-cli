@@ -37,13 +37,38 @@ v-local-cli 的生产实现。这里的检查和真实样本试验均独立建�
 ## 实验适配协议
 
 `RunProviderTrial` 通过标准输入向一个本地进程发送单行 JSON。协议版本为
-`v-local-cli-image-decoder/1`；本阶段没有公开 CLI flag，也不会自动发现或下载适配器。
+`v-local-cli-image-decoder/2`；本阶段没有公开 CLI flag，也不会自动发现或下载适配器。
+
+宿主不再直接执行操作者给出的 provider 文件。provider 必须与 `ffmpeg.exe` 位于同一
+普通目录，并存在 `<provider>.manifest.json`。邻接清单协议为
+`v-local-cli/wxgf-provider-identity-manifest/v1`，固定记录两个文件名、两个 SHA-256，及
+`provider_source_status=unverified`、`decoder_source_status=unverified`、
+`decoder_distribution_license_status=not_qualified`。Windows 可用以下脚本在一个全新的
+资格目录中独占创建清单；脚本拒绝覆盖、链接/reparse point、非邻接文件和非
+`ffmpeg.exe` 解码器，也拒绝 `\\server`、`//server` 与设备路径，避免路径解析触发
+网络访问：
+
+```powershell
+pwsh -NoProfile -File .\scripts\new-windows-wxgf-provider-identity-manifest.ps1 `
+  -Provider '<absolute-qualification-provider.exe>' `
+  -Decoder '<same-directory\ffmpeg.exe>'
+```
+
+清单是操作者选择的“预期身份”，不是签名或来源信任根。宿主严格解析清单并拒绝重复或
+未知字段；Windows 逐级拒绝 symlink/junction/reparse point，其他测试平台先把系统路径
+别名解析为无链接规范路径；随后边读边计算 provider 与 FFmpeg
+摘要；只有摘要完全一致才把确切字节复制进私有 staging。实际启动的是 staging 中的
+provider，FFmpeg 也来自同一 staging；请求前和进程退出后再次计算清单、provider、
+FFmpeg 三个摘要。源目录随后变化不会改变已经复制的本次 staging 字节；宿主前后检查能
+观察到的 staging 变化会阻断结果。但同一用户权限下的恶意 provider 仍可能篡改后恢复，
+也可能根本不调用邻接 FFmpeg，因此这不是执行路径证明。清单也未签名，仍不能证明来源
+可信或许可合规，`provider_binary_trust_status=unverified` 保持不变。
 
 请求示意：
 
 ```json
 {
-  "protocol": "v-local-cli-image-decoder/1",
+  "protocol": "v-local-cli-image-decoder/2",
   "request_id": "<一次性随机值>",
   "action": "decode_still",
   "input_path": "<私有临时目录/input.hevc>",
@@ -53,7 +78,12 @@ v-local-cli 的生产实现。这里的检查和真实样本试验均独立建�
   "output_format": "png",
   "maximum_frames": 1,
   "maximum_pixels": 40000000,
-  "network_allowed": false
+  "network_allowed": false,
+  "provider_identity_manifest_sha256": "<宿主计算的清单 SHA-256>",
+  "provider_sha256": "<宿主计算的 staging provider SHA-256>",
+  "decoder_name": "ffmpeg",
+  "decoder_sha256": "<宿主计算的 staging FFmpeg SHA-256>",
+  "decoder_identity_basis": "host_staged_manifest_bound_provider_and_decoder_sha256"
 }
 ```
 
@@ -61,7 +91,7 @@ v-local-cli 的生产实现。这里的检查和真实样本试验均独立建�
 
 ```json
 {
-  "protocol": "v-local-cli-image-decoder/1",
+  "protocol": "v-local-cli-image-decoder/2",
   "request_id": "<原样回显>",
   "status": "decoded",
   "input_sha256": "<原样回显>",
@@ -70,12 +100,12 @@ v-local-cli 的生产实现。这里的检查和真实样本试验均独立建�
   "frame_count": 1,
   "network_used": false,
   "decoder": "ffmpeg",
-  "decoder_version": "<固定版本>"
+  "decoder_version": "sha256:<宿主计算的 staging FFmpeg SHA-256>"
 }
 ```
 
 CLI 侧实验壳会限制请求/诊断输出长度和运行时间，在私有目录中只写入提取后的 HEVC，
-拒绝符号链接、非普通文件、超过 64 MiB 的输出、未知 JSON 字段、多余 JSON、摘要不
+拒绝符号链接/reparse point、非普通文件、超过 64 MiB 的输出、未知 JSON 字段、多余 JSON、摘要不
 匹配、联网声明和多帧声明。适配器输出必须是 PNG，并再次经过 Go 的完整 PNG 分块、
 尾部、解码和 4000 万总像素上限验证。所有临时明文无论成功、失败或超时都必须清理。
 
@@ -112,7 +142,7 @@ Windows 资格验证进程另有一层可查询的 Job Object 约束：provider 
 即使真实样本解码成功，实验结果仍固定为 `production_ready=false`，并保留以下门禁：
 
 1. WXGF 容器布局没有稳定公开规范，当前只能保守识别 HEVC 候选；
-2. 适配器二进制的签名、版本、来源与摘要尚未纳入发行信任链；
+2. provider/解码器摘要已绑定单次 staging 身份，但签名、发布者与来源尚未纳入发行信任链；
 3. `network_used=false` 目前是协议声明，尚无操作系统级网络隔离证明；
 4. 尚无操作系统级文件系统与用户凭据隔离证明；
 5. 非 Windows 平台、或 Windows Job Object 建立失败时，`CreateProcess` 子树与 Job 成员内存约束仍未建立；
@@ -134,7 +164,9 @@ Windows 资格验证进程另有一层可查询的 Job Object 约束：provider 
 go test ./internal/wxgfqual -run TestRealWXGFFixtureQualification -v
 ```
 
-上述独立文件测试未同时设置两个变量时必须跳过。若要复用当前不可变快照中的消息资源
+`V_LOCAL_TEST_WXGF_PROVIDER` 指向的文件必须带有上述邻接清单和同目录 `ffmpeg.exe`；
+缺少清单、文件或摘要不符时在 provider 启动前 fail closed。上述独立文件测试未同时
+设置两个变量时必须跳过。若要复用当前不可变快照中的消息资源
 与 hardlink 双重绑定，并保持 WXGF 只在内存中解密，可另外设置账号选择器：
 
 ```text
@@ -203,17 +235,26 @@ ID 或图片内容摘要。感知指纹只用于保守去重：矩阵同时要�
   由该版本生成，源文件生产版本仍为 `unknown`；
 - 档位依据固定为 `hardlink_cache_filename_variant_not_source_quality`；`high` 只是微信
   缓存命名层级，不证明发送前源图精度或质量；
-- 记录按 `ffmpeg` 及相邻解码器二进制 SHA-256 分组，不把不同解码器构建拼成一组；
-  该身份仍由未受信任 provider 报告，所以 `provider_binary_trust_status=unverified`；
+- v2 记录同时按宿主计算的清单、provider、FFmpeg SHA-256 分组，不把不同 provider 或
+  解码器构建拼成一组；provider 的响应只能精确回显宿主给定身份，不能选择矩阵身份；
+- v1 记录只含 provider 自报的相邻解码器摘要，评估时计入
+  `legacy_records_excluded`，不得静默补字段或升级为 v2 证据；
+- 清单仍未签名且来源/许可未验收，所以 `provider_binary_trust_status=unverified`、
+  `provider_source_status=unverified`、`decoder_source_status=unverified`、
+  `decoder_distribution_license_status=not_qualified`；
 - 矩阵即使为 `pass`，范围也只是 `human_visual_equivalence_only`，并固定
   `production_ready=false`、`fixed_dimension_quality_gate=false`。
 
 示意流程如下，路径与账号都属于本机私有输入：
 
 ```powershell
+$qualificationProvider = '<absolute-qualification-provider.exe>'
+$qualificationFFmpeg = '<same-directory\ffmpeg.exe>'
+pwsh -NoProfile -File .\scripts\new-windows-wxgf-provider-identity-manifest.ps1 `
+  -Provider $qualificationProvider -Decoder $qualificationFFmpeg
 $session = pwsh -NoProfile -File .\scripts\new-windows-wxgf-visual-review-session.ps1 -ShowPaths | ConvertFrom-Json
 $env:V_LOCAL_TEST_WXGF_ACCOUNT = '<account>'
-$env:V_LOCAL_TEST_WXGF_PROVIDER = '<qualification-provider>'
+$env:V_LOCAL_TEST_WXGF_PROVIDER = $qualificationProvider
 $env:V_LOCAL_TEST_WXGF_SAMPLE_TARGET = '2'
 $env:V_LOCAL_TEST_WXGF_REVIEW_ROOT = $session.review_root
 go test .\internal\store -run '^TestRealWXGFQualificationFromSnapshot$' -v -count=1
@@ -314,3 +355,11 @@ SHA-256 与 PyPI 发布页给出的
 缺口。由于其余 7 个
 `production_ready` 阻断项仍存在，公开 CLI 继续返回 `decoder_unavailable`；本地解码
 结论也不会改变 CDN 描述符的 `present_expiry_unknown` 状态或启用任何远端请求。
+
+随后身份协议升级为 provider v2、capture/record/matrix/helper 及脱敏 evidence report
+v2。上述两条正式人工确认是在升级前生成的 v1 历史证据：它们仍能说明当时两个样本的
+人工观察，但只绑定了未受信任 provider 自报的 FFmpeg 摘要。新 helper 会识别并计数这类记录为
+`legacy_records_excluded`，不会把它们拼入宿主计算的清单 + provider + FFmpeg 身份矩阵，
+也不会原地重写私有记录。因此当前 v2 矩阵尚未用真实样本评估；若以后确有必要继续资格
+验证，必须从新的宿主 staging capture 开始并重新取得独立参考图与一次性人工确认。
+这次协议升级不改变历史 v1 的 `high=0`、`medium=2` 观察，也不把它升级为生产证据。

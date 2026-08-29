@@ -34,11 +34,15 @@ param(
 
 Set-StrictMode -Version 3.0
 
-$HelperProtocol = 'v-local-cli/wxgf-visual-review-helper/v1'
-$RecordProtocol = 'v-local-cli/wxgf-visual-review-record/v1'
-$ReportProtocol = 'v-local-cli/windows-wxgf-visual-equivalence-evidence/v1'
-$ProviderProtocol = 'v-local-cli-image-decoder/1'
-$DecoderIdentityBasis = 'provider_reported_adjacent_decoder_sha256_unattested_provider'
+$HelperProtocol = 'v-local-cli/wxgf-visual-review-helper/v2'
+$RecordProtocol = 'v-local-cli/wxgf-visual-review-record/v2'
+$ReportProtocol = 'v-local-cli/windows-wxgf-visual-equivalence-evidence/v2'
+$ProviderProtocol = 'v-local-cli-image-decoder/2'
+$ProviderIdentityManifestProtocol = 'v-local-cli/wxgf-provider-identity-manifest/v1'
+$DecoderIdentityBasis = 'host_staged_manifest_bound_provider_and_decoder_sha256'
+$ProviderSourceStatus = 'unverified'
+$DecoderSourceStatus = 'unverified'
+$DecoderDistributionLicenseStatus = 'not_qualified'
 $ProviderBinaryTrustStatus = 'unverified'
 $QualityTierBasis = 'hardlink_cache_filename_variant_not_source_quality'
 $SourceOriginalQualityStatus = 'unknown'
@@ -853,6 +857,12 @@ $Report = [ordered]@{
         reported_name = $null
         reported_version = $null
         identity_basis = $DecoderIdentityBasis
+        provider_identity_manifest_protocol = $ProviderIdentityManifestProtocol
+        provider_identity_manifest_sha256 = $null
+        provider_sha256 = $null
+        provider_source_status = $ProviderSourceStatus
+        decoder_source_status = $DecoderSourceStatus
+        decoder_distribution_license_status = $DecoderDistributionLicenseStatus
         provider_binary_trust_status = $ProviderBinaryTrustStatus
     }
     snapshot = [ordered]@{
@@ -935,13 +945,22 @@ try {
     $ReviewStarted = $true
     $ReportedDecoder = [string](Get-Field $Capture 'reported_decoder')
     $ReportedDecoderVersion = [string](Get-Field $Capture 'reported_decoder_version')
+    $ProviderIdentityManifestSHA256 = [string](Get-Field $Capture 'provider_identity_manifest_sha256')
+    $ProviderSHA256 = [string](Get-Field $Capture 'provider_sha256')
     Assert-Review (($ReportedDecoder -ceq 'ffmpeg') -and ($ReportedDecoderVersion -cmatch '^sha256:[0-9a-f]{64}$') -and
         ((Get-Field $Capture 'decoder_identity_basis') -ceq $DecoderIdentityBasis) -and
         ((Get-Field $Capture 'provider_protocol') -ceq $ProviderProtocol) -and
+        ((Get-Field $Capture 'provider_identity_manifest_protocol') -ceq $ProviderIdentityManifestProtocol) -and
+        ($ProviderIdentityManifestSHA256 -cmatch '^[0-9a-f]{64}$') -and ($ProviderSHA256 -cmatch '^[0-9a-f]{64}$') -and
+        ((Get-Field $Capture 'provider_source_status') -ceq $ProviderSourceStatus) -and
+        ((Get-Field $Capture 'decoder_source_status') -ceq $DecoderSourceStatus) -and
+        ((Get-Field $Capture 'decoder_distribution_license_status') -ceq $DecoderDistributionLicenseStatus) -and
         ((Get-Field $Capture 'provider_binary_trust_status') -ceq $ProviderBinaryTrustStatus)) 'review_decoder_identity_invalid'
     $Report.sample_review.samples_presented = $Samples.Count
     $Report.decoder.reported_name = $ReportedDecoder
     $Report.decoder.reported_version = $ReportedDecoderVersion
+    $Report.decoder.provider_identity_manifest_sha256 = $ProviderIdentityManifestSHA256
+    $Report.decoder.provider_sha256 = $ProviderSHA256
 
     $WeChatVersion = $null
     if ($ReviewMode -ceq 'Prompt') {
@@ -1064,6 +1083,12 @@ try {
                 reported_decoder_version = $ReportedDecoderVersion
                 decoder_identity_basis = $DecoderIdentityBasis
                 provider_protocol = $ProviderProtocol
+                provider_identity_manifest_protocol = $ProviderIdentityManifestProtocol
+                provider_identity_manifest_sha256 = $ProviderIdentityManifestSHA256
+                provider_sha256 = $ProviderSHA256
+                provider_source_status = $ProviderSourceStatus
+                decoder_source_status = $DecoderSourceStatus
+                decoder_distribution_license_status = $DecoderDistributionLicenseStatus
                 provider_binary_trust_status = $ProviderBinaryTrustStatus
                 quality_tier = [string](Get-Field $Sample 'quality_tier')
                 quality_tier_basis = $QualityTierBasis
@@ -1112,6 +1137,8 @@ try {
             record_paths = $AllRecordPaths
             reported_decoder = $ReportedDecoder
             reported_decoder_version = $ReportedDecoderVersion
+            provider_identity_manifest_sha256 = $ProviderIdentityManifestSHA256
+            provider_sha256 = $ProviderSHA256
         }) 'matrix_evaluation_failed'
         Assert-Review (((Get-Field $Evaluation 'protocol') -ceq $HelperProtocol) -and
             ((Get-Field $Evaluation 'status') -ceq 'evaluated') -and ($null -ne (Get-Field $Evaluation 'matrix'))) 'matrix_evaluation_invalid'

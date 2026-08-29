@@ -71,12 +71,18 @@ func TestPrepareCreatesBoundOfflineReviewBundle(t *testing.T) {
 	capture := wxgfqual.VisualReviewCapture{
 		Protocol: wxgfqual.VisualReviewCaptureProtocol, GenerationID: "generation-one",
 		SnapshotManifestSHA256: helperSHA([]byte("manifest")), PrivateOnly: true,
-		ReportedDecoder:           wxgfqual.VisualReviewDecoder,
-		ReportedDecoderVersion:    "sha256:" + helperSHA([]byte("ffmpeg-build")),
-		DecoderIdentityBasis:      wxgfqual.VisualReviewDecoderIdentityBasis,
-		ProviderProtocol:          wxgfqual.ProviderProtocol,
-		ProviderBinaryTrustStatus: wxgfqual.VisualReviewProviderBinaryTrustStatus,
-		ContainsEvidenceIDs:       true, ContainsContentDigests: true,
+		ReportedDecoder:                  wxgfqual.VisualReviewDecoder,
+		ReportedDecoderVersion:           "sha256:" + helperSHA([]byte("ffmpeg-build")),
+		DecoderIdentityBasis:             wxgfqual.VisualReviewDecoderIdentityBasis,
+		ProviderProtocol:                 wxgfqual.ProviderProtocol,
+		ProviderIdentityManifestProtocol: wxgfqual.ProviderIdentityManifestProtocol,
+		ProviderIdentityManifestSHA256:   helperSHA([]byte("identity-manifest")),
+		ProviderSHA256:                   helperSHA([]byte("provider-build")),
+		ProviderSourceStatus:             wxgfqual.ProviderSourceStatus,
+		DecoderSourceStatus:              wxgfqual.DecoderSourceStatus,
+		DecoderDistributionLicenseStatus: wxgfqual.DecoderDistributionLicenseStatus,
+		ProviderBinaryTrustStatus:        wxgfqual.VisualReviewProviderBinaryTrustStatus,
+		ContainsEvidenceIDs:              true, ContainsContentDigests: true,
 		Samples: []wxgfqual.VisualReviewCaptureSample{{
 			Ordinal: 1, EvidenceID: "wechat:private:1", QualityTier: "medium", WXGFBytes: 100,
 			QualityTierBasis: wxgfqual.VisualReviewQualityTierBasis,
@@ -138,14 +144,20 @@ func helperRecord(version, tier, suffix string) wxgfqual.VisualReviewRecord {
 		Protocol: wxgfqual.VisualReviewRecordProtocol, ReviewStatus: "confirmed",
 		ReviewMethod: "human_side_by_side_wechat_ui_reference", WeChatVersion: version,
 		RunNonce: strings.Repeat("ab", 16), ReviewedAtUTC: "2026-08-29T12:00:00.1234567Z",
-		ClientVersionObservation:    "installed_package_at_review",
-		SourceProducerVersionStatus: wxgfqual.VisualReviewSourceProducerVersionStatus,
-		ReportedDecoder:             wxgfqual.VisualReviewDecoder,
-		ReportedDecoderVersion:      "sha256:" + helperSHA([]byte("ffmpeg-build")),
-		DecoderIdentityBasis:        wxgfqual.VisualReviewDecoderIdentityBasis,
-		ProviderProtocol:            wxgfqual.ProviderProtocol,
-		ProviderBinaryTrustStatus:   wxgfqual.VisualReviewProviderBinaryTrustStatus,
-		QualityTier:                 tier, QualityTierBasis: wxgfqual.VisualReviewQualityTierBasis,
+		ClientVersionObservation:         "installed_package_at_review",
+		SourceProducerVersionStatus:      wxgfqual.VisualReviewSourceProducerVersionStatus,
+		ReportedDecoder:                  wxgfqual.VisualReviewDecoder,
+		ReportedDecoderVersion:           "sha256:" + helperSHA([]byte("ffmpeg-build")),
+		DecoderIdentityBasis:             wxgfqual.VisualReviewDecoderIdentityBasis,
+		ProviderProtocol:                 wxgfqual.ProviderProtocol,
+		ProviderIdentityManifestProtocol: wxgfqual.ProviderIdentityManifestProtocol,
+		ProviderIdentityManifestSHA256:   helperSHA([]byte("identity-manifest")),
+		ProviderSHA256:                   helperSHA([]byte("provider-build")),
+		ProviderSourceStatus:             wxgfqual.ProviderSourceStatus,
+		DecoderSourceStatus:              wxgfqual.DecoderSourceStatus,
+		DecoderDistributionLicenseStatus: wxgfqual.DecoderDistributionLicenseStatus,
+		ProviderBinaryTrustStatus:        wxgfqual.VisualReviewProviderBinaryTrustStatus,
+		QualityTier:                      tier, QualityTierBasis: wxgfqual.VisualReviewQualityTierBasis,
 		EvidenceID: "wechat:private:" + suffix, GenerationID: "generation-" + suffix,
 		SnapshotManifestSHA256: digest("manifest"), WXGFSHA256: digest("wxgf"),
 		DecodedSHA256: digest("decoded"), DecodedVisualFingerprint: digest("visual")[:16], ReferenceSHA256: digest("reference"),
@@ -173,10 +185,23 @@ func TestEvaluateMatrixReturnsOnlySanitizedCoverage(t *testing.T) {
 		writeJSON(t, path, record)
 		paths = append(paths, path)
 	}
+	legacyDirectory := filepath.Join(root, "run-legacy")
+	if err := os.Mkdir(legacyDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := helperRecord("4.0.0.0", "medium", "legacy")
+	legacy.Protocol = wxgfqual.VisualReviewLegacyRecordProtocol
+	legacy.DecoderIdentityBasis = "provider_reported_adjacent_decoder_sha256_unattested_provider"
+	legacy.ProviderProtocol = "v-local-cli-image-decoder/1"
+	legacyPath := filepath.Join(legacyDirectory, "record.json")
+	writeJSON(t, legacyPath, legacy)
+	paths = append(paths, legacyPath)
 	request := helperRequest{
 		Protocol: wxgfqual.VisualReviewHelperProtocol, Action: "evaluate_matrix",
 		RecordRoot: root, RecordPaths: paths, ReportedDecoder: wxgfqual.VisualReviewDecoder,
-		ReportedDecoderVersion: "sha256:" + helperSHA([]byte("ffmpeg-build")),
+		ReportedDecoderVersion:         "sha256:" + helperSHA([]byte("ffmpeg-build")),
+		ProviderIdentityManifestSHA256: helperSHA([]byte("identity-manifest")),
+		ProviderSHA256:                 helperSHA([]byte("provider-build")),
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
@@ -190,7 +215,8 @@ func TestEvaluateMatrixReturnsOnlySanitizedCoverage(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Matrix == nil || response.Matrix.Status != "pass" || response.Matrix.DistinctWXGFSamples != 4 {
+	if response.Matrix == nil || response.Matrix.Status != "pass" || response.Matrix.DistinctWXGFSamples != 4 ||
+		response.Matrix.LegacyRecordsExcluded != 1 {
 		t.Fatalf("视觉复审矩阵 helper 结果异常：%+v", response)
 	}
 	for _, private := range []string{"wechat:private:one", helperRecord("4.1.12.55", "medium", "one").WXGFSHA256} {
@@ -203,6 +229,14 @@ func TestEvaluateMatrixReturnsOnlySanitizedCoverage(t *testing.T) {
 	payload, _ = json.Marshal(request)
 	if err := run(bytes.NewReader(payload), &bytes.Buffer{}); err == nil {
 		t.Fatal("视觉复审矩阵 helper 接受了重复记录路径")
+	}
+
+	legacy.ReviewStatus = "not_confirmed"
+	writeJSON(t, legacyPath, legacy)
+	request.RecordPaths = paths
+	payload, _ = json.Marshal(request)
+	if err := run(bytes.NewReader(payload), &bytes.Buffer{}); err == nil {
+		t.Fatal("视觉复审矩阵 helper 把无效 v1 标记计入 legacy_records_excluded")
 	}
 }
 
