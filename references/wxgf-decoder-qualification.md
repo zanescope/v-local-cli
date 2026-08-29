@@ -171,6 +171,25 @@ go test ./internal/store -run TestRealWXGFQualificationFromSnapshot -v -count=1
 若用户拒绝或没有准备参考图，可直接使用 `-ReviewMode Skip`：helper 只校验 capture 与
 解码图绑定，随后清理，不要求 CLI、账号、参考图或浏览器，也不会生成复审记录。
 
+部分沙箱化浏览器不能读取仅当前用户可访问的复审目录。只有操作者明确接受短时扩大
+本机读取面时，才可额外传入既有的本地固定磁盘 `-BrowserDisplayRoot`。脚本不会修改
+私有复审目录 ACL，而是在所选位置创建受保护的随机子目录。当前用户、SYSTEM、
+Administrators 是唯一可写主体；展示根 ACL 中实际具有读取权限的机器/域特定
+`S-1-5-21-*` 主体会被复制为只读，Windows 应用包也仅获读取/执行权限。
+`Authenticated Users`、`BUILTIN\Users` 等通用本地用户组不会被复制。根目录存在适用的
+deny 或 Everyone/匿名/Guests 读取、位于非固定磁盘、与私有目录重叠、没有合格读取主体
+或包含 reparse point 时直接拒绝。这能兼容 Codex 等宿主专用读取组，同时不会继承它们
+的写权限。
+
+每次只创建一份不覆盖既有文件、与私有 HTML 摘要一致的展示副本；收到输入后先复核
+副本未变并立即删除，最后删除随机子目录。内容变化或任何清理失败都会阻止通过。普通
+脱敏报告只记录 `browser_display_copy_used`、
+`browser_display_access_basis=explicit_local_root_readers_downgraded_to_read_only` 与
+`temporary_browser_display_artifacts_removed`，固定 `browser_display_path_included=false`。
+展示窗口内所选根的合格读取主体仍可能读取该份明文页面，所以这不是默认行为，也不能
+证明浏览器缓存已擦除；应使用专用、本地、非同步目录，先用无微信数据自检验证，确认
+结束后检查其为空。
+
 私有复审记录会保留 evidence ID、快照 generation/manifest、WXGF/解码/参考图摘要和
 解码图 64 位感知指纹；这些值不得上传。可分享矩阵只保留计数与 blocker，不含 evidence
 ID 或图片内容摘要。感知指纹只用于保守去重：矩阵同时要求 `high/medium` 复审中至少
@@ -203,6 +222,18 @@ go test .\internal\store -run '^TestRealWXGFQualificationFromSnapshot$' -v -coun
 pwsh -NoProfile -File .\scripts\accept-windows-wxgf-visual-equivalence.ps1 `
   -Helper '<visual-review-helper>' -Cli '<current-v-local-cli>' `
   -Account '<account>' -ReviewRoot $session.review_root -ReviewMode Prompt
+
+# 仅在默认浏览器读不到严格 ACL 目录且操作者明确接受上述短时本机读取面时：
+# 若当前仓库位于同步盘，必须改用另一个已通过下方自检的本地非同步目录。
+$browserDisplayRoot = Join-Path $PWD '.codex-temp\wxgf-browser-display'
+New-Item -ItemType Directory -Path $browserDisplayRoot -Force | Out-Null
+# 先用不含微信数据的页面确认浏览器确实能读取，并按提示输入一次性 challenge：
+pwsh -NoProfile -File .\scripts\accept-windows-wxgf-visual-equivalence.ps1 `
+  -SelfTest -BrowserDisplayRoot $browserDisplayRoot
+pwsh -NoProfile -File .\scripts\accept-windows-wxgf-visual-equivalence.ps1 `
+  -Helper '<visual-review-helper>' -Cli '<current-v-local-cli>' `
+  -Account '<account>' -ReviewRoot $session.review_root -ReviewMode Prompt `
+  -BrowserDisplayRoot $browserDisplayRoot
 
 # 或者拒绝复审并立即清理；这一分支不需要 -Cli、-Account 或参考图：
 pwsh -NoProfile -File .\scripts\accept-windows-wxgf-visual-equivalence.ps1 `

@@ -398,9 +398,25 @@ func TestWXGFVisualReviewQualificationContract(t *testing.T) {
 	visualText := string(visualScript)
 	for _, expected := range []string{
 		"[ValidateSet('Prompt', 'Skip')]",
+		"[string]$BrowserDisplayRoot",
 		"$HelperAction = if ($ReviewMode -ceq 'Skip') { 'inspect' } else { 'prepare' }",
 		"$Expected = \"CONFIRM-CONTENT-ORIENTATION-CROP-COLOR-$Challenge\"",
-		"Start-Process -FilePath $BundlePath",
+		"Start-Process -FilePath $OpenPath",
+		"[System.IO.FileMode]::CreateNew",
+		"Set-BrowserDisplayDirectoryAcl",
+		"Get-BrowserDisplayReadSids",
+		"S-1-15-2-1",
+		"S-1-15-2-2",
+		"browser_display_root_acl_public_reader",
+		"$Sid.StartsWith('S-1-5-21-'",
+		"explicit_local_root_readers_downgraded_to_read_only",
+		"browser_display_root_overlaps_private_root",
+		"browser_display_root_not_local_fixed_disk",
+		"browser_display_copy_changed",
+		"CONFIRM-BROWSER-DISPLAY-$InteractiveChallenge",
+		"browser_display_interactive_checked",
+		"temporary_browser_display_artifacts_removed",
+		"browser_display_path_included = $false",
 		"browser_cache_erasure_proven = $false",
 		"fixed_dimension_quality_gate = $false",
 		"source_producer_version_status = $SourceProducerVersionStatus",
@@ -413,7 +429,7 @@ func TestWXGFVisualReviewQualificationContract(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
-		"--allow-network", "Invoke-WebRequest", "Invoke-RestMethod", "Start-BitsTransfer",
+		"--allow-network", "Invoke-WebRequest", "Invoke-RestMethod", "Start-BitsTransfer", "Copy-Item",
 		"MinImageLongEdge", "MinImageShortEdge", "source_original_quality_known = $true",
 	} {
 		if strings.Contains(visualText, forbidden) {
@@ -456,6 +472,8 @@ func TestWXGFVisualReviewQualificationContract(t *testing.T) {
 		"`samples_confirmed=2`",
 		"`distinct_wxgf_samples=2`",
 		"`high=0`、`medium=2`",
+		"`-BrowserDisplayRoot`",
+		"`browser_display_path_included=false`",
 	} {
 		if !bytes.Contains(reference, []byte(expected)) {
 			t.Errorf("WXGF 人工复审文档缺少证据边界：%s", expected)

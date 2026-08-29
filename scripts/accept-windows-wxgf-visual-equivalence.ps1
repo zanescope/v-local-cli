@@ -9,7 +9,9 @@ removes decoded/reference/comparison files. Private review records retain the
 snapshot/evidence/content binding. The ordinary report contains only coverage
 counts and blockers. Skip mode validates and removes capture/decoded files
 without requiring a reference image, CLI, account, browser, or private record.
-The script never operates the WeChat UI or uses a network.
+The optional BrowserDisplayRoot creates a short-lived, browser-readable copy
+without weakening the private review root ACL. The script never operates the
+WeChat UI or uses a network.
 
 .NOTES
 Exit 0 means the two-version high+medium matrix is complete, 1 means failure,
@@ -23,6 +25,7 @@ param(
     [string]$ReviewRoot,
     [string]$PrivateRecordRootBase,
     [string]$EvidenceRootBase,
+    [string]$BrowserDisplayRoot,
     [ValidateSet('Prompt', 'Skip')]
     [string]$ReviewMode = 'Prompt',
     [switch]$ShowPaths,
@@ -41,6 +44,7 @@ $QualityTierBasis = 'hardlink_cache_filename_variant_not_source_quality'
 $SourceOriginalQualityStatus = 'unknown'
 $SourceProducerVersionStatus = 'unknown'
 $VersionCoverageBasis = 'installed_package_at_review_not_source_provenance'
+$BrowserDisplayAccessBasis = 'explicit_local_root_readers_downgraded_to_read_only'
 
 function Stop-Review {
     param([Parameter(Mandatory = $true)][string]$Code)
@@ -329,17 +333,460 @@ function New-RunNonce {
     return [Convert]::ToHexString($Bytes).ToLowerInvariant()
 }
 
+function Get-FileSHA256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    Assert-RegularFile $Path 'browser_display_file_invalid'
+    $Stream = [System.IO.FileStream]::new(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    try {
+        return [Convert]::ToHexString(
+            [System.Security.Cryptography.SHA256]::HashData($Stream)
+        ).ToLowerInvariant()
+    }
+    finally {
+        $Stream.Dispose()
+    }
+}
+
+function Get-BrowserDisplayReadSids {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $FullControlSids = @($CurrentUser, 'S-1-5-18', 'S-1-5-32-544')
+    $RejectedSids = @('S-1-1-0', 'S-1-5-7', 'S-1-5-32-546')
+    $ReadSids = @{}
+    $RootReaderCount = 0
+    $ReadData = [System.Security.AccessControl.FileSystemRights]::ReadData
+    $Security = Get-Acl -LiteralPath $Root -ErrorAction Stop
+    foreach ($Rule in $Security.GetAccessRules(
+        $true,
+        $true,
+        [System.Security.Principal.SecurityIdentifier]
+    )) {
+        if (($Rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) {
+            continue
+        }
+        Assert-Review ($Rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow) 'browser_display_root_acl_deny'
+        $Sid = ([System.Security.Principal.SecurityIdentifier]$Rule.IdentityReference).Value
+        if ($FullControlSids -ccontains $Sid) {
+            continue
+        }
+        Assert-Review ($RejectedSids -cnotcontains $Sid) 'browser_display_root_acl_public_reader'
+        if (-not $Sid.StartsWith('S-1-5-21-', [System.StringComparison]::Ordinal)) {
+            continue
+        }
+        if (($Rule.FileSystemRights -band $ReadData) -ne 0) {
+            if (-not $ReadSids.ContainsKey($Sid)) {
+                $ReadSids[$Sid] = $true
+                $RootReaderCount++
+            }
+        }
+    }
+    Assert-Review ($RootReaderCount -gt 0) 'browser_display_root_no_eligible_reader'
+    foreach ($Sid in @('S-1-15-2-1', 'S-1-15-2-2')) {
+        $ReadSids[$Sid] = $true
+    }
+    return @($ReadSids.Keys | Sort-Object)
+}
+
+function Set-BrowserDisplayDirectoryAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+    $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $System = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $Administrators = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $ReadSids = @(Get-BrowserDisplayReadSids $Root)
+    $Inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $Propagation = [System.Security.AccessControl.PropagationFlags]::None
+    $Allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $Security = [System.Security.AccessControl.DirectorySecurity]::new()
+    $Security.SetAccessRuleProtection($true, $false)
+    $Security.SetOwner($CurrentUser)
+    foreach ($Identity in @($CurrentUser, $System, $Administrators)) {
+        $Rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $Identity,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            $Inheritance,
+            $Propagation,
+            $Allow
+        )
+        [void]$Security.AddAccessRule($Rule)
+    }
+    foreach ($Sid in $ReadSids) {
+        $Identity = [System.Security.Principal.SecurityIdentifier]::new($Sid)
+        $Rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $Identity,
+            [System.Security.AccessControl.FileSystemRights]::ReadAndExecute,
+            $Inheritance,
+            $Propagation,
+            $Allow
+        )
+        [void]$Security.AddAccessRule($Rule)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $Security -ErrorAction Stop
+}
+
+function Assert-BrowserDisplayDirectoryAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+    $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $FullControlSids = @($CurrentUser, 'S-1-5-18', 'S-1-5-32-544')
+    $ReadOnlySids = @(Get-BrowserDisplayReadSids $Root)
+    $AllowedSids = @($FullControlSids + $ReadOnlySids)
+    $FullControlObserved = @{}
+    $ReadOnlyObserved = @{}
+    foreach ($Sid in $FullControlSids) {
+        $FullControlObserved[$Sid] = $false
+    }
+    foreach ($Sid in $ReadOnlySids) {
+        $ReadOnlyObserved[$Sid] = $false
+    }
+    $ReadMask = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute
+    $WriteMask = [System.Security.AccessControl.FileSystemRights]::WriteData -bor
+        [System.Security.AccessControl.FileSystemRights]::AppendData -bor
+        [System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+        [System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+        [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [System.Security.AccessControl.FileSystemRights]::Delete -bor
+        [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [System.Security.AccessControl.FileSystemRights]::TakeOwnership
+    $Security = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    Assert-Review $Security.AreAccessRulesProtected 'browser_display_acl_inherited'
+    try {
+        $Owner = ([System.Security.Principal.NTAccount]$Security.Owner).Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        ).Value
+    }
+    catch {
+        Stop-Review 'browser_display_owner_invalid'
+    }
+    Assert-Review ($Owner -ceq $CurrentUser) 'browser_display_owner_invalid'
+    foreach ($Rule in $Security.GetAccessRules(
+        $true,
+        $true,
+        [System.Security.Principal.SecurityIdentifier]
+    )) {
+        Assert-Review ($Rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow) 'browser_display_acl_deny'
+        $Sid = ([System.Security.Principal.SecurityIdentifier]$Rule.IdentityReference).Value
+        Assert-Review ($AllowedSids -ccontains $Sid) 'browser_display_acl_untrusted_allow'
+        if ($FullControlSids -ccontains $Sid) {
+            Assert-Review (($Rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq
+                [System.Security.AccessControl.FileSystemRights]::FullControl) 'browser_display_acl_full_control_missing'
+            $FullControlObserved[$Sid] = $true
+        }
+        else {
+            Assert-Review (($Rule.FileSystemRights -band $ReadMask) -eq $ReadMask) 'browser_display_acl_read_missing'
+            Assert-Review (($Rule.FileSystemRights -band $WriteMask) -eq 0) 'browser_display_acl_write_granted'
+            $ReadOnlyObserved[$Sid] = $true
+        }
+    }
+    foreach ($Sid in $FullControlSids) {
+        Assert-Review $FullControlObserved[$Sid] 'browser_display_acl_full_control_missing'
+    }
+    foreach ($Sid in $ReadOnlySids) {
+        Assert-Review $ReadOnlyObserved[$Sid] 'browser_display_acl_read_missing'
+    }
+}
+
+function Test-DirectoryTreesOverlap {
+    param(
+        [Parameter(Mandatory = $true)][string]$Left,
+        [Parameter(Mandatory = $true)][string]$Right
+    )
+    $LeftFull = [System.IO.Path]::TrimEndingDirectorySeparator([System.IO.Path]::GetFullPath($Left))
+    $RightFull = [System.IO.Path]::TrimEndingDirectorySeparator([System.IO.Path]::GetFullPath($Right))
+    if ($LeftFull.Equals($RightFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    $Separator = [System.IO.Path]::DirectorySeparatorChar
+    return $LeftFull.StartsWith($RightFull + $Separator, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $RightFull.StartsWith($LeftFull + $Separator, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Resolve-BrowserDisplayRoot {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    Assert-LocalAbsolutePath $Path 'browser_display_root_invalid'
+    Assert-NoReparsePoint $Path 'browser_display_root_invalid'
+    $Item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Assert-Review ($Item.PSIsContainer -and (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0)) 'browser_display_root_invalid'
+    $FullPath = [System.IO.Path]::GetFullPath($Item.FullName)
+    Assert-Review (-not $FullPath.Equals([System.IO.Path]::GetPathRoot($FullPath), [System.StringComparison]::OrdinalIgnoreCase)) 'browser_display_root_too_broad'
+    $Drive = [System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot($FullPath))
+    Assert-Review ($Drive.DriveType -eq [System.IO.DriveType]::Fixed) 'browser_display_root_not_local_fixed_disk'
+    return $FullPath
+}
+
+function New-BrowserDisplayRunDirectory {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $Directory = Join-Path $Root ('v-local-wxgf-review-display-' + (New-RunNonce))
+    Assert-Review (-not (Test-Path -LiteralPath $Directory)) 'browser_display_run_directory_exists'
+    $Created = $false
+    try {
+        [void](New-Item -ItemType Directory -Path $Directory -ErrorAction Stop)
+        $Created = $true
+        Assert-NoReparsePoint $Directory 'browser_display_run_directory_invalid'
+        Set-BrowserDisplayDirectoryAcl $Directory $Root
+        Assert-BrowserDisplayDirectoryAcl $Directory $Root
+        return [System.IO.Path]::GetFullPath($Directory)
+    }
+    catch {
+        if ($Created -and (Test-Path -LiteralPath $Directory)) {
+            $Remaining = @(Get-ChildItem -LiteralPath $Directory -Force -ErrorAction SilentlyContinue)
+            if ($Remaining.Count -eq 0) {
+                Remove-Item -LiteralPath $Directory -Force -ErrorAction SilentlyContinue
+            }
+        }
+        throw
+    }
+}
+
+function New-BrowserDisplayCopy {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][int]$Ordinal
+    )
+    Assert-RegularFile $Source 'browser_display_source_invalid'
+    Assert-NoReparsePoint $Directory 'browser_display_run_directory_invalid'
+    Assert-BrowserDisplayDirectoryAcl $Directory $Root
+    $Target = Join-Path $Directory ('review-{0:D2}.html' -f $Ordinal)
+    Assert-Review (-not (Test-Path -LiteralPath $Target)) 'browser_display_copy_exists'
+    $SourceStream = $null
+    $TargetStream = $null
+    try {
+        try {
+            $SourceStream = [System.IO.FileStream]::new(
+                $Source,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::Read
+            )
+            $TargetStream = [System.IO.FileStream]::new(
+                $Target,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None
+            )
+            $SourceStream.CopyTo($TargetStream)
+            $TargetStream.Flush($true)
+        }
+        finally {
+            if ($null -ne $TargetStream) {
+                $TargetStream.Dispose()
+            }
+            if ($null -ne $SourceStream) {
+                $SourceStream.Dispose()
+            }
+        }
+    }
+    catch {
+        if (Test-Path -LiteralPath $Target) {
+            Remove-Item -LiteralPath $Target -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+    Assert-RegularFile $Target 'browser_display_copy_invalid'
+    $SourceSHA256 = Get-FileSHA256 $Source
+    $TargetSHA256 = Get-FileSHA256 $Target
+    Assert-Review ($SourceSHA256 -ceq $TargetSHA256) 'browser_display_copy_mismatch'
+    return [pscustomobject]@{
+        path = [System.IO.Path]::GetFullPath($Target)
+        sha256 = $TargetSHA256
+    }
+}
+
+function Remove-BrowserDisplayCopy {
+    param([Parameter(Mandatory = $true)][object]$Copy)
+    $Path = [string](Get-Field $Copy 'path')
+    $ExpectedSHA256 = [string](Get-Field $Copy 'sha256')
+    $Existed = Test-Path -LiteralPath $Path
+    $Unchanged = $false
+    if ($Existed) {
+        Assert-RegularFile $Path 'browser_display_copy_invalid'
+        $Unchanged = (Get-FileSHA256 $Path) -ceq $ExpectedSHA256
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    }
+    return [pscustomobject]@{
+        existed = $Existed
+        unchanged = $Unchanged
+        removed = -not (Test-Path -LiteralPath $Path)
+    }
+}
+
+function Remove-BrowserDisplayRunDirectory {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+    if (-not (Test-Path -LiteralPath $Directory)) {
+        return $true
+    }
+    Assert-LocalAbsolutePath $Directory 'browser_display_cleanup_root_invalid'
+    Assert-NoReparsePoint $Directory 'browser_display_cleanup_root_invalid'
+    $Remaining = @(Get-ChildItem -LiteralPath $Directory -Force -ErrorAction Stop)
+    if ($Remaining.Count -ne 0) {
+        return $false
+    }
+    Remove-Item -LiteralPath $Directory -Force -ErrorAction Stop
+    return -not (Test-Path -LiteralPath $Directory)
+}
+
+function Remove-BrowserDisplayArtifacts {
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][string[]]$ExpectedPaths
+    )
+    $DirectoryFull = [System.IO.Path]::TrimEndingDirectorySeparator([System.IO.Path]::GetFullPath($Directory))
+    $AllExpectedFilesRemoved = $true
+    foreach ($Path in $ExpectedPaths) {
+        $PathFull = [System.IO.Path]::GetFullPath($Path)
+        $Parent = [System.IO.Path]::TrimEndingDirectorySeparator([System.IO.Path]::GetDirectoryName($PathFull))
+        $Name = [System.IO.Path]::GetFileName($PathFull)
+        if ((-not $Parent.Equals($DirectoryFull, [System.StringComparison]::OrdinalIgnoreCase)) -or
+            ($Name -cnotmatch '^review-[0-9]{2}\.html$')) {
+            $AllExpectedFilesRemoved = $false
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $PathFull)) {
+            continue
+        }
+        try {
+            Assert-NoReparsePoint $PathFull 'browser_display_cleanup_file_invalid'
+            $Item = Get-Item -LiteralPath $PathFull -Force -ErrorAction Stop
+            Assert-Review ((-not $Item.PSIsContainer) -and
+                (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0)) 'browser_display_cleanup_file_invalid'
+            Remove-Item -LiteralPath $PathFull -Force -ErrorAction Stop
+            $AllExpectedFilesRemoved = $AllExpectedFilesRemoved -and (-not (Test-Path -LiteralPath $PathFull))
+        }
+        catch {
+            $AllExpectedFilesRemoved = $false
+        }
+    }
+    try {
+        $DirectoryRemoved = Remove-BrowserDisplayRunDirectory $Directory
+    }
+    catch {
+        $DirectoryRemoved = $false
+    }
+    return $AllExpectedFilesRemoved -and $DirectoryRemoved
+}
+
 function Invoke-SelfTest {
+    param([AllowEmptyString()][string]$InteractiveBrowserDisplayRoot)
     $Challenge = '0123abcd'
     $Expected = "CONFIRM-CONTENT-ORIENTATION-CROP-COLOR-$Challenge"
     Assert-Review ($Expected -cne 'yes') 'self_test_weak_confirmation'
+    $SelfTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('v-local-wxgf-display-self-test-' + (New-RunNonce))
+    $DisplayRoot = Join-Path $SelfTestRoot 'display-root'
+    $Source = Join-Path $SelfTestRoot 'source.html'
+    $RunDirectory = $null
+    $Copy = $null
+    $PartialPath = $null
+    $InteractiveRunDirectory = $null
+    $InteractiveCopy = $null
+    $InteractiveExpectedPaths = @()
+    $InteractiveChecked = $false
+    try {
+        [void](New-Item -ItemType Directory -Path $SelfTestRoot -ErrorAction Stop)
+        [void](New-Item -ItemType Directory -Path $DisplayRoot -ErrorAction Stop)
+        [System.IO.File]::WriteAllText(
+            $Source,
+            '<!doctype html><meta charset="utf-8"><title>WXGF 浏览器展示自检</title><h1>WXGF 浏览器展示自检页已打开</h1><p>此页面不含微信数据。</p>'
+        )
+        $RunDirectory = New-BrowserDisplayRunDirectory $DisplayRoot
+        $Copy = New-BrowserDisplayCopy $Source $RunDirectory $DisplayRoot 1
+        [System.IO.File]::AppendAllText([string](Get-Field $Copy 'path'), '<!--tampered-->')
+        $TamperedCleanup = Remove-BrowserDisplayCopy $Copy
+        Assert-Review ($TamperedCleanup.existed -and (-not $TamperedCleanup.unchanged) -and $TamperedCleanup.removed) 'self_test_browser_display_change_not_detected'
+        $Copy = New-BrowserDisplayCopy $Source $RunDirectory $DisplayRoot 2
+        $CopyCleanup = Remove-BrowserDisplayCopy $Copy
+        Assert-Review ($CopyCleanup.existed -and $CopyCleanup.unchanged -and $CopyCleanup.removed) 'self_test_browser_display_copy_cleanup_failed'
+        $Copy = $null
+        $PartialPath = Join-Path $RunDirectory 'review-03.html'
+        $Partial = [System.IO.FileStream]::new(
+            $PartialPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+        $Partial.Dispose()
+        Assert-Review (Remove-BrowserDisplayArtifacts $RunDirectory @($PartialPath)) 'self_test_browser_display_directory_cleanup_failed'
+        $RunDirectory = $null
+        if (-not [string]::IsNullOrWhiteSpace($InteractiveBrowserDisplayRoot)) {
+            $InteractiveRoot = Resolve-BrowserDisplayRoot $InteractiveBrowserDisplayRoot
+            $InteractiveRunDirectory = New-BrowserDisplayRunDirectory $InteractiveRoot
+            $InteractiveExpectedPath = [System.IO.Path]::GetFullPath(
+                (Join-Path $InteractiveRunDirectory 'review-01.html')
+            )
+            $InteractiveExpectedPaths += $InteractiveExpectedPath
+            $InteractiveCopy = New-BrowserDisplayCopy $Source $InteractiveRunDirectory $InteractiveRoot 1
+            try {
+                [void](Start-Process -FilePath ([string](Get-Field $InteractiveCopy 'path')) -ErrorAction Stop)
+            }
+            catch {
+                Stop-Review 'self_test_browser_display_open_failed'
+            }
+            $InteractiveChallenge = [Guid]::NewGuid().ToString('N').Substring(0, 8)
+            $InteractiveExpected = "CONFIRM-BROWSER-DISPLAY-$InteractiveChallenge"
+            $InteractiveAnswer = Read-Host "仅当无微信数据的自检页正常显示时输入 $InteractiveExpected"
+            $InteractiveCleanup = Remove-BrowserDisplayCopy $InteractiveCopy
+            Assert-Review ($InteractiveCleanup.existed -and $InteractiveCleanup.unchanged -and $InteractiveCleanup.removed) 'self_test_browser_display_copy_cleanup_failed'
+            $InteractiveCopy = $null
+            Assert-Review ($InteractiveAnswer -ceq $InteractiveExpected) 'self_test_browser_display_not_confirmed'
+            Assert-Review (Remove-BrowserDisplayArtifacts $InteractiveRunDirectory $InteractiveExpectedPaths) 'self_test_browser_display_directory_cleanup_failed'
+            $InteractiveRunDirectory = $null
+            $InteractiveChecked = $true
+        }
+        Remove-Item -LiteralPath $Source -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $DisplayRoot -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $SelfTestRoot -Force -ErrorAction Stop
+        Assert-Review (-not (Test-Path -LiteralPath $SelfTestRoot)) 'self_test_browser_display_cleanup_failed'
+    }
+    finally {
+        if ($null -ne $Copy -and (Test-Path -LiteralPath ([string](Get-Field $Copy 'path')))) {
+            [void](Remove-BrowserDisplayCopy $Copy)
+        }
+        if ($null -ne $RunDirectory -and (Test-Path -LiteralPath $RunDirectory)) {
+            if ($null -ne $PartialPath) {
+                [void](Remove-BrowserDisplayArtifacts $RunDirectory @($PartialPath))
+            }
+            else {
+                [void](Remove-BrowserDisplayRunDirectory $RunDirectory)
+            }
+        }
+        if ($null -ne $InteractiveCopy -and (Test-Path -LiteralPath ([string](Get-Field $InteractiveCopy 'path')))) {
+            [void](Remove-BrowserDisplayCopy $InteractiveCopy)
+        }
+        if ($null -ne $InteractiveRunDirectory -and (Test-Path -LiteralPath $InteractiveRunDirectory)) {
+            [void](Remove-BrowserDisplayArtifacts $InteractiveRunDirectory $InteractiveExpectedPaths)
+        }
+        foreach ($Path in @($Source, $DisplayRoot, $SelfTestRoot)) {
+            if (Test-Path -LiteralPath $Path) {
+                $Item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+                if ($null -ne $Item -and (-not $Item.PSIsContainer -or
+                    @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue).Count -eq 0)) {
+                    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
     $Public = [ordered]@{
         protocol = $ReportProtocol
         run_status = 'inconclusive'
         sample_review_status = 'not_recorded'
+        browser_display_copy_used = $false
+        browser_display_access_basis = 'not_used'
+        temporary_browser_display_artifacts_removed = $true
         contains_account = $false
         contains_evidence_ids = $false
         contains_image_content_digests = $false
+        browser_display_path_included = $false
         fixed_dimension_quality_gate = $false
         version_coverage_basis = $VersionCoverageBasis
         source_producer_version_status = $SourceProducerVersionStatus
@@ -359,6 +806,11 @@ function Invoke-SelfTest {
         fixed_dimension_quality_gate = $false
         producer_version_not_overstated = $true
         decoder_build_bound = $true
+        browser_display_opt_in = $true
+        browser_display_acl_limited = $true
+        browser_display_copy_removed = $true
+        browser_display_path_not_reported = $true
+        browser_display_interactive_checked = $InteractiveChecked
         provider_binary_trust_status = $ProviderBinaryTrustStatus
         production_ready = $false
         network = $false
@@ -367,7 +819,7 @@ function Invoke-SelfTest {
 }
 
 if ($SelfTest) {
-    Invoke-SelfTest
+    Invoke-SelfTest $BrowserDisplayRoot
     exit 0
 }
 
@@ -386,6 +838,9 @@ $Report = [ordered]@{
         crop_confirmed = $false
         color_and_artifacts_confirmed = $false
         temporary_disk_artifacts_removed = $false
+        browser_display_copy_used = $false
+        browser_display_access_basis = 'not_used'
+        temporary_browser_display_artifacts_removed = $true
         browser_cache_erasure_proven = $false
     }
     environment = [ordered]@{
@@ -411,6 +866,7 @@ $Report = [ordered]@{
         contains_evidence_ids = $false
         contains_image_content_digests = $false
         contains_source_paths = $false
+        browser_display_path_included = $false
         private_records_uploaded = $false
         network_access_performed = $false
         wechat_ui_automated = $false
@@ -422,6 +878,9 @@ $Report = [ordered]@{
 $Prepared = $null
 $ReviewStarted = $false
 $ArtifactsRemoved = $false
+$BrowserDisplayRunDirectory = $null
+$BrowserDisplayExpectedPaths = @()
+$BrowserDisplayArtifactsRemoved = $true
 $ReportPath = $null
 $FinalExitCode = 1
 try {
@@ -433,6 +892,9 @@ try {
         Assert-PrivateIdentifier $Account 'account_invalid'
         Assert-Review (-not [string]::IsNullOrWhiteSpace($Cli)) 'executable_invalid'
         Assert-RegularFile ([System.IO.Path]::GetFullPath($Cli)) 'executable_invalid'
+    }
+    else {
+        Assert-Review ([string]::IsNullOrWhiteSpace($BrowserDisplayRoot)) 'browser_display_root_requires_prompt'
     }
     Assert-LocalAbsolutePath $ReviewRoot 'review_root_invalid'
     Assert-NoReparsePoint $ReviewRoot 'review_root_invalid'
@@ -451,6 +913,12 @@ try {
         $EvidenceRootBase = Join-Path $env:LOCALAPPDATA 'v-local\acceptance-evidence\wxgf-visual-equivalence'
     }
     $EvidenceRootBase = Ensure-PrivateBase $EvidenceRootBase
+    if ($ReviewMode -ceq 'Prompt' -and -not [string]::IsNullOrWhiteSpace($BrowserDisplayRoot)) {
+        $BrowserDisplayRoot = Resolve-BrowserDisplayRoot $BrowserDisplayRoot
+        foreach ($PrivateRoot in @($ReviewRoot, $PrivateRecordRootBase, $EvidenceRootBase)) {
+            Assert-Review (-not (Test-DirectoryTreesOverlap $BrowserDisplayRoot $PrivateRoot)) 'browser_display_root_overlaps_private_root'
+        }
+    }
 
     $HelperAction = if ($ReviewMode -ceq 'Skip') { 'inspect' } else { 'prepare' }
     $ExpectedHelperStatus = if ($ReviewMode -ceq 'Skip') { 'inspected' } else { 'prepared' }
@@ -495,6 +963,15 @@ try {
         $Report.snapshot.manifest_bound = $true
     }
 
+    if ($ReviewMode -ceq 'Prompt' -and -not [string]::IsNullOrWhiteSpace($BrowserDisplayRoot)) {
+        $BrowserDisplayRunDirectory = New-BrowserDisplayRunDirectory $BrowserDisplayRoot
+        $BrowserDisplayArtifactsRemoved = $false
+        $Report.sample_review.browser_display_copy_used = $true
+        $Report.sample_review.browser_display_access_basis = $BrowserDisplayAccessBasis
+        $Report.sample_review.temporary_browser_display_artifacts_removed = $false
+        Write-Warning '已显式启用浏览器展示副本；复审期间所选展示根的合格读取主体仅获只读访问，确认后脚本立即删除副本。'
+    }
+
     $AllConfirmed = $ReviewMode -ceq 'Prompt'
     if ($ReviewMode -ceq 'Prompt') {
         foreach ($Sample in $Samples) {
@@ -506,24 +983,59 @@ try {
             Assert-Review ($BundleName -ceq $ExpectedBundleName) 'review_bundle_name_invalid'
             $BundlePath = Join-Path $ReviewRoot $BundleName
             Assert-RegularFile $BundlePath 'review_bundle_invalid'
+            $OpenPath = $BundlePath
+            $DisplayCopy = $null
+            $DisplayCleanup = $null
+            $Answer = $null
             Write-Host "私有样本 $Ordinal/$($Samples.Count)，evidence_id=$EvidenceId"
             Write-Host '请确认左图来自这条微信消息的界面截图，并逐项检查：内容、方向、裁剪、颜色/解码伪影。'
             Write-Warning '本脚本会删除磁盘临时图，但无法证明浏览器历史、缓存或进程内存已擦除。'
             try {
-                [void](Start-Process -FilePath $BundlePath -ErrorAction Stop)
+                if ($null -ne $BrowserDisplayRunDirectory) {
+                    $BrowserDisplayExpectedPaths += [System.IO.Path]::GetFullPath(
+                        (Join-Path $BrowserDisplayRunDirectory ('review-{0:D2}.html' -f $Ordinal))
+                    )
+                    $DisplayCopy = New-BrowserDisplayCopy $BundlePath $BrowserDisplayRunDirectory $BrowserDisplayRoot $Ordinal
+                    $OpenPath = [string](Get-Field $DisplayCopy 'path')
+                }
+                try {
+                    [void](Start-Process -FilePath $OpenPath -ErrorAction Stop)
+                }
+                catch {
+                    Stop-Review 'review_bundle_open_failed'
+                }
+                $Challenge = [Guid]::NewGuid().ToString('N').Substring(0, 8)
+                $Expected = "CONFIRM-CONTENT-ORIENTATION-CROP-COLOR-$Challenge"
+                $Answer = Read-Host "四项全部一致时输入 $Expected；其他输入均不通过"
             }
-            catch {
-                Stop-Review 'review_bundle_open_failed'
+            finally {
+                if ($null -ne $DisplayCopy) {
+                    try {
+                        $DisplayCleanup = Remove-BrowserDisplayCopy $DisplayCopy
+                    }
+                    catch {
+                        Stop-Review 'temporary_browser_display_copy_cleanup_failed'
+                    }
+                }
             }
-            $Challenge = [Guid]::NewGuid().ToString('N').Substring(0, 8)
-            $Expected = "CONFIRM-CONTENT-ORIENTATION-CROP-COLOR-$Challenge"
-            $Answer = Read-Host "四项全部一致时输入 $Expected；其他输入均不通过"
+            if ($null -ne $DisplayCopy) {
+                Assert-Review ([bool]$DisplayCleanup.removed) 'temporary_browser_display_copy_cleanup_failed'
+                if ($Answer -ceq $Expected) {
+                    Assert-Review ([bool]($DisplayCleanup.existed -and $DisplayCleanup.unchanged)) 'browser_display_copy_changed'
+                }
+            }
             if ($Answer -cne $Expected) {
                 $AllConfirmed = $false
                 break
             }
             $Report.sample_review.samples_confirmed++
         }
+    }
+
+    if ($null -ne $BrowserDisplayRunDirectory) {
+        $BrowserDisplayArtifactsRemoved = Remove-BrowserDisplayArtifacts $BrowserDisplayRunDirectory $BrowserDisplayExpectedPaths
+        $Report.sample_review.temporary_browser_display_artifacts_removed = $BrowserDisplayArtifactsRemoved
+        Assert-Review $BrowserDisplayArtifactsRemoved 'temporary_browser_display_cleanup_failed'
     }
 
     $ArtifactsRemoved = Remove-ReviewArtifacts ([System.IO.Path]::GetFullPath($ReviewRoot)) $Samples
@@ -631,6 +1143,15 @@ catch {
     $FinalExitCode = 1
 }
 finally {
+    if ($null -ne $BrowserDisplayRunDirectory -and -not $BrowserDisplayArtifactsRemoved) {
+        $BrowserDisplayArtifactsRemoved = Remove-BrowserDisplayArtifacts $BrowserDisplayRunDirectory $BrowserDisplayExpectedPaths
+        $Report.sample_review.temporary_browser_display_artifacts_removed = $BrowserDisplayArtifactsRemoved
+        if (-not $BrowserDisplayArtifactsRemoved) {
+            $Report.run_status = 'failed'
+            $Report.failure_code = 'temporary_browser_display_cleanup_failed'
+            $FinalExitCode = 1
+        }
+    }
     if ($ReviewStarted -and -not $ArtifactsRemoved -and (Test-Path -LiteralPath $ReviewRoot)) {
         try {
             $SamplesForCleanup = if ($null -ne $Prepared) { @((Get-Field $Prepared 'samples')) } else { @() }
@@ -666,6 +1187,9 @@ $Summary = [ordered]@{
     sample_review_status = $Report.sample_review.status
     samples_confirmed = $Report.sample_review.samples_confirmed
     temporary_disk_artifacts_removed = $Report.sample_review.temporary_disk_artifacts_removed
+    browser_display_copy_used = $Report.sample_review.browser_display_copy_used
+    browser_display_access_basis = $Report.sample_review.browser_display_access_basis
+    temporary_browser_display_artifacts_removed = $Report.sample_review.temporary_browser_display_artifacts_removed
     matrix_status = if ($null -eq $Report.matrix) { 'not_evaluated' } else { [string](Get-Field $Report.matrix 'status') }
     evidence_path_included = [bool]$ShowPaths
 }
