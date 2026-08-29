@@ -22,6 +22,7 @@ import (
 const chatImageRecoveryConsentSchemaVersion = 1
 const chatImageRecoveryConsentTTL = 5 * time.Minute
 const chatImageRecoveryConsentScope = "single_account_message_image_candidate_attempt"
+const maxChatImageRecoveryConsentPruneEntries = 256
 const maxChatImageRecoveryPlainBytes = 64 * 1024 * 1024
 
 var chatImageRecoveryNow = time.Now
@@ -152,6 +153,55 @@ func writeChatImageRecoveryConsent(path string, record chatImageRecoveryConsentR
 	return nil
 }
 
+// pruneExpiredChatImageRecoveryConsents bounds persistent challenge state
+// without trusting file timestamps. Only strictly decoded records whose
+// filename binding and embedded expiry both match are eligible for deletion.
+// The caller holds the account transaction lock; the scan is capped so a
+// damaged directory cannot turn one preflight into an unbounded operation.
+func pruneExpiredChatImageRecoveryConsents(directory string, now time.Time) error {
+	opened, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	entries, readErr := opened.ReadDir(maxChatImageRecoveryConsentPruneEntries)
+	closeErr := opened.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		suffix := ""
+		switch {
+		case strings.HasSuffix(name, ".pending.json"):
+			suffix = ".pending.json"
+		case strings.HasSuffix(name, ".used.json"):
+			suffix = ".used.json"
+		default:
+			continue
+		}
+		challengeID := strings.TrimSuffix(name, suffix)
+		if !validChatImageRecoveryChallengeID(challengeID) {
+			continue
+		}
+		path := filepath.Join(directory, name)
+		record, decodeErr := decodeChatImageRecoveryConsent(path)
+		if decodeErr != nil || record.ChallengeID != challengeID {
+			continue
+		}
+		expiresAt, parseErr := time.Parse(time.RFC3339Nano, record.ExpiresAt)
+		if parseErr != nil || expiresAt.After(now) {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 func issueChatImageRecoveryConsent(
 	value state.AccountState,
 	inspection store.ChatImageRemoteRecoveryInspection,
@@ -171,6 +221,9 @@ func issueChatImageRecoveryConsent(
 		return chatImageRecoveryConsentRecord{}, err
 	}
 	issuedAt := chatImageRecoveryNow().UTC()
+	if err := pruneExpiredChatImageRecoveryConsents(directory, issuedAt); err != nil {
+		return chatImageRecoveryConsentRecord{}, err
+	}
 	for attempt := 0; attempt < 4; attempt++ {
 		challengeID, err := newChatImageRecoveryChallengeID()
 		if err != nil {

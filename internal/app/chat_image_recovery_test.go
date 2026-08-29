@@ -197,6 +197,47 @@ func TestRecoverChatImageRequiresBoundConsentAndRejectsReplay(t *testing.T) {
 	}
 }
 
+func TestRecoverChatImagePreflightPrunesExpiredConsentRecords(t *testing.T) {
+	fixture := createChatImageRecoveryFixture(t)
+	previousNow := chatImageRecoveryNow
+	current := time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC)
+	chatImageRecoveryNow = func() time.Time { return current }
+	t.Cleanup(func() { chatImageRecoveryNow = previousNow })
+
+	pendingID, _ := recoveryChallenge(t, fixture)
+	usedID, _ := recoveryChallenge(t, fixture)
+	if _, err := consumeChatImageRecoveryConsent(fixture.account.AccountID, usedID); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := state.EnsureRecoveryConsentPath(fixture.account.AccountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingPath := filepath.Join(directory, pendingID+".pending.json")
+	usedPath := filepath.Join(directory, usedID+".used.json")
+	if _, err := os.Lstat(pendingPath); err != nil {
+		t.Fatalf("过期测试 pending 夹具缺失：%v", err)
+	}
+	if _, err := os.Lstat(usedPath); err != nil {
+		t.Fatalf("过期测试 used 夹具缺失：%v", err)
+	}
+
+	current = current.Add(chatImageRecoveryConsentTTL + time.Second)
+	currentID, _ := recoveryChallenge(t, fixture)
+	for _, path := range []string{pendingPath, usedPath} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("签发新 challenge 后仍保留过期记录 %q：%v", path, err)
+		}
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != currentID+".pending.json" {
+		t.Fatalf("授权目录清理后状态异常：%v", entries)
+	}
+}
+
 func TestRecoverChatImageRejectsExpiredConsentAndSnapshotChangeBeforeNetwork(t *testing.T) {
 	t.Run("expired", func(t *testing.T) {
 		fixture := createChatImageRecoveryFixture(t)
