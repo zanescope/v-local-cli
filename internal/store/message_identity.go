@@ -120,9 +120,12 @@ func validProtoText(value []byte) bool {
 
 func (identity messageIdentity) enrich(message *Message, status int64) {
 	username := message.SenderUsername
-	message.IsFromMe = status == 2 || (!strings.HasSuffix(message.Chat, "@chatroom") && username != "" && username != message.Chat)
+	isSystem := message.IsSystem || message.Kind == "system"
+	message.IsFromMe = !isSystem && (status == 2 || (!strings.HasSuffix(message.Chat, "@chatroom") && username != "" && username != message.Chat))
 	message.SenderIdentity = "contact"
-	if message.IsFromMe {
+	if isSystem {
+		message.SenderIdentity = "system"
+	} else if message.IsFromMe {
 		message.SenderIdentity = "self"
 	} else if username == "" {
 		message.SenderIdentity = "unknown"
@@ -134,8 +137,32 @@ func (identity messageIdentity) enrich(message *Message, status int64) {
 	}
 	message.SenderGroupNickname = identity.groupNicknames[username]
 	message.Sender = firstNonEmpty(message.SenderGroupNickname, message.SenderContactDisplay, message.SenderNickname, username)
-	if message.IsFromMe && message.Sender == "" {
+	if isSystem {
+		message.Sender = "系统"
+	} else if message.IsFromMe && message.Sender == "" {
 		message.Sender = "我"
+	}
+	if message.ReplyTo != nil {
+		replyUsername := strings.TrimSpace(message.ReplyTo.ToUsername)
+		switch {
+		case replyUsername != "":
+			resolvedName := identity.groupNicknames[replyUsername]
+			if contact, found := identity.contacts[replyUsername]; found {
+				resolvedName = firstNonEmpty(resolvedName, contact.Display, contact.Remark, contact.Nickname)
+			}
+			if resolvedName != "" {
+				message.ReplyTo.IdentityStatus = "resolved"
+				if message.ReplyTo.ToName == "" {
+					message.ReplyTo.ToName = resolvedName
+				}
+			} else {
+				message.ReplyTo.IdentityStatus = "unresolved"
+			}
+		case message.ReplyTo.ToName != "":
+			message.ReplyTo.IdentityStatus = "display_only"
+		default:
+			message.ReplyTo.IdentityStatus = "not_retained"
+		}
 	}
 	for index, mention := range message.Mentions {
 		if mention == "所有人" {

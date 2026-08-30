@@ -80,7 +80,7 @@ CLI 不使用发布时间邻近、目录邻近、修改时间或图像相似度�
 - `network_access_performed=false`；
 - 实际 `media_kind`、`format`、`bytes`、`content_md5` 和 `verified_by`。
 
-本地没有可验证候选时，默认返回 `moment_media_network_authorization_required`。只有显式增加 `--allow-network` 才进入远端流程：
+本地没有可验证候选时，CLI 会先在进程内验证远端描述符是否完整；缺失时直接返回 `moment_media_remote_descriptor_missing`，不会先请求无效授权。描述符完整时默认返回 `moment_media_network_authorization_required`，并报告 `remote_descriptor_status=present_expiry_unknown`、`descriptor_expiry_status=unknown` 与单证据、单次授权范围。只有显式增加 `--allow-network` 才进入远端流程：
 
 1. 从同一媒体 XML 读取 URL、临时 token、数字 key、可用的 MD5 和长度；图片 key 来自对应媒体节点，普通视频 key 来自同一条朋友圈 XML 的外层 `<enc key>`。这些敏感字段保留在进程内，不进入查询 JSON、命令行、错误文本或日志；
 2. URL 固定升级为 HTTPS，图片只接受 `mmsns.qpic.cn`/`vweixinthumb*.tc.qq.com` 精确模式；视频接受旧的 `snsvideodownload*.tc.qq.com`，以及当前微信使用的腾讯 `*.video.qq.com` 路径，但后者的首级标签必须包含 `wxsns`、路径末段必须精确为 `snsvideodownload`。两类地址都拒绝自定义端口、userinfo、fragment 和仿冒后缀；查询参数由 CLI 受控构造，不接受用户传入 URL；
@@ -88,6 +88,8 @@ CLI 不使用发布时间邻近、目录邻近、修改时间或图像相似度�
 4. 不使用环境代理、Cookie 或浏览器会话，不跟随重定向，设置连接、TLS、响应头与总请求超时；图片响应上限 64 MiB，视频响应上限 512 MiB；
 5. 明文响应直接验证；加密图片用数字 key 初始化 ISAAC-64，为完整响应生成密钥流并逐字节 XOR；加密视频只对前 `min(131072, 文件长度)` 字节执行相同 XOR，后续字节保持原样；
 6. 图片输出必须通过严格结构验证：JPEG/PNG 完整解码、拒绝尾随数据且像素数有上限，GIF 先验证全部分块与累计帧像素上限再完整解码，无零依赖严格解码器的远端 WebP/WXGF 拒绝导出。视频输出必须通过完整 ISO BMFF 顶层盒边界，并具有首个有效 `ftyp`、`moov`/`moof` 和 `mdat`。CDN 描述符的 MD5 可能是密文摘要、明文摘要或非内容标识；CLI 会对两个阶段分别求摘要，通过 `descriptor_md5_status` 和 `descriptor_size_status` 保留匹配结果，精确命中时提升 `verified_by` 等级。CDN/TLS、token、解密和严格明文结构均通过才返回 `verified_remote_download` 并原子写入目标文件。
+
+CDN 描述符没有被当作持久 URL。成功结果的 `remote_descriptor_status=verified_at_request_time` 与 `descriptor_expiry_status=unknown_future` 仅证明该次请求；不会缓存授权，也不会承诺随后仍可访问。401/403 类拒绝标为 `expired_or_rejected`，404/410 类资源缺失标为 `resource_unavailable_or_expired`，两者都要求新描述符和新的单次授权；`temporarily_rate_limited` 单独处理，不能据此断言过期。DNS、连接、重定向或响应读取失败统一保持 `unknown_after_request_failure`，先刷新描述符再重新取得单次授权；收到但无法验真的容器标为 `response_unverified`，既不能当作媒体成功，也不能据此断言描述符仍有效。
 
 ISAAC-64 核心按算法作者 Bob Jenkins 的公开领域参考实现独立实现，常量、两轮 seed 混合、结果池消费顺序和 64 位状态转换均由测试向量约束：[ISAAC-64 参考实现](https://burtleburtle.net/bob/c/isaac64.c)。朋友圈图片的全文解密、普通视频的外层 key 与前 128 KiB 规则可由现存 [CipherTalk 媒体实现](https://github.com/ILoveBingLu/CipherTalk/blob/e252f18de78450bb8976e1435711873b05d5f124/electron/services/snsService.ts#L1378-L1399) 及其 [视频路径](https://github.com/ILoveBingLu/CipherTalk/blob/e252f18de78450bb8976e1435711873b05d5f124/electron/services/snsService.ts#L1595-L1623) 交叉核对。实况照片仍需独立描述符绑定，当前不展开。
 
@@ -131,4 +133,4 @@ ISAAC-64 核心按算法作者 Bob Jenkins 的公开领域参考实现独立实�
 - `interaction_scope=locally_retained_visible_only`、`complete_interaction_history=false`：互动只覆盖当前 XML 可见留存项。
 - `truncated=true`：显式 `--limit` 截断了匹配结果。
 - `meta.time_window`：实际本地日期范围；跨联系人或跨公众号搜索默认当前自然日，指定对象默认当前自然月。
-- `--all` 且未显式传 `--limit` 时不设置条数上限，但仍受本地留存、快照发布和结构适配范围限制。
+- `--all` 只取消日期范围，仍使用命令默认条数上限；只有显式 `--limit 0` 才不设置条数上限，但仍受本地留存、快照发布和结构适配范围限制。

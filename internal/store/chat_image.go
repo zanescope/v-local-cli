@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/zanescope/v-local-cli/internal/cryptoutil"
@@ -16,21 +18,103 @@ import (
 const maxChatImageBytes = 64 * 1024 * 1024
 const maxChatImageHardlinkRows = 32
 const maxChatImageResourceRows = 32
+const maxChatImageRemoteParameterBytes = 4096
 
 type ChatImage struct {
-	EvidenceID string `json:"evidence_id"`
-	Chat       string `json:"chat"`
-	LocalID    int64  `json:"local_id"`
-	ServerID   int64  `json:"server_id,omitempty"`
-	Timestamp  int64  `json:"timestamp,omitempty"`
-	SortKey    int64  `json:"sort_key,omitempty"`
-	Format     string `json:"format"`
-	Bytes      int64  `json:"bytes"`
-	Width      int    `json:"width"`
-	Height     int    `json:"height"`
-	SHA256     string `json:"sha256"`
-	VerifiedBy string `json:"verified_by"`
-	Data       []byte `json:"-"`
+	EvidenceID                  string   `json:"evidence_id"`
+	Chat                        string   `json:"chat"`
+	LocalID                     int64    `json:"local_id"`
+	ServerID                    int64    `json:"server_id,omitempty"`
+	Timestamp                   int64    `json:"timestamp,omitempty"`
+	SortKey                     int64    `json:"sort_key,omitempty"`
+	Format                      string   `json:"format"`
+	Bytes                       int64    `json:"bytes"`
+	Width                       int      `json:"width"`
+	Height                      int      `json:"height"`
+	SHA256                      string   `json:"sha256"`
+	VerifiedBy                  string   `json:"verified_by"`
+	ResolutionStatus            string   `json:"resolution_status"`
+	QualityTier                 string   `json:"quality_tier"`
+	QualityBasis                string   `json:"quality_basis"`
+	RemoteDescriptorStatus      string   `json:"remote_descriptor_status"`
+	RemoteDescriptorParseStatus string   `json:"remote_descriptor_parse_status"`
+	RemoteProtocolStatus        string   `json:"remote_protocol_status"`
+	RemoteDescriptorTiers       []string `json:"remote_descriptor_tiers,omitempty"`
+	HigherQualityLocalStatus    string   `json:"higher_quality_local_status"`
+	HigherQualityDetectedFormat string   `json:"higher_quality_detected_format,omitempty"`
+	HigherQualityRecoveryAction string   `json:"higher_quality_recovery_action"`
+	Data                        []byte   `json:"-"`
+}
+
+// ChatImageResolutionError 只携带可公开的分类和计数，不包含微信源路径、
+// CDN 描述符、密钥或候选内容。
+type ChatImageResolutionError struct {
+	Kind                        string
+	DetectedFormat              string
+	QualityTier                 string
+	RemoteDescriptorStatus      string
+	RemoteDescriptorParseStatus string
+	RemoteProtocolStatus        string
+	RemoteDescriptorTiers       []string
+	CandidateCount              int
+	ExistingCandidateCount      int
+	cause                       error
+}
+
+func (err *ChatImageResolutionError) Error() string {
+	return err.Kind
+}
+
+func (err *ChatImageResolutionError) Unwrap() error { return err.cause }
+
+type chatImageRemoteDescriptor struct {
+	status         string
+	parseStatus    string
+	protocolStatus string
+	tiers          []string
+	candidates     []chatImageRemoteCandidate
+}
+
+type chatImageRemoteCandidate struct {
+	tier                    string
+	encryptedQueryParameter string
+	parameterEncoding       string
+	aesKey                  [16]byte
+	expectedBytes           int64
+	expectedWidth           int
+	expectedHeight          int
+	expectedMD5             string
+}
+
+func chatImageRemoteCandidateHasBindingMetadata(candidate *chatImageRemoteCandidate) bool {
+	if candidate == nil {
+		return false
+	}
+	return candidate.expectedMD5 != "" ||
+		(candidate.expectedBytes > 0 && candidate.expectedWidth > 0 && candidate.expectedHeight > 0)
+}
+
+func unknownChatImageRemoteDescriptor() chatImageRemoteDescriptor {
+	return chatImageRemoteDescriptor{status: "unknown", parseStatus: "not_evaluated", protocolStatus: "not_evaluated"}
+}
+
+func missingChatImageRemoteDescriptor() chatImageRemoteDescriptor {
+	return chatImageRemoteDescriptor{status: "missing", parseStatus: "not_applicable", protocolStatus: "not_applicable"}
+}
+
+func (descriptor *chatImageRemoteDescriptor) clear() {
+	for index := range descriptor.candidates {
+		clear(descriptor.candidates[index].aesKey[:])
+	}
+}
+
+func chatImageFailure(kind string, descriptor chatImageRemoteDescriptor, cause error) *ChatImageResolutionError {
+	return &ChatImageResolutionError{
+		Kind: kind, RemoteDescriptorStatus: descriptor.status,
+		RemoteDescriptorParseStatus: descriptor.parseStatus,
+		RemoteProtocolStatus:        descriptor.protocolStatus,
+		RemoteDescriptorTiers:       append([]string(nil), descriptor.tiers...), cause: cause,
+	}
 }
 
 func protobufVarint(payload []byte, offset *int) (uint64, error) {
@@ -108,6 +192,10 @@ func imageResourceStem(root string, message Message) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return imageResourceStemFromFiles(files, message)
+}
+
+func imageResourceStemFromFiles(files []string, message Message) (string, error) {
 	stems := map[string]bool{}
 	for _, path := range files {
 		if !strings.EqualFold(filepath.Base(path), "message_resource.db") {
@@ -198,7 +286,324 @@ func imageResourceStem(root string, message Message) (string, error) {
 }
 
 type chatImageCandidate struct {
-	path string
+	path        string
+	qualityTier string
+}
+
+func chatImageQualityTier(fileName, stem string) string {
+	name := strings.ToLower(filepath.Base(fileName))
+	stem = strings.ToLower(stem)
+	switch name {
+	case stem + "_h.dat":
+		return "high"
+	case stem + ".dat":
+		return "medium"
+	case stem + "_t.dat":
+		return "thumbnail"
+	default:
+		return "unknown"
+	}
+}
+
+func chatImageQualityRank(value string) int {
+	switch value {
+	case "high":
+		return 4
+	case "medium":
+		return 3
+	case "thumbnail":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func betterChatImageQuality(left, right string) string {
+	if chatImageQualityRank(right) > chatImageQualityRank(left) {
+		return right
+	}
+	return left
+}
+
+type chatImageCandidateState struct {
+	validationFailed    map[string]bool
+	decoderUnavailable  map[string]string
+	unknownTierObserved bool
+}
+
+func newChatImageCandidateState() chatImageCandidateState {
+	return chatImageCandidateState{
+		validationFailed: map[string]bool{}, decoderUnavailable: map[string]string{},
+	}
+}
+
+func (state chatImageCandidateState) higherQualityStatus(selectedTier string) (string, string, string) {
+	selectedRank := chatImageQualityRank(selectedTier)
+	if selectedTier == "unknown" {
+		return "unknown", "", "manual_review"
+	}
+	if selectedTier == "high" {
+		return "not_applicable", "", "none"
+	}
+	for _, tier := range []string{"high", "medium", "thumbnail"} {
+		if chatImageQualityRank(tier) <= selectedRank {
+			continue
+		}
+		if format := state.decoderUnavailable[tier]; format != "" {
+			return "decoder_unavailable", format, "do_not_request_redownload_same_candidate"
+		}
+	}
+	for _, tier := range []string{"high", "medium", "thumbnail"} {
+		if chatImageQualityRank(tier) > selectedRank && state.validationFailed[tier] {
+			return "validation_failed", "", "inspect_key_or_format_before_retry"
+		}
+	}
+	if state.unknownTierObserved {
+		return "unknown", "", "manual_review"
+	}
+	return "missing", "", "ask_user_to_open_original_then_refresh_and_retry"
+}
+
+func rawChatImageContent(root string, message Message) (string, error) {
+	if strings.TrimSpace(message.SourceDB) == "" {
+		return "", errors.New("图片消息缺少来源数据库")
+	}
+	path := filepath.Join(root, filepath.FromSlash(message.SourceDB))
+	if !pathUnderRoot(path, root) {
+		return "", errors.New("图片消息来源数据库越界")
+	}
+	database, err := openReadOnly(path)
+	if err != nil {
+		return "", errors.New("图片消息来源数据库不可读")
+	}
+	defer database.Close()
+	table := messageTable(message.Chat)
+	if !tableExists(database, table) {
+		return "", errors.New("图片消息来源表不存在")
+	}
+	available := columns(database, table)
+	selected := []string{}
+	for _, name := range []string{"message_content", "compress_content", "WCDB_CT_message_content"} {
+		if column := columnCI(available, name); column != "" {
+			selected = append(selected, column)
+		}
+	}
+	if len(selected) == 0 {
+		return "", errors.New("图片消息没有可读正文列")
+	}
+	conditions := []string{}
+	arguments := []any{}
+	if column := columnCI(available, "local_id"); column != "" && message.LocalID != 0 {
+		conditions = append(conditions, quoteIdentifier(column)+"=?")
+		arguments = append(arguments, message.LocalID)
+	}
+	if column := columnCI(available, "server_id"); column != "" && message.ServerID != 0 {
+		conditions = append(conditions, quoteIdentifier(column)+"=?")
+		arguments = append(arguments, message.ServerID)
+	}
+	if column := columnCI(available, "local_type"); column != "" {
+		conditions = append(conditions, "("+quoteIdentifier(column)+" & 4294967295)=3")
+	}
+	if len(arguments) == 0 {
+		return "", errors.New("图片消息缺少可查询标识")
+	}
+	quoted := make([]string, len(selected))
+	for index, name := range selected {
+		quoted[index] = quoteIdentifier(name)
+	}
+	query := "SELECT " + strings.Join(quoted, ",") + " FROM " + quoteIdentifier(table) +
+		" WHERE " + strings.Join(conditions, " AND ") + " ORDER BY rowid LIMIT 3"
+	rows, err := database.Query(query, arguments...)
+	if err != nil {
+		return "", errors.New("图片消息正文查询失败")
+	}
+	defer rows.Close()
+	contents := map[string]bool{}
+	for rows.Next() {
+		values := make([]any, len(selected))
+		targets := make([]any, len(selected))
+		for index := range values {
+			targets[index] = &values[index]
+		}
+		if rows.Scan(targets...) != nil {
+			continue
+		}
+		fields := map[string]any{}
+		for index, name := range selected {
+			fields[strings.ToLower(name)] = values[index]
+		}
+		encodingFlag := asInt64(fields[strings.ToLower(columnCI(available, "WCDB_CT_message_content"))])
+		content := decodeValue(fields[strings.ToLower(columnCI(available, "message_content"))], encodingFlag)
+		if strings.TrimSpace(content) == "" {
+			content = decodeValue(fields[strings.ToLower(columnCI(available, "compress_content"))], encodingFlag)
+		}
+		_, content = parseSenderPrefix(content)
+		if strings.TrimSpace(content) != "" {
+			contents[content] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", errors.New("图片消息正文读取失败")
+	}
+	if len(contents) != 1 {
+		return "", errors.New("图片消息正文缺失或冲突")
+	}
+	for content := range contents {
+		return content, nil
+	}
+	return "", errors.New("图片消息正文缺失")
+}
+
+func parseChatImageRemotePositiveInteger(value string, maximum int64) (int64, bool, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false, true
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 || parsed > maximum {
+		return 0, true, false
+	}
+	// Desktop message XML commonly serializes an unknown optional dimension as
+	// zero. Treat that sentinel like an omitted observation: it cannot bind a
+	// response, but it is not evidence that the descriptor itself is malformed.
+	if parsed == 0 {
+		return 0, false, true
+	}
+	return parsed, true, true
+}
+
+func parseChatImageRemoteParameter(value string) (string, string, bool) {
+	value = strings.TrimSpace(value)
+	if len(value) < 64 || len(value) > maxChatImageRemoteParameterBytes || len(value)%2 != 0 {
+		return "", "", false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') && (character < 'A' || character > 'F') {
+			return "", "", false
+		}
+	}
+	return value, "opaque_hex", true
+}
+
+func parseChatImageRemoteAESKey(value string) ([16]byte, bool, bool) {
+	var result [16]byte
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return result, false, true
+	}
+	if len(value) != 32 {
+		return result, true, false
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != len(result) {
+		clear(decoded)
+		return result, true, false
+	}
+	copy(result[:], decoded)
+	clear(decoded)
+	return result, true, true
+}
+
+func chatImageRemoteMD5(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", true
+	}
+	return normalizedChatImageMD5(value)
+}
+
+func parseChatImageRemoteDescriptor(content string) chatImageRemoteDescriptor {
+	node, err := parseMessageXML(content)
+	if err != nil {
+		return unknownChatImageRemoteDescriptor()
+	}
+	image := node.descendant("img")
+	if image == nil {
+		return missingChatImageRemoteDescriptor()
+	}
+	type variantDefinition struct {
+		tier, parameterAttribute, keyAttribute, sizeAttribute, widthAttribute, heightAttribute, md5Attribute string
+		fallbackKeyAttribute                                                                                 string
+	}
+	definitions := []variantDefinition{
+		{tier: "high", parameterAttribute: "cdnbigimgurl", keyAttribute: "aeskey", sizeAttribute: "hdlength", widthAttribute: "cdnhdwidth", heightAttribute: "cdnhdheight", md5Attribute: "originsourcemd5"},
+		{tier: "medium", parameterAttribute: "cdnmidimgurl", keyAttribute: "aeskey", sizeAttribute: "length", widthAttribute: "cdnmidwidth", heightAttribute: "cdnmidheight", md5Attribute: "md5"},
+		{tier: "thumbnail", parameterAttribute: "cdnthumburl", keyAttribute: "cdnthumbaeskey", fallbackKeyAttribute: "aeskey", sizeAttribute: "cdnthumblength", widthAttribute: "cdnthumbwidth", heightAttribute: "cdnthumbheight"},
+	}
+	descriptor := chatImageRemoteDescriptor{
+		status: "present_expiry_unknown", parseStatus: "present_incomplete", protocolStatus: "unverified_desktop_protocol",
+	}
+	incomplete, invalid := false, false
+	for _, definition := range definitions {
+		rawParameter := image.attribute(definition.parameterAttribute)
+		if rawParameter == "" {
+			continue
+		}
+		descriptor.tiers = append(descriptor.tiers, definition.tier)
+		parameter, parameterEncoding, parameterValid := parseChatImageRemoteParameter(rawParameter)
+		keyValue := image.attribute(definition.keyAttribute)
+		if keyValue == "" && definition.fallbackKeyAttribute != "" {
+			keyValue = image.attribute(definition.fallbackKeyAttribute)
+		}
+		key, keyPresent, keyValid := parseChatImageRemoteAESKey(keyValue)
+		expectedBytes, _, bytesValid := parseChatImageRemotePositiveInteger(image.attribute(definition.sizeAttribute), maxChatImageBytes)
+		expectedWidth, widthPresent, widthValid := parseChatImageRemotePositiveInteger(image.attribute(definition.widthAttribute), 100000)
+		expectedHeight, heightPresent, heightValid := parseChatImageRemotePositiveInteger(image.attribute(definition.heightAttribute), 100000)
+		expectedMD5, md5Valid := chatImageRemoteMD5(image.attribute(definition.md5Attribute))
+		if !parameterValid || !keyValid {
+			invalid = true
+			clear(key[:])
+			continue
+		}
+		if !keyPresent {
+			incomplete = true
+			continue
+		}
+		if !bytesValid {
+			invalid = true
+			expectedBytes = 0
+		}
+		if !widthValid || !heightValid || widthPresent != heightPresent {
+			invalid = true
+			expectedWidth, expectedHeight = 0, 0
+		}
+		if !md5Valid {
+			invalid = true
+			expectedMD5 = ""
+		}
+		candidate := chatImageRemoteCandidate{
+			tier: definition.tier, encryptedQueryParameter: parameter, parameterEncoding: parameterEncoding,
+			aesKey: key, expectedBytes: expectedBytes, expectedWidth: int(expectedWidth), expectedHeight: int(expectedHeight), expectedMD5: expectedMD5,
+		}
+		if !chatImageRemoteCandidateHasBindingMetadata(&candidate) {
+			incomplete = true
+			clear(candidate.aesKey[:])
+			continue
+		}
+		descriptor.candidates = append(descriptor.candidates, candidate)
+	}
+	if len(descriptor.tiers) == 0 {
+		return missingChatImageRemoteDescriptor()
+	}
+	switch {
+	case len(descriptor.candidates) > 0 && (incomplete || invalid):
+		descriptor.parseStatus = "parsed_partial_unverified_protocol"
+	case len(descriptor.candidates) > 0:
+		descriptor.parseStatus = "parsed_unverified_protocol"
+	case invalid:
+		descriptor.parseStatus = "present_invalid"
+	default:
+		descriptor.parseStatus = "present_incomplete"
+	}
+	return descriptor
+}
+
+func inspectChatImageRemoteDescriptor(root string, message Message) chatImageRemoteDescriptor {
+	content, err := rawChatImageContent(root, message)
+	if err != nil {
+		return unknownChatImageRemoteDescriptor()
+	}
+	return parseChatImageRemoteDescriptor(content)
 }
 
 func normalizedChatImageMD5(value string) (string, bool) {
@@ -219,6 +624,14 @@ func chatImageCandidates(root, accountPath, stem, mediaMD5 string) ([]chatImageC
 	if err != nil {
 		return nil, err
 	}
+	return chatImageCandidatesFromFiles(files, accountPath, stem, mediaMD5, nil)
+}
+
+// chatImageCandidatesFromFiles keeps the production message-resource +
+// hardlink binding rules while allowing qualification tests to supply a
+// one-time, bounded attachment index. A nil index preserves the production
+// fallback walk exactly.
+func chatImageCandidatesFromFiles(files []string, accountPath, stem, mediaMD5 string, indexedFiles map[string][]string) ([]chatImageCandidate, error) {
 	normalizedMD5 := ""
 	if strings.TrimSpace(mediaMD5) != "" {
 		var valid bool
@@ -231,6 +644,7 @@ func chatImageCandidates(root, accountPath, stem, mediaMD5 string) ([]chatImageC
 	seen := map[string]bool{}
 	mappedFileNames := map[string]bool{}
 	hardlinkMatched := false
+	roots := hardlinkRoots(accountPath, "image")
 	for _, path := range files {
 		if !strings.EqualFold(filepath.Base(path), "hardlink.db") {
 			continue
@@ -298,7 +712,7 @@ func chatImageCandidates(root, accountPath, stem, mediaMD5 string) ([]chatImageC
 					segments = append(segments, segment)
 				}
 			}
-			for _, base := range hardlinkRoots(accountPath, "image") {
+			for _, base := range roots {
 				candidatePath := filepath.Join(append([]string{base}, segments...)...)
 				if !pathUnderRoot(candidatePath, base) {
 					continue
@@ -306,7 +720,9 @@ func chatImageCandidates(root, accountPath, stem, mediaMD5 string) ([]chatImageC
 				identity := strings.ToLower(filepath.Clean(candidatePath))
 				if !seen[identity] {
 					seen[identity] = true
-					result = append(result, chatImageCandidate{path: candidatePath})
+					result = append(result, chatImageCandidate{
+						path: candidatePath, qualityTier: chatImageQualityTier(mappedName, stem),
+					})
 				}
 			}
 		}
@@ -325,7 +741,41 @@ func chatImageCandidates(root, accountPath, stem, mediaMD5 string) ([]chatImageC
 	if !hardlinkMatched {
 		return result, nil
 	}
-	for _, base := range hardlinkRoots(accountPath, "image") {
+	if indexedFiles != nil {
+		names := make([]string, 0, len(mappedFileNames))
+		for name := range mappedFileNames {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			paths := append([]string(nil), indexedFiles[name]...)
+			sort.Strings(paths)
+			for _, path := range paths {
+				if strings.ToLower(filepath.Base(path)) != name {
+					continue
+				}
+				insideRoot := false
+				for _, base := range roots {
+					if pathUnderRoot(path, base) {
+						insideRoot = true
+						break
+					}
+				}
+				if !insideRoot {
+					continue
+				}
+				identity := strings.ToLower(filepath.Clean(path))
+				if !seen[identity] {
+					seen[identity] = true
+					result = append(result, chatImageCandidate{
+						path: path, qualityTier: chatImageQualityTier(name, stem),
+					})
+				}
+			}
+		}
+		return result, nil
+	}
+	for _, base := range roots {
 		walkErr := filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
@@ -344,7 +794,9 @@ func chatImageCandidates(root, accountPath, stem, mediaMD5 string) ([]chatImageC
 			identity := strings.ToLower(filepath.Clean(path))
 			if !seen[identity] {
 				seen[identity] = true
-				result = append(result, chatImageCandidate{path: path})
+				result = append(result, chatImageCandidate{
+					path: path, qualityTier: chatImageQualityTier(entry.Name(), stem),
+				})
 			}
 			return nil
 		})
@@ -365,35 +817,67 @@ func chatImageCandidates(root, accountPath, stem, mediaMD5 string) ([]chatImageC
 func ResolveChatImage(root, accountPath, evidenceID, aesKey string, xorKey int) (ChatImage, error) {
 	message, err := FindImageMessage(root, evidenceID)
 	if err != nil {
-		return ChatImage{}, err
+		return ChatImage{}, chatImageFailure("evidence_unavailable", unknownChatImageRemoteDescriptor(), err)
 	}
+	remoteDescriptor := inspectChatImageRemoteDescriptor(root, message)
+	defer remoteDescriptor.clear()
 	stem, err := imageResourceStem(root, message)
 	if err != nil {
-		return ChatImage{}, err
+		return ChatImage{}, chatImageFailure("resource_descriptor_unavailable", remoteDescriptor, err)
 	}
 	candidates, err := chatImageCandidates(root, accountPath, stem, message.MediaMD5)
 	if err != nil {
-		return ChatImage{}, err
+		failure := chatImageFailure("local_mapping_unavailable", remoteDescriptor, err)
+		failure.CandidateCount = len(candidates)
+		return ChatImage{}, failure
+	}
+	if len(candidates) == 0 {
+		return ChatImage{}, chatImageFailure("local_mapping_unavailable", remoteDescriptor, errors.New("没有找到经过消息资源与 hardlink 双重关联的图片候选"))
 	}
 	verified := []ChatImage{}
+	existingCandidates := 0
+	unsupportedFormat := ""
+	unsupportedQuality := "unknown"
+	candidateState := newChatImageCandidateState()
 	for _, candidate := range candidates {
+		if candidate.qualityTier == "unknown" {
+			candidateState.unknownTierObserved = true
+		}
 		info, statErr := os.Lstat(candidate.path)
-		if statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maxChatImageBytes {
+		if statErr != nil {
+			continue
+		}
+		existingCandidates++
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maxChatImageBytes {
+			candidateState.validationFailed[candidate.qualityTier] = true
 			continue
 		}
 		raw, readErr := os.ReadFile(candidate.path)
 		if readErr != nil {
+			candidateState.validationFailed[candidate.qualityTier] = true
 			continue
 		}
 		plain, format := raw, cryptoutil.ImageFormat(raw)
 		if format == "unknown" {
 			plain, format, readErr = cryptoutil.DecryptImageDAT(raw, aesKey, xorKey)
 			if readErr != nil {
+				candidateState.validationFailed[candidate.qualityTier] = true
 				continue
 			}
 		}
 		validation, validationErr := cryptoutil.ValidateImageStructure(plain)
 		if validationErr != nil || validation.Format != format {
+			if format == "wxgf" || format == "webp" {
+				if current := candidateState.decoderUnavailable[candidate.qualityTier]; current == "" || format == "wxgf" {
+					candidateState.decoderUnavailable[candidate.qualityTier] = format
+				}
+				if unsupportedFormat == "" || format == "wxgf" {
+					unsupportedFormat = format
+				}
+				unsupportedQuality = betterChatImageQuality(unsupportedQuality, candidate.qualityTier)
+			} else {
+				candidateState.validationFailed[candidate.qualityTier] = true
+			}
 			continue
 		}
 		digest := sha256.Sum256(plain)
@@ -401,20 +885,54 @@ func ResolveChatImage(root, accountPath, evidenceID, aesKey string, xorKey int) 
 			EvidenceID: message.EvidenceID, Chat: message.Chat, LocalID: message.LocalID, ServerID: message.ServerID,
 			Timestamp: message.Timestamp, SortKey: message.SortKey, Format: format, Bytes: int64(len(plain)),
 			Width: validation.Width, Height: validation.Height, SHA256: hex.EncodeToString(digest[:]),
-			VerifiedBy: "message_resource_stem+hardlink_map+full_decode", Data: plain,
+			VerifiedBy: "message_resource_stem+hardlink_map+full_decode", ResolutionStatus: "verified_local",
+			QualityTier: candidate.qualityTier, QualityBasis: "hardlink_cache_filename_variant",
+			RemoteDescriptorStatus: remoteDescriptor.status, RemoteDescriptorParseStatus: remoteDescriptor.parseStatus,
+			RemoteProtocolStatus:  remoteDescriptor.protocolStatus,
+			RemoteDescriptorTiers: append([]string(nil), remoteDescriptor.tiers...), Data: plain,
 		})
 	}
 	if len(verified) == 0 {
-		return ChatImage{}, errors.New("没有找到经过消息资源与 hardlink 双重关联的可验真图片")
+		kind := "local_validation_failed"
+		if existingCandidates == 0 {
+			kind = "local_file_missing"
+		} else if unsupportedFormat != "" {
+			kind = "decoder_unavailable"
+		}
+		failure := chatImageFailure(kind, remoteDescriptor, errors.New("没有找到经过消息资源与 hardlink 双重关联的可验真图片"))
+		failure.CandidateCount = len(candidates)
+		failure.ExistingCandidateCount = existingCandidates
+		failure.DetectedFormat = unsupportedFormat
+		failure.QualityTier = unsupportedQuality
+		return ChatImage{}, failure
+	}
+	// 同一条消息的 high/medium/thumbnail 通常经过不同缩放或编码，摘要不同并不
+	// 构成证据冲突。先固定最高可验真的质量层级，再只比较该层级内的强候选；
+	// 这样既能选择已落盘的 high 缓存档位，也继续对同层级的歧义 fail closed。
+	selectedRank := 0
+	for _, image := range verified {
+		if rank := chatImageQualityRank(image.QualityTier); rank > selectedRank {
+			selectedRank = rank
+		}
 	}
 	unique := map[string]ChatImage{}
 	for _, image := range verified {
+		if chatImageQualityRank(image.QualityTier) != selectedRank {
+			continue
+		}
 		unique[image.SHA256] = image
 	}
 	if len(unique) != 1 {
-		return ChatImage{}, fmt.Errorf("图片证据对应 %d 个不同内容候选", len(unique))
+		failure := chatImageFailure("content_conflict", remoteDescriptor, fmt.Errorf("图片证据对应 %d 个不同内容候选", len(unique)))
+		failure.CandidateCount = len(candidates)
+		failure.ExistingCandidateCount = existingCandidates
+		for _, image := range verified {
+			failure.QualityTier = betterChatImageQuality(failure.QualityTier, image.QualityTier)
+		}
+		return ChatImage{}, failure
 	}
 	for _, image := range unique {
+		image.HigherQualityLocalStatus, image.HigherQualityDetectedFormat, image.HigherQualityRecoveryAction = candidateState.higherQualityStatus(image.QualityTier)
 		return image, nil
 	}
 	return ChatImage{}, errors.New("没有找到可验真图片")

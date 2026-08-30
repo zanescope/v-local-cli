@@ -298,9 +298,13 @@ func writeEnvelope(writer io.Writer, value envelope, mode outputMode) {
 }
 
 func writeErrorMode(writer io.Writer, err *commandError, mode outputMode) {
+	meta := map[string]any{
+		"version": Version, "runtime": "go", "snapshot_created_at": nil, "snapshot_age_seconds": nil,
+	}
+	for name, value := range err.meta {
+		meta[name] = value
+	}
 	writeEnvelope(writer, envelope{SchemaVersion: responseSchemaVersion, CommandStatus: "failed", Error: &errorValue{
 		Type: err.typeName, Message: err.message, Hint: err.hint, Details: err.details,
-	}, Meta: map[string]any{
-		"version": Version, "runtime": "go", "snapshot_created_at": nil, "snapshot_age_seconds": nil,
-	}}, mode)
+	}, Meta: meta}, mode)
 }

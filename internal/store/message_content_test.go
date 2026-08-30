@@ -130,10 +130,14 @@ func TestParseLocationVoIPReplyAndMentions(t *testing.T) {
 	if call.Content != "[视频通话]" {
 		t.Fatalf("通话摘要错误：%s", call.Content)
 	}
-	replyXML := `<msg><appmsg><type>57</type><title>本次回复</title><refermsg><type>1</type><svrid>88</svrid><displayname>张三</displayname><content>被引用正文</content></refermsg></appmsg></msg>`
+	replyXML := `<msg><appmsg><type>57</type><title>本次回复</title><refermsg><type>1</type><svrid>88</svrid><fromusr>wxid_zhangsan</fromusr><displayname>张三</displayname><content>被引用正文</content></refermsg></appmsg></msg>`
 	reply := parseMessageContent(244813135921, replyXML, `<msgsource><atuserlist><![CDATA[notify@all,wxid_a]]></atuserlist></msgsource>`)
-	if reply.ReplyTo == nil || reply.ReplyTo.Quoted != "被引用正文" || reply.ReplyTo.RefSvrID != "88" {
+	if reply.ReplyTo == nil || reply.ReplyTo.ToUsername != "wxid_zhangsan" || reply.ReplyTo.Quoted != "被引用正文" || reply.ReplyTo.RefSvrID != "88" {
 		t.Fatalf("引用消息解析错误：%+v", reply.ReplyTo)
+	}
+	usernameOnly := parseMessageReply(`<msg><appmsg><refermsg><fromusr>wxid_only</fromusr><svrid>99</svrid></refermsg></appmsg></msg>`)
+	if usernameOnly == nil || usernameOnly.ToUsername != "wxid_only" || usernameOnly.RefSvrID != "99" {
+		t.Fatalf("仅保留 username 的引用对象被丢弃：%+v", usernameOnly)
 	}
 	if len(reply.Mentions) != 2 || reply.Mentions[0] != "所有人" || reply.Mentions[1] != "wxid_a" {
 		t.Fatalf("@ 列表解析错误：%+v", reply.Mentions)

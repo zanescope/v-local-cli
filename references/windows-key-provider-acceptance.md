@@ -2,7 +2,7 @@
 
 本清单对应 Windows 密钥获取与发布回归。GitHub Windows runner、交叉编译和 mock Provider 只提供构建/协议证据；`Config.Cipher`、进程内存布局、多账号隔离与实际 ARM64 架构必须在明确授权的专用 Windows 真机验证。
 
-面向一台本机 Windows x64 的完整 CLI 数据闭环（Credential Manager 复用、`dong_zzc` 历史记录、强绑定高清图、收藏和朋友圈）读取 [Windows amd64 本机端到端真机验收](windows-amd64-local-acceptance.md)。本文继续作为 Provider 路由和正式发布的上层门禁。
+面向一台本机 Windows x64 的完整 CLI 数据闭环（Credential Manager 复用、`dong_zzc` 历史记录、聊天图片 high 缓存档位强绑定、收藏和朋友圈）读取 [Windows amd64 本机端到端真机验收](windows-amd64-local-acceptance.md)。本文继续作为 Provider 路由和正式发布的上层门禁。
 
 当前 Provider registry 只包含一个完成本机 qualification 的精确 Windows amd64 目标，且
 如实登记为 `Config.Cipher` 已审核但无可用结构、仅允许精确身份绑定的 memory fallback。
@@ -49,7 +49,7 @@ go test -tags=live_regression -run '^TestWindowsLiveAcquisition$' -count=1 .
 
 - 分别覆盖 plaintext、truncated、unreadable、持续变化、发现后替换的 `.db`；symlink/junction/reparse 必须拒绝。
 - 在 WAL 不存在、空文件、正常提交、轮转和畸形提交大小下执行快照；源 DB/WAL 在复制期间变化必须返回 catalog drift 或稳定复制失败。
-- daemon 只监听 loopback；猜测 token、重复 action receipt 和跨用户读取 endpoint 都失败。
+- daemon 只监听 loopback；猜测 token、重复 action receipt 和跨用户读取 endpoint 都失败；替换测试 CLI 二进制或修改 endpoint 的 `version`/`executable_sha256` 后，客户端必须在连接前拒绝查询并要求重启 daemon，但持有私有 token 时应能用 `daemon stop` 关闭同协议旧构建。
 - `provider status` 只接受 `%LOCALAPPDATA%\v-local\key-provider\windows-<arch>\v-local-key-provider.exe`；`--provider`、`V_LOCAL_CLI_KEY_PROVIDER`、PATH 同名文件、symlink/junction/reparse 和由另一张有效证书签名的替代文件都返回 component untrusted。endpoint 中 PID 的实际 image 必须等于该固定 Provider。
 - 在 prepare、observe、finalize、快照发布和状态提交位置做进程异常退出；重启后不得泄漏 secret、发布半成品或覆盖旧 generation。
 - 检查普通日志、doctor bundle、临时目录和 Windows Error Reporting dump 配置，不得出现数据库 key、passphrase、media key 或 daemon token；确认运行时 WinVerifyTrust 不触发网络，WER `NOHEAP` 已启用，敏感 byte buffer 的 excluded-memory 注册/注销正常。

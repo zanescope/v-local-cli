@@ -9,7 +9,9 @@ import (
 	"image/png"
 )
 
-const maxDecodedImagePixels int64 = 40 * 1000 * 1000
+// MaxDecodedImagePixels 是所有严格图片解码路径共享的总像素上限。外部解码器
+// 只能把它当作更早的拒绝门槛；其输出仍必须回到本包做完整结构与像素数验证。
+const MaxDecodedImagePixels int64 = 40 * 1000 * 1000
 
 type ImageValidation struct {
 	Format string
@@ -22,7 +24,7 @@ func validImageDimensions(width, height int) bool {
 	if width <= 0 || height <= 0 {
 		return false
 	}
-	return int64(width) <= maxDecodedImagePixels/int64(height)
+	return int64(width) <= MaxDecodedImagePixels/int64(height)
 }
 
 func validateJPEG(data []byte) (ImageValidation, error) {
@@ -151,7 +153,7 @@ func validGIFBlockStructure(data []byte) bool {
 				return false
 			}
 			pixels := int64(width) * int64(height)
-			if pixels > maxDecodedImagePixels-totalPixels {
+			if pixels > MaxDecodedImagePixels-totalPixels {
 				return false
 			}
 			totalPixels += pixels

@@ -631,13 +631,13 @@ func runVoiceSearch(args []string) (any, error) {
 	start := set.String("start", "", "开始日期 YYYY-MM-DD")
 	end := set.String("end", "", "结束日期 YYYY-MM-DD")
 	all := set.Bool("all", false, "取消默认日期范围")
-	limit := set.Int("limit", 200, "最多扫描和返回的语音条数")
+	limit := set.Int("limit", 200, "最多扫描和返回的语音条数；0 表示不设上限")
 	cachedOnly := set.Bool("cached-only", false, "只搜索已经暂存的转写")
 	engine := set.String("engine", "", "whisper-cli 路径")
 	provider := set.String("asr-provider", "", "v-local-cli-asr/1 本地适配器路径")
 	model := set.String("model", "", "本地 ASR 模型文件或目录")
 	language := set.String("language", "zh", "转写语言")
-	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 1 || *limit > 5000 || strings.TrimSpace(set.Args()[0]) == "" || !validRequestedASRLanguage(*language) {
+	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 0 || *limit > 5000 || strings.TrimSpace(set.Args()[0]) == "" || !validRequestedASRLanguage(*language) {
 		return nil, invalidArguments("用法：v-local-cli voice-search [--account NAME] [--chat USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--cached-only] [--engine FILE | --asr-provider FILE] [--model PATH] [--language zh] <关键词>")
 	}
 	if strings.TrimSpace(*engine) != "" && strings.TrimSpace(*provider) != "" {
@@ -647,7 +647,7 @@ func runVoiceSearch(args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	effectiveLimit := effectiveResultLimit(*all, limitExplicit, *limit)
+	effectiveLimit := *limit
 	value, err := resolveInitializedAccount(*account)
 	if err != nil {
 		return nil, err

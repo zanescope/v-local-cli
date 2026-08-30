@@ -22,7 +22,7 @@ import (
 
 const (
 	SchemaVersion = 1
-	ParserVersion = 1
+	ParserVersion = 2
 )
 
 type Manifest struct {

@@ -30,6 +30,15 @@ var Version = "0.1.0-dev.1"
 
 const responseSchemaVersion = 1
 
+const (
+	historyDefaultResultLimit = 200
+	historyMaximumResultLimit = 5000
+	searchDefaultResultLimit  = 200
+	searchMaximumResultLimit  = 1000
+	exportDefaultResultLimit  = 1000
+	exportMaximumResultLimit  = 5000
+)
+
 const privateOutputPathEnv = "V_LOCAL_CLI_PRIVATE_OUTPUT_PATH"
 
 const setupUsage = "v-local-cli setup [--dry-run | --cancel-acquisition | --cancel-all-external-workflows] [--account NAME] [--provider FILE] [--allow-key-access | --keys FILE] [--confirm-key-action ACTION] [--storage keychain|snapshot-only] [--database-only] [--require-media] [--allow-coverage-regression] [--show-paths]"
@@ -80,6 +89,7 @@ type commandError struct {
 	message  string
 	hint     string
 	details  any
+	meta     map[string]any
 	code     int
 }
 
@@ -368,11 +378,18 @@ func flagProvided(args []string, name string) bool {
 	return false
 }
 
-func effectiveResultLimit(all, explicit bool, configured int) int {
-	if all && !explicit {
-		return 0
+func resultProbeLimit(limit int) int {
+	if limit > 0 {
+		return limit + 1
 	}
-	return configured
+	return 0
+}
+
+func truncateMessages(items []store.Message, limit int) ([]store.Message, bool) {
+	if limit > 0 && len(items) > limit {
+		return items[:limit], true
+	}
+	return items, false
 }
 
 func parseLocalDate(value string, end bool, location *time.Location) (*string, *int64, error) {
@@ -458,15 +475,21 @@ func outputWithTimeWindow(data any, window timeWindow, untrusted bool) commandOu
 	return commandOutput{data: data, meta: meta}
 }
 
-func outputWithQueryMetadata(data any, window timeWindow, untrusted bool, limit int, explicit bool) commandOutput {
+func outputWithQueryMetadata(data any, window timeWindow, untrusted bool, limit int, limitExplicit bool) commandOutput {
 	output := outputWithTimeWindow(data, window, untrusted)
-	output.meta["limit_explicit"] = explicit
+	output.meta["limit_explicit"] = limitExplicit
 	output.meta["unbounded_by_limit"] = limit == 0
 	if limit == 0 {
 		output.meta["result_limit"] = nil
 	} else {
 		output.meta["result_limit"] = limit
 	}
+	return output
+}
+
+func withTruncationMetadata(output commandOutput, hasMore bool) commandOutput {
+	output.meta["has_more"] = hasMore
+	output.meta["truncated"] = hasMore
 	return output
 }
 
@@ -511,6 +534,16 @@ func snapshotAge(value state.AccountState) (string, any) {
 
 func outputWithGeneration(data any, value state.AccountState) commandOutput {
 	return withGeneration(commandOutput{data: data, meta: map[string]any{}}, value)
+}
+
+func errorWithGeneration(err error, value state.AccountState) error {
+	var commandErr *commandError
+	if !errors.As(err, &commandErr) {
+		return err
+	}
+	cloned := *commandErr
+	cloned.meta = outputWithGeneration(nil, value).meta
+	return &cloned
 }
 
 func publicLocalAccount(account localplatform.Account, showPaths bool) map[string]any {
@@ -751,13 +784,18 @@ func runCapabilities(args []string) (any, error) {
 			"voice_transcripts": true, "wechat_existing_voice_text": true, "wechat_existing_ocr_text": true, "official_article_body": true,
 			"structured_cards":      []string{"contact_card", "mini_program", "channels", "red_packet", "forward", "quote"},
 			"group_identity_fields": true, "emoji_normalization": "wechat_known_brackets_to_unicode",
-			"all_without_limit": "unbounded", "unbounded_export": "disk_spooled_stream",
+			"all_time_window_only": true, "unbounded_limit_value": 0, "unbounded_export": "disk_spooled_stream",
 			"output_formats": []string{"json", "yaml", "table"}, "ambiguous_contact_policy": "error_with_candidates",
 			"immutable_query_daemon": true, "daemon_transport": "authenticated_loopback",
 		},
 		"media": map[string]any{
 			"local_images": true, "remote_images": []string{"jpeg", "png", "gif"},
 			"remote_video": []string{"mp4"}, "live_photo_video": false, "network_default": false,
+			"chat_image_quality_tiers": true, "chat_remote_descriptor_detection": true,
+			"chat_remote_descriptor_structural_parse": true, "chat_remote_protocol_qualification": "not_qualified",
+			"chat_remote_synthetic_harness_status": "crypto_binding_passed",
+			"chat_remote_synthetic_endpoint_scope": "literal_loopback_tls_only",
+			"chat_remote_real_endpoint_enabled":    false, "chat_remote_acquisition": false,
 		},
 		"voice": map[string]any{
 			"preferred_source": "wechat_existing_index", "silk_decoder_bundled": true, "fallback_asr_engine": "optional_whisper_cpp_or_v-local-cli-asr_provider", "network": false,
@@ -1787,11 +1825,11 @@ func runHistory(args []string, immutableOnly bool) (any, error) {
 	set := flag.NewFlagSet("history", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
 	account := set.String("account", "", "已初始化账号")
-	limit := set.Int("limit", 200, "最多返回条数")
+	limit := set.Int("limit", historyDefaultResultLimit, "最多返回条数；0 表示不设上限")
 	start := set.String("start", "", "开始日期 YYYY-MM-DD")
 	end := set.String("end", "", "结束日期 YYYY-MM-DD")
 	all := set.Bool("all", false, "取消默认日期范围")
-	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 1 || *limit > 5000 {
+	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 0 || *limit > historyMaximumResultLimit {
 		return nil, invalidArguments("用法：v-local-cli history [--account NAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <username>")
 	}
 	value, err := resolveInitializedAccount(*account)
@@ -1807,13 +1845,15 @@ func runHistory(args []string, immutableOnly bool) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	effectiveLimit := effectiveResultLimit(*all, limitExplicit, *limit)
-	items, err := store.HistoryWindow(value.SnapshotPath, chat, window.StartTimestamp, window.EndTimestamp, effectiveLimit)
+	effectiveLimit := *limit
+	items, err := store.HistoryWindow(value.SnapshotPath, chat, window.StartTimestamp, window.EndTimestamp, resultProbeLimit(effectiveLimit))
+	items, hasMore := truncateMessages(items, effectiveLimit)
 	if err == nil {
 		err = attachExistingVoiceTranscripts(value, items, !immutableOnly)
 	}
-	data := map[string]any{"account": value.AccountName, "chat": chat, "input": set.Args()[0], "items": items, "count": len(items)}
-	return withGeneration(outputWithQueryMetadata(data, window, true, effectiveLimit, limitExplicit), value), err
+	data := map[string]any{"account": value.AccountName, "chat": chat, "input": set.Args()[0], "items": items, "count": len(items), "has_more": hasMore, "truncated": hasMore}
+	output := outputWithQueryMetadata(data, window, true, effectiveLimit, limitExplicit)
+	return withGeneration(withTruncationMetadata(output, hasMore), value), err
 }
 
 func runSearch(args []string, immutableOnly bool) (any, error) {
@@ -1822,11 +1862,11 @@ func runSearch(args []string, immutableOnly bool) (any, error) {
 	set.SetOutput(io.Discard)
 	account := set.String("account", "", "已初始化账号")
 	chat := set.String("chat", "", "限定会话 username")
-	limit := set.Int("limit", 200, "最多返回条数")
+	limit := set.Int("limit", searchDefaultResultLimit, "最多返回条数；0 表示不设上限")
 	start := set.String("start", "", "开始日期 YYYY-MM-DD")
 	end := set.String("end", "", "结束日期 YYYY-MM-DD")
 	all := set.Bool("all", false, "取消默认日期范围")
-	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 1 || *limit > 1000 {
+	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 0 || *limit > searchMaximumResultLimit {
 		return nil, invalidArguments("用法：v-local-cli search [--chat USERNAME] [--account NAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <关键词>")
 	}
 	value, err := resolveInitializedAccount(*account)
@@ -1845,29 +1885,32 @@ func runSearch(args []string, immutableOnly bool) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	effectiveLimit := effectiveResultLimit(*all, limitExplicit, *limit)
-	indexed, indexErr := messageindex.Search(value, set.Args()[0], resolvedChat, window.StartTimestamp, window.EndTimestamp, effectiveLimit)
+	effectiveLimit := *limit
+	fetchLimit := resultProbeLimit(effectiveLimit)
+	indexed, indexErr := messageindex.Search(value, set.Args()[0], resolvedChat, window.StartTimestamp, window.EndTimestamp, fetchLimit)
 	if indexErr != nil {
 		return nil, indexErr
 	}
 	items := indexed.Items
 	searchBackendStatus := indexed.Coverage
 	if present, _ := searchBackendStatus["index_present"].(bool); !present {
-		items, err = store.SearchWindow(value.SnapshotPath, set.Args()[0], resolvedChat, window.StartTimestamp, window.EndTimestamp, effectiveLimit)
+		items, err = store.SearchWindow(value.SnapshotPath, set.Args()[0], resolvedChat, window.StartTimestamp, window.EndTimestamp, fetchLimit)
 		searchBackendStatus = map[string]any{
 			"source": "local_plaintext_snapshot", "backend": "decoded_scan",
 			"index_present": false, "index_valid": false, "message_coverage_status": "partial",
 			"message_scan_status": "fallback", "generation_index_status": indexed.Coverage,
 		}
 	}
+	items, hasMore := truncateMessages(items, effectiveLimit)
 	if err == nil {
 		err = attachExistingVoiceTranscripts(value, items, !immutableOnly)
 	}
 	data := map[string]any{
 		"account": value.AccountName, "query": set.Args()[0], "chat": resolvedChat,
-		"items": items, "count": len(items), "search_backend_status": searchBackendStatus,
+		"items": items, "count": len(items), "has_more": hasMore, "truncated": hasMore, "search_backend_status": searchBackendStatus,
 	}
-	return withGeneration(outputWithQueryMetadata(data, window, true, effectiveLimit, limitExplicit), value), err
+	output := outputWithQueryMetadata(data, window, true, effectiveLimit, limitExplicit)
+	return withGeneration(withTruncationMetadata(output, hasMore), value), err
 }
 
 func runStats(args []string) (any, error) {
@@ -1953,9 +1996,9 @@ func runMoments(args []string) (any, error) {
 	start := set.String("start", "", "开始日期 YYYY-MM-DD")
 	end := set.String("end", "", "结束日期 YYYY-MM-DD")
 	all := set.Bool("all", false, "取消默认日期范围")
-	limit := set.Int("limit", 200, "最多返回条数")
+	limit := set.Int("limit", 200, "最多返回条数；0 表示不设上限")
 	resolveMedia := set.Bool("resolve-media", false, "用强证据解析本地朋友圈及评论媒体")
-	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 1 || *limit > 5000 {
+	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 0 || *limit > 5000 {
 		return nil, invalidArguments("用法：v-local-cli moments [--account NAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--resolve-media] <username>")
 	}
 	username := set.Args()[0]
@@ -1964,7 +2007,7 @@ func runMoments(args []string) (any, error) {
 		return nil, err
 	}
 	window.ChatType = "moment_contact"
-	effectiveLimit := effectiveResultLimit(*all, limitExplicit, *limit)
+	effectiveLimit := *limit
 	value, err := resolveInitializedAccount(*account)
 	if err != nil {
 		return nil, err
@@ -1987,9 +2030,9 @@ func runMomentSearch(args []string) (any, error) {
 	start := set.String("start", "", "开始日期 YYYY-MM-DD")
 	end := set.String("end", "", "结束日期 YYYY-MM-DD")
 	all := set.Bool("all", false, "取消默认日期范围")
-	limit := set.Int("limit", 200, "最多返回条数")
+	limit := set.Int("limit", 200, "最多返回条数；0 表示不设上限")
 	resolveMedia := set.Bool("resolve-media", false, "用强证据解析命中记录的原帖及评论媒体")
-	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 1 || *limit > 5000 {
+	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 0 || *limit > 5000 {
 		return nil, invalidArguments("用法：v-local-cli moments-search [--account NAME] [--contact USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--resolve-media] <关键词>")
 	}
 	window, err := resolveTimeWindow(*contact, *start, *end, *all, time.Now())
@@ -2001,7 +2044,7 @@ func runMomentSearch(args []string) (any, error) {
 	} else {
 		window.ChatType = "moment_contact"
 	}
-	effectiveLimit := effectiveResultLimit(*all, limitExplicit, *limit)
+	effectiveLimit := *limit
 	value, err := resolveInitializedAccount(*account)
 	if err != nil {
 		return nil, err
@@ -2049,8 +2092,8 @@ func runOfficialHistory(args []string) (any, error) {
 	start := set.String("start", "", "开始日期 YYYY-MM-DD")
 	end := set.String("end", "", "结束日期 YYYY-MM-DD")
 	all := set.Bool("all", false, "取消默认日期范围")
-	limit := set.Int("limit", 200, "最多返回条数")
-	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 1 || *limit > 5000 {
+	limit := set.Int("limit", 200, "最多返回条数；0 表示不设上限")
+	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 0 || *limit > 5000 {
 		return nil, invalidArguments("用法：v-local-cli official-history [--account NAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <gh_username>")
 	}
 	publisher := set.Args()[0]
@@ -2059,7 +2102,7 @@ func runOfficialHistory(args []string) (any, error) {
 		return nil, err
 	}
 	window.ChatType = "official_account"
-	effectiveLimit := effectiveResultLimit(*all, limitExplicit, *limit)
+	effectiveLimit := *limit
 	value, err := resolveInitializedAccount(*account)
 	if err != nil {
 		return nil, err
@@ -2081,8 +2124,8 @@ func runOfficialSearch(args []string) (any, error) {
 	start := set.String("start", "", "开始日期 YYYY-MM-DD")
 	end := set.String("end", "", "结束日期 YYYY-MM-DD")
 	all := set.Bool("all", false, "取消默认日期范围")
-	limit := set.Int("limit", 200, "最多返回条数")
-	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 1 || *limit > 5000 {
+	limit := set.Int("limit", 200, "最多返回条数；0 表示不设上限")
+	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *limit < 0 || *limit > 5000 {
 		return nil, invalidArguments("用法：v-local-cli official-search [--account NAME] [--publisher GH_USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <关键词>")
 	}
 	window, err := resolveTimeWindow(*publisher, *start, *end, *all, time.Now())
@@ -2094,7 +2137,7 @@ func runOfficialSearch(args []string) (any, error) {
 	} else {
 		window.ChatType = "official_account"
 	}
-	effectiveLimit := effectiveResultLimit(*all, limitExplicit, *limit)
+	effectiveLimit := *limit
 	value, err := resolveInitializedAccount(*account)
 	if err != nil {
 		return nil, err
@@ -2164,6 +2207,83 @@ func runExportMedia(args []string) (any, error) {
 	return outputWithGeneration(map[string]any{"input": set.Args()[0], "output": target, "format": format, "bytes": len(plain)}, value), nil
 }
 
+func chatImageRemoteAcquisitionStatus(descriptorStatus, protocolStatus string) string {
+	switch {
+	case descriptorStatus == "present_expiry_unknown" && protocolStatus == "unverified_desktop_protocol":
+		return "unavailable_unverified_protocol"
+	case descriptorStatus == "missing":
+		return "not_available_no_descriptor"
+	default:
+		return "not_evaluated"
+	}
+}
+
+func chatImageRecoveryAction(kind string) string {
+	switch kind {
+	case "local_file_missing":
+		return "ask_user_to_open_original_then_refresh_and_retry"
+	case "decoder_unavailable":
+		return "do_not_request_redownload_same_candidate"
+	case "local_validation_failed":
+		return "inspect_key_or_format_before_retry"
+	default:
+		return "manual_review"
+	}
+}
+
+func chatImageCommandError(err error) error {
+	var resolutionErr *store.ChatImageResolutionError
+	if !errors.As(err, &resolutionErr) {
+		return &commandError{
+			typeName: "chat_image_unavailable", message: "无法从本地资源中验真这条聊天图片",
+			hint:    "刷新本地快照后重试；CLI 不会按时间、邻近目录或未经验证的远端地址猜测图片归属。",
+			details: map[string]any{"reason": "unexpected_resolution_error", "recovery_action": "manual_review", "network_access_performed": false}, code: 5,
+		}
+	}
+	hint := "刷新本地快照后重试；CLI 不会按时间、邻近目录或未经验证的远端地址猜测图片归属。"
+	switch resolutionErr.Kind {
+	case "local_file_missing":
+		hint = "本地强关联文件尚未落盘；若微信仍能取得原图，可打开这一张，随后运行 refresh --require-media 并重试。远端描述符可能已经失效，不能保证补取成功。"
+	case "decoder_unavailable":
+		hint = "本地已有强关联容器，但当前构建没有通过验收的解码器；再次打开原图未必能解决。"
+	case "local_validation_failed":
+		hint = "本地候选未通过解密或完整容器验证；检查图片密钥，并用当前微信版本真机夹具复核格式。"
+	case "content_conflict":
+		hint = "同一最高质量层级的多个强关联候选产生不同内容，CLI 已停止选择；刷新快照并复核 hardlink 映射。"
+	case "resource_descriptor_unavailable", "local_mapping_unavailable":
+		hint = "当前快照缺少一致的消息资源或 hardlink 证据；刷新快照后重新取得 image_evidence_id。"
+	}
+	details := map[string]any{
+		"reason": resolutionErr.Error(), "local_resolution_status": resolutionErr.Kind,
+		"recovery_action":                chatImageRecoveryAction(resolutionErr.Kind),
+		"remote_descriptor_status":       resolutionErr.RemoteDescriptorStatus,
+		"remote_descriptor_parse_status": resolutionErr.RemoteDescriptorParseStatus,
+		"remote_protocol_status":         resolutionErr.RemoteProtocolStatus,
+		"remote_acquisition_status":      chatImageRemoteAcquisitionStatus(resolutionErr.RemoteDescriptorStatus, resolutionErr.RemoteProtocolStatus),
+		"network_access_performed":       false,
+	}
+	if resolutionErr.DetectedFormat != "" {
+		details["detected_format"] = resolutionErr.DetectedFormat
+	}
+	if resolutionErr.QualityTier != "" {
+		details["quality_tier"] = resolutionErr.QualityTier
+		details["quality_basis"] = "hardlink_cache_filename_variant"
+		details["quality_claim_scope"] = "wechat_cache_variant_only"
+		details["source_original_dimensions_known"] = false
+	}
+	if len(resolutionErr.RemoteDescriptorTiers) > 0 {
+		details["remote_descriptor_tiers"] = resolutionErr.RemoteDescriptorTiers
+	}
+	if resolutionErr.CandidateCount > 0 {
+		details["candidate_count"] = resolutionErr.CandidateCount
+		details["existing_candidate_count"] = resolutionErr.ExistingCandidateCount
+	}
+	return &commandError{
+		typeName: "chat_image_unavailable", message: "无法从本地资源中验真这条聊天图片",
+		hint: hint, details: details, code: 5,
+	}
+}
+
 func runExportChatImage(args []string) (any, error) {
 	set := flag.NewFlagSet("export-chat-image", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
@@ -2191,11 +2311,7 @@ func runExportChatImage(args []string) (any, error) {
 	}
 	image, err := store.ResolveChatImage(value.SnapshotPath, value.AccountPath, set.Args()[0], aesKey, xorKey)
 	if err != nil {
-		return nil, &commandError{
-			typeName: "chat_image_unavailable", message: "无法从本地资源中验真这条聊天图片",
-			hint:    "先在微信中打开原图，运行 refresh --require-media 后，使用当前 generation 的 image evidence_id 重试。",
-			details: map[string]any{"reason": err.Error(), "network_access_performed": false}, code: 5,
-		}
+		return nil, errorWithGeneration(chatImageCommandError(err), value)
 	}
 	defer clear(image.Data)
 	temporary, err := writeTemporaryFileNear(target, image.Data)
@@ -2213,12 +2329,40 @@ func runExportChatImage(args []string) (any, error) {
 		}
 		return nil, err
 	}
-	return outputWithGeneration(map[string]any{
+	data := map[string]any{
 		"evidence_id": image.EvidenceID, "output": target, "format": image.Format,
 		"bytes": image.Bytes, "width": image.Width, "height": image.Height, "sha256": image.SHA256,
 		"verified_by": image.VerifiedBy, "container_validation": "full_decode",
-		"source": "verified_local_chat_image", "network_access_performed": false,
-	}, value), nil
+		"source": "verified_local_chat_image", "resolution_status": image.ResolutionStatus,
+		"quality_tier": image.QualityTier, "quality_basis": image.QualityBasis,
+		"quality_claim_scope": "wechat_cache_variant_only", "source_original_dimensions_known": false,
+		"dimensions_role":                "decoded_output_observation_not_quality_gate",
+		"higher_quality_local_status":    image.HigherQualityLocalStatus,
+		"higher_quality_recovery_action": image.HigherQualityRecoveryAction,
+		"remote_descriptor_status":       image.RemoteDescriptorStatus,
+		"remote_descriptor_parse_status": image.RemoteDescriptorParseStatus,
+		"remote_protocol_status":         image.RemoteProtocolStatus,
+		"remote_acquisition_status":      chatImageRemoteAcquisitionStatus(image.RemoteDescriptorStatus, image.RemoteProtocolStatus),
+		"network_access_performed":       false,
+	}
+	if len(image.RemoteDescriptorTiers) > 0 {
+		data["remote_descriptor_tiers"] = image.RemoteDescriptorTiers
+	}
+	if image.HigherQualityDetectedFormat != "" {
+		data["higher_quality_detected_format"] = image.HigherQualityDetectedFormat
+	}
+	return outputWithGeneration(data, value), nil
+}
+
+func momentDescriptorDetails(status, expiryStatus, retryPolicy string) map[string]any {
+	details := map[string]any{
+		"remote_descriptor_status": status,
+		"descriptor_expiry_status": expiryStatus,
+	}
+	if retryPolicy != "" {
+		details["retry_policy"] = retryPolicy
+	}
+	return details
 }
 
 func momentMediaCommandError(err error) error {
@@ -2234,33 +2378,40 @@ func momentMediaCommandError(err error) error {
 	case "moment_media_kind_unsupported":
 		return &commandError{typeName: exportErr.Kind, message: "当前独立导出命令只支持朋友圈图片和视频", hint: "实况照片仍需独立绑定其视频描述符，当前版本不会猜测。", code: 5}
 	case "moment_media_network_authorization_required":
-		return &commandError{typeName: exportErr.Kind, message: "本地没有可验真的媒体缓存，且本次未授权联网", hint: "确认允许把该媒体记录中的临时令牌发送到其腾讯 CDN 地址后，加 --allow-network 重试。", code: 3}
+		details := momentDescriptorDetails("present_expiry_unknown", "unknown", "single_evidence_single_attempt")
+		details["authorization_scope"] = "single_evidence_single_attempt"
+		details["network_access_performed"] = false
+		return &commandError{typeName: exportErr.Kind, message: "本地没有可验真的媒体缓存；远端描述符存在但时效未知，且本次未授权联网", hint: "尽快确认是否允许把这一项媒体记录中的临时令牌发送到其腾讯 CDN 地址；同意后仅对同一 evidence_id 加 --allow-network 重试。", details: details, code: 3}
 	case "moment_media_remote_descriptor_missing":
-		return &commandError{typeName: exportErr.Kind, message: "本地记录缺少下载或解密该媒体所需的完整描述符", hint: "刷新微信本地数据后重新执行查询；CLI 不会补造令牌或密钥。", code: 5}
+		return &commandError{typeName: exportErr.Kind, message: "本地记录缺少下载或解密该媒体所需的完整描述符", hint: "刷新微信本地数据后重新执行查询；CLI 不会补造令牌或密钥。", details: momentDescriptorDetails("missing", "not_available", "refresh_snapshot_for_new_descriptor"), code: 5}
 	case "moment_media_remote_url_rejected":
-		return &commandError{typeName: exportErr.Kind, message: "媒体地址不在受信任的朋友圈 CDN 范围内", hint: "CLI 已拒绝该地址，不会跟随跳转或访问内网地址。", code: 5}
+		return &commandError{typeName: exportErr.Kind, message: "媒体地址不在受信任的朋友圈 CDN 范围内", hint: "CLI 已拒绝该地址，不会跟随跳转或访问内网地址。", details: momentDescriptorDetails("rejected_by_policy", "unknown", "refresh_snapshot_for_new_descriptor"), code: 5}
 	case "moment_media_download_failed":
-		return &commandError{typeName: exportErr.Kind, message: "朋友圈媒体下载失败", hint: "令牌可能已过期；刷新本地快照后重新获取 media.evidence_id 再试。", code: 5}
-	case "moment_media_download_failed_authorization_rejected", "moment_media_download_failed_resource_unavailable":
-		return &commandError{typeName: exportErr.Kind, message: "CDN 已拒绝该媒体请求或资源已失效", hint: "临时令牌或资源可能已过期；在微信产生新的本地记录后重新执行 setup，再获取新的 media.evidence_id。", code: 5}
+		return &commandError{typeName: exportErr.Kind, message: "朋友圈媒体下载失败", hint: "描述符可能已过期；刷新本地快照后重新获取 media.evidence_id 再试。", details: momentDescriptorDetails("request_failed", "unknown_after_request_failure", "refresh_snapshot_for_new_descriptor_and_reauthorize"), code: 5}
+	case "moment_media_download_failed_authorization_rejected":
+		return &commandError{typeName: exportErr.Kind, message: "CDN 已拒绝该媒体请求", hint: "临时令牌可能已过期或被服务端拒绝；在微信产生新的本地记录后刷新快照，重新获取 media.evidence_id，并重新取得单次联网授权。", details: momentDescriptorDetails("expired_or_rejected", "expired_or_rejected", "requires_new_descriptor_and_new_authorization"), code: 5}
+	case "moment_media_download_failed_resource_unavailable":
+		return &commandError{typeName: exportErr.Kind, message: "CDN 媒体资源不可用", hint: "资源可能已删除或描述符已过期；在微信产生新的本地记录后刷新快照，重新获取 media.evidence_id，并重新取得单次联网授权。", details: momentDescriptorDetails("resource_unavailable_or_expired", "resource_unavailable_or_expired", "requires_new_descriptor_and_new_authorization"), code: 5}
 	case "moment_media_download_failed_dns_failed", "moment_media_download_failed_connection_failed", "moment_media_download_failed_request_failed":
-		return &commandError{typeName: exportErr.Kind, message: "无法建立受限的朋友圈 CDN 连接", hint: "检查当前网络和 DNS 后重试；CLI 不会使用环境代理或跟随跳转。", code: 5}
-	case "moment_media_download_failed_direct_dns_failed":
-		return &commandError{typeName: exportErr.Kind, message: "系统 DNS 返回 fake-IP，且受限的加密 DNS 回退失败", hint: "请将朋友圈 CDN 域名设为真实 DNS 解析，或允许直连 DNSPod DoT 后重试。", code: 5}
+		return &commandError{typeName: exportErr.Kind, message: "无法建立受限的朋友圈 CDN 连接", hint: "检查当前网络和 DNS；描述符时效仍未知，刷新快照重新取得 media.evidence_id 后再取得单次联网授权。", details: momentDescriptorDetails("request_failed", "unknown_after_request_failure", "refresh_snapshot_for_new_descriptor_and_reauthorize"), code: 5}
+	case "moment_media_download_failed_direct_dns_failed", "moment_media_download_failed_direct_dns_transport_failed":
+		return &commandError{typeName: exportErr.Kind, message: "系统 DNS 返回 fake-IP，且受限的加密 DNS 回退失败", hint: "请将朋友圈 CDN 域名设为真实 DNS 解析，或允许直连 DNSPod DoT；描述符时效仍未知，刷新快照后重新授权。", details: momentDescriptorDetails("request_failed", "unknown_after_request_failure", "refresh_snapshot_for_new_descriptor_and_reauthorize"), code: 5}
 	case "moment_media_download_failed_non_public_address", "moment_media_download_failed_invalid_address", "moment_media_download_failed_request_build_failed":
-		return &commandError{typeName: exportErr.Kind, message: "CDN 地址未通过公网连接安全检查", hint: "CLI 已拒绝该连接，不会尝试访问内网或非受信任地址。", code: 5}
+		return &commandError{typeName: exportErr.Kind, message: "CDN 地址未通过公网连接安全检查", hint: "CLI 已拒绝该连接，不会尝试访问内网或非受信任地址。刷新快照取得新描述符后再重新授权。", details: momentDescriptorDetails("rejected_by_policy", "unknown", "refresh_snapshot_for_new_descriptor"), code: 5}
 	case "moment_media_download_failed_synthetic_proxy_address":
-		return &commandError{typeName: exportErr.Kind, message: "DNS 回退仍返回了代理或 TUN 使用的合成地址", hint: "CLI 不会将 CDN token 发送到合成地址。请将受信任的朋友圈 CDN 域名设为真实 DNS 解析后重试。", code: 5}
+		return &commandError{typeName: exportErr.Kind, message: "DNS 回退仍返回了代理或 TUN 使用的合成地址", hint: "CLI 不会将 CDN token 发送到合成地址。请恢复真实 DNS，刷新快照取得新描述符后再重新授权。", details: momentDescriptorDetails("rejected_by_policy", "unknown", "refresh_snapshot_for_new_descriptor"), code: 5}
 	case "moment_media_download_failed_redirect_rejected":
-		return &commandError{typeName: exportErr.Kind, message: "CDN 返回了不允许跟随的跳转", hint: "CLI 已按安全策略停止；刷新本地快照后使用新的 media.evidence_id 重试。", code: 5}
-	case "moment_media_download_failed_rate_limited", "moment_media_download_failed_http_status":
-		return &commandError{typeName: exportErr.Kind, message: "CDN 未返回可用的媒体响应", hint: "稍后重试；若仍失败，刷新本地快照后重新获取 media.evidence_id。", code: 5}
+		return &commandError{typeName: exportErr.Kind, message: "CDN 返回了不允许跟随的跳转", hint: "CLI 已按安全策略停止；时效无法由该响应判断，刷新快照取得新 media.evidence_id 并重新授权。", details: momentDescriptorDetails("request_failed", "unknown_after_request_failure", "refresh_snapshot_for_new_descriptor_and_reauthorize"), code: 5}
+	case "moment_media_download_failed_rate_limited":
+		return &commandError{typeName: exportErr.Kind, message: "朋友圈 CDN 暂时限制了请求", hint: "稍后重新取得本次联网授权并重试；该状态本身不能证明描述符已过期。", details: momentDescriptorDetails("temporarily_rate_limited", "unknown", "retry_requires_new_single_attempt_authorization"), code: 5}
+	case "moment_media_download_failed_http_status":
+		return &commandError{typeName: exportErr.Kind, message: "CDN 未返回可用的媒体响应", hint: "响应不能确定资源是否过期；稍后重试，若仍失败则刷新本地快照并重新获取 media.evidence_id。", details: momentDescriptorDetails("http_error", "unknown", "retry_then_refresh_descriptor"), code: 5}
 	case "moment_media_download_failed_response_read_failed", "moment_media_download_failed_response_size_invalid":
-		return &commandError{typeName: exportErr.Kind, message: "CDN 响应未通过读取或大小检查", hint: "没有生成输出文件；稍后重试。", code: 5}
+		return &commandError{typeName: exportErr.Kind, message: "CDN 响应未通过读取或大小检查", hint: "没有生成输出文件，描述符时效仍未知；刷新快照取得新证据并重新授权。", details: momentDescriptorDetails("request_failed", "unknown_after_request_failure", "refresh_snapshot_for_new_descriptor_and_reauthorize"), code: 5}
 	case "moment_media_verify_failed_container":
-		return &commandError{typeName: exportErr.Kind, message: "CDN 数据解密后不是可识别的媒体容器", hint: "没有生成输出文件；需要复核当前微信版本的密钥与字节流契约。", code: 5}
+		return &commandError{typeName: exportErr.Kind, message: "CDN 数据解密后不是可识别的媒体容器", hint: "没有生成输出文件；响应不能证明描述符仍可复用，需要先复核当前微信版本的密钥与字节流契约。", details: momentDescriptorDetails("response_unverified", "unknown_after_unverified_response", "inspect_protocol_then_refresh_descriptor_and_reauthorize"), code: 5}
 	case "moment_media_verify_failed_payload_size":
-		return &commandError{typeName: exportErr.Kind, message: "CDN 媒体响应为空或超过安全上限", hint: "没有生成输出文件。", code: 5}
+		return &commandError{typeName: exportErr.Kind, message: "CDN 媒体响应为空或超过安全上限", hint: "没有生成输出文件；响应不能证明描述符仍可复用。", details: momentDescriptorDetails("response_unverified", "unknown_after_unverified_response", "refresh_snapshot_for_new_descriptor_and_reauthorize"), code: 5}
 	case "moment_media_local_unavailable", "moment_media_verify_failed":
 		return &commandError{typeName: exportErr.Kind, message: "朋友圈媒体没有通过容器或摘要验真", hint: "没有生成输出文件；刷新本地快照后重试。", code: 5}
 	default:
@@ -2427,6 +2578,12 @@ func runExportMomentMedia(args []string) (any, error) {
 		}
 		return nil, err
 	}
+	remoteDescriptorStatus := "not_used"
+	descriptorExpiryStatus := "not_applicable"
+	if artifact.NetworkAccessPerformed {
+		remoteDescriptorStatus = "verified_at_request_time"
+		descriptorExpiryStatus = "unknown_future"
+	}
 	return outputWithGeneration(map[string]any{
 		"account": value.AccountName, "output": target,
 		"evidence_id": artifact.EvidenceID, "media_kind": artifact.Kind, "format": artifact.Format,
@@ -2435,6 +2592,7 @@ func runExportMomentMedia(args []string) (any, error) {
 		"descriptor_md5_status": artifact.DescriptorMD5Status, "descriptor_size_status": artifact.DescriptorSizeStatus,
 		"source": artifact.Source, "resolution_status": artifact.ResolutionStatus,
 		"verified_by": artifact.VerifiedBy, "network_access_performed": artifact.NetworkAccessPerformed,
+		"remote_descriptor_status": remoteDescriptorStatus, "descriptor_expiry_status": descriptorExpiryStatus,
 	}, value), nil
 }
 
@@ -2446,13 +2604,13 @@ func runExport(args []string) (any, error) {
 	chat := set.String("chat", "", "搜索时限定会话 username")
 	output := set.String("output", "", "输出文件")
 	format := set.String("format", "jsonl", "json 或 jsonl")
-	limit := set.Int("limit", 1000, "最多导出条数")
+	limit := set.Int("limit", exportDefaultResultLimit, "最多导出条数；0 表示不设上限")
 	start := set.String("start", "", "开始日期 YYYY-MM-DD")
 	end := set.String("end", "", "结束日期 YYYY-MM-DD")
 	all := set.Bool("all", false, "取消默认日期范围")
 	force := set.Bool("force", false, "覆盖已存在的输出文件")
-	if err := set.Parse(args); err != nil || len(set.Args()) != 2 || *output == "" || (*format != "json" && *format != "jsonl") || *limit < 1 || *limit > 5000 {
-		return nil, invalidArguments("用法：v-local-cli export --output FILE [--format json|jsonl] [--account NAME] [--chat USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--force] <history|search> <值>")
+	if err := set.Parse(args); err != nil || len(set.Args()) != 2 || *output == "" || (*format != "json" && *format != "jsonl") || *limit < 0 || *limit > exportMaximumResultLimit {
+		return nil, invalidArguments("用法：v-local-cli export --output FILE [--format json|jsonl] [--account NAME] [--chat USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--force] <history|search> <值>")
 	}
 	mode, query := set.Args()[0], set.Args()[1]
 	windowChat := *chat
@@ -2465,7 +2623,7 @@ func runExport(args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	effectiveLimit := effectiveResultLimit(*all, limitExplicit, *limit)
+	effectiveLimit := *limit
 	value, err := resolveInitializedAccount(*account)
 	if err != nil {
 		return nil, err
@@ -2488,6 +2646,7 @@ func runExport(args []string) (any, error) {
 	hash := sha256.New()
 	counter := &countingWriter{writer: io.MultiWriter(file, hash)}
 	count := 0
+	hasMore := false
 	if effectiveLimit == 0 {
 		temporaryDirectory, tempErr := state.EnsureExportTempPath(value.AccountID)
 		if tempErr != nil {
@@ -2496,12 +2655,14 @@ func runExport(args []string) (any, error) {
 		count, err = store.StreamExportWindow(counter, temporaryDirectory, value.SnapshotPath, mode, query, *chat, window.StartTimestamp, window.EndTimestamp, *format)
 	} else {
 		var items []store.Message
+		fetchLimit := resultProbeLimit(effectiveLimit)
 		if mode == "history" {
-			items, err = store.HistoryWindow(value.SnapshotPath, query, window.StartTimestamp, window.EndTimestamp, effectiveLimit)
+			items, err = store.HistoryWindow(value.SnapshotPath, query, window.StartTimestamp, window.EndTimestamp, fetchLimit)
 		} else {
-			items, err = store.SearchWindow(value.SnapshotPath, query, *chat, window.StartTimestamp, window.EndTimestamp, effectiveLimit)
+			items, err = store.SearchWindow(value.SnapshotPath, query, *chat, window.StartTimestamp, window.EndTimestamp, fetchLimit)
 		}
 		if err == nil {
+			items, hasMore = truncateMessages(items, effectiveLimit)
 			count = len(items)
 			encoder := json.NewEncoder(counter)
 			encoder.SetEscapeHTML(false)
@@ -2541,9 +2702,10 @@ func runExport(args []string) (any, error) {
 	data := map[string]any{
 		"mode": mode, "query": query, "output": target, "format": *format,
 		"count": count, "bytes": counter.bytes, "sha256": hex.EncodeToString(hash.Sum(nil)),
-		"streamed": effectiveLimit == 0,
+		"streamed": effectiveLimit == 0, "has_more": hasMore, "truncated": hasMore,
 	}
-	return withGeneration(outputWithQueryMetadata(data, window, false, effectiveLimit, limitExplicit), value), nil
+	outputEnvelope := outputWithQueryMetadata(data, window, false, effectiveLimit, limitExplicit)
+	return withGeneration(withTruncationMetadata(outputEnvelope, hasMore), value), nil
 }
 
 func publishFile(temporary, target string) error {
@@ -2584,6 +2746,15 @@ func publishFile(temporary, target string) error {
 	return nil
 }
 
+func queryLimitOptionConstraints(defaultLimit, maximumLimit int) map[string]any {
+	return map[string]any{
+		"limit": map[string]any{
+			"type": "integer", "default": defaultLimit, "minimum": 0, "maximum": maximumLimit,
+			"zero_means_unbounded": true,
+		},
+	}
+}
+
 func commandSchemas() map[string]any {
 	return map[string]any{
 		"accounts":          map[string]any{"usage": "v-local-cli accounts [--show-paths]", "read_only": true, "paths_default": "redacted"},
@@ -2604,28 +2775,55 @@ func commandSchemas() map[string]any {
 		"favorites":         map[string]any{"usage": "v-local-cli favorites [--account NAME] [--fresh] [--kind text|image|voice|video|article|location|mini_program|chat_record|contact_card|other] [--limit N] [关键词]", "read_only": true, "fresh_snapshot": true, "scope": "locally_retained_only"},
 		"new-messages":      map[string]any{"usage": "v-local-cli new-messages [--account NAME] [--fresh] [--consumer NAME] [--start now|beginning] [--limit N] [--ack BATCH_ID | --status | --delete --yes]", "fresh_snapshot": true, "fresh_scope": "poll_only", "delivery_semantics": "at_least_once", "cursor_binding": "account+base_generation+base_manifest_sha256+target_generation+target_manifest_sha256", "ack_required": true},
 		"index":             map[string]any{"usage": "v-local-cli index [--account NAME] [--force] [--show-paths] <status|build>", "writes_private_derived_index_on_build": true, "immutable_generation_binding": true, "force_scope": "replace_invalid_or_version_mismatched_only", "paths_default": "redacted"},
-		"daemon":            map[string]any{"usage": "v-local-cli daemon [--show-paths] <serve|status|stop>", "serve_mode": "foreground_single_instance", "loopback_only": true, "authenticated_same_user_endpoint": true, "query_usage": "v-local-cli --daemon <只读查询命令> [参数]", "serves_immutable_generations_only": true, "paths_default": "redacted"},
-		"history":           map[string]any{"usage": "v-local-cli history [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <username>", "read_only": true, "fresh_snapshot": true, "default_time_window": "contact_month_or_group_day", "all_without_limit": "unbounded", "structured_non_text": true, "fields": "base_type,sub_type,type_label,details,reply_to,mentions,voice_duration_ms,voice_transcript,sender_username,sender_nickname,sender_group_nickname,sender_identity,is_from_me,media_md5", "red_packet_fields": "receive_status,receive_status_label,receive_status_code,packet_status,message_timestamp,message_time,message_date,receive_timestamp,receive_time,receive_date,receive_time_status,amount,amount_minor_units,amount_currency,amount_status,amount_source,amount_kind"},
-		"search":            map[string]any{"usage": "v-local-cli search [--chat USERNAME] [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <关键词>", "read_only": true, "fresh_snapshot": true, "default_time_window": "selected_chat_or_cross_chat_day", "all_without_limit": "unbounded", "searches_structured_non_text": true},
+		"daemon":            map[string]any{"usage": "v-local-cli daemon [--show-paths] <serve|status|stop>", "serve_mode": "foreground_single_instance", "loopback_only": true, "authenticated_same_user_endpoint": true, "client_binding": "version+executable_sha256", "protocol_version": daemonProtocolVersion, "query_usage": "v-local-cli --daemon <只读查询命令> [参数]", "serves_immutable_generations_only": true, "paths_default": "redacted"},
+		"history":           map[string]any{"usage": "v-local-cli history [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <username>", "read_only": true, "fresh_snapshot": true, "default_time_window": "contact_month_or_group_day", "all_time_window_only": true, "unbounded_limit_value": 0, "truncation_fields": []string{"has_more", "truncated"}, "option_constraints": queryLimitOptionConstraints(historyDefaultResultLimit, historyMaximumResultLimit), "structured_non_text": true, "fields": "base_type,sub_type,type_label,details,reply_to,mentions,voice_duration_ms,voice_transcript,sender_username,sender_nickname,sender_group_nickname,sender_identity,is_from_me,media_md5", "reply_identity_fields": []string{"to_username", "to_name", "identity_status"}, "red_packet_fields": "receive_status,receive_status_label,receive_status_code,packet_status,message_timestamp,message_time,message_date,receive_timestamp,receive_time,receive_date,receive_time_status,amount,amount_minor_units,amount_currency,amount_status,amount_source,amount_kind"},
+		"search":            map[string]any{"usage": "v-local-cli search [--chat USERNAME] [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <关键词>", "read_only": true, "fresh_snapshot": true, "default_time_window": "selected_chat_or_cross_chat_day", "all_time_window_only": true, "unbounded_limit_value": 0, "truncation_fields": []string{"has_more", "truncated"}, "option_constraints": queryLimitOptionConstraints(searchDefaultResultLimit, searchMaximumResultLimit), "searches_structured_non_text": true},
 		"voice-status":      map[string]any{"usage": "v-local-cli voice-status [--account NAME] [--fresh] [--engine FILE | --asr-provider FILE] [--model PATH] [--show-paths]", "read_only": true, "fresh_snapshot": true, "preferred_source": "wechat_existing_index", "optional_dependencies": []string{"whisper.cpp", "SenseVoice via v-local-cli-asr/1 provider"}, "automatic_download": false},
 		"voice-transcribe":  map[string]any{"usage": "v-local-cli voice-transcribe [--account NAME] [--fresh] [--engine FILE | --asr-provider FILE] [--model PATH] [--language zh] [--force] <voice_evidence_id>", "fresh_snapshot": true, "preferred_source": "wechat_existing_index", "writes_private_cache_only_for_fallback": true, "wechat_private_api": false, "network": false, "silk_decoder_bundled": true, "asr_provider_protocol": "v-local-cli-asr/1"},
-		"voice-search":      map[string]any{"usage": "v-local-cli voice-search [--account NAME] [--fresh] [--chat USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--cached-only] [--engine FILE | --asr-provider FILE] [--model PATH] [--language zh] <关键词>", "fresh_snapshot": true, "preferred_source": "wechat_existing_index", "writes_private_cache_unless_cached_only": true, "wechat_private_api": false, "all_without_limit": "unbounded", "network": false, "asr_provider_protocol": "v-local-cli-asr/1"},
+		"voice-search":      map[string]any{"usage": "v-local-cli voice-search [--account NAME] [--fresh] [--chat USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--cached-only] [--engine FILE | --asr-provider FILE] [--model PATH] [--language zh] <关键词>", "fresh_snapshot": true, "preferred_source": "wechat_existing_index", "writes_private_cache_unless_cached_only": true, "wechat_private_api": false, "all_time_window_only": true, "unbounded_limit_value": 0, "option_constraints": queryLimitOptionConstraints(200, 5000), "network": false, "asr_provider_protocol": "v-local-cli-asr/1"},
 		"ocr-status":        map[string]any{"usage": "v-local-cli ocr-status [--account NAME] [--fresh] [--show-paths]", "read_only": true, "fresh_snapshot": true, "source": "wechat_index_probe+v-local-cli_private_cache", "external_dependency": false, "private_ipc": false, "network": false},
 		"ocr-file":          map[string]any{"usage": "v-local-cli ocr-file [--allow-private-ipc] <local_image>", "reads_local_image": true, "experimental": true, "external_dependency": false, "uses_installed_wechat_files": true, "bundles_wechat_files": false, "private_ipc_requires_flag": "allow-private-ipc", "network_requested_by_cli": false, "subprocess_sandboxed": false, "vendor_no_sandbox_switch": true},
 		"ocr-recognize":     map[string]any{"usage": "v-local-cli ocr-recognize [--account NAME] [--fresh] [--allow-private-ipc] [--force] <image_evidence_id>", "fresh_snapshot": true, "reads_verified_chat_image": true, "writes_private_cache": true, "stores_original_image": false, "external_dependency": false, "private_ipc_requires_flag": "allow-private-ipc", "network_requested_by_cli": false, "subprocess_sandboxed": false, "vendor_no_sandbox_switch": true},
 		"ocr-read":          map[string]any{"usage": "v-local-cli ocr-read [--account NAME] [--fresh] <image_evidence_id>", "read_only": true, "fresh_snapshot": true, "source": "wechat_index_probe+v-local-cli_private_cache", "generates_new_results": false, "private_ipc": false, "network": false},
-		"ocr-search":        map[string]any{"usage": "v-local-cli ocr-search [--account NAME] [--fresh] [--chat USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <关键词>", "read_only": true, "fresh_snapshot": true, "source": "wechat_index_probe+v-local-cli_private_cache", "all_without_limit": "unbounded", "private_ipc": false, "network": false},
+		"ocr-search":        map[string]any{"usage": "v-local-cli ocr-search [--account NAME] [--fresh] [--chat USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <关键词>", "read_only": true, "fresh_snapshot": true, "source": "wechat_index_probe+v-local-cli_private_cache", "all_time_window_only": true, "unbounded_limit_value": 0, "option_constraints": queryLimitOptionConstraints(200, 5000), "private_ipc": false, "network": false},
 		"stats":             map[string]any{"usage": "v-local-cli stats [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--top N] <username>", "read_only": true, "fresh_snapshot": true, "loads_message_content": false},
 		"moments-contacts":  map[string]any{"usage": "v-local-cli moments-contacts [--account NAME] [--fresh] [--limit N] [关键词]", "read_only": true, "fresh_snapshot": true, "scope": "locally_retained_only"},
-		"moments":           map[string]any{"usage": "v-local-cli moments [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--resolve-media] <username>", "read_only": true, "fresh_snapshot": true, "all_without_limit": "unbounded", "remote_fetch": false, "includes": "post,visible_likes,visible_comments,replies,comment_media", "interaction_scope": "locally_retained_visible_only", "complete_interaction_history": false},
-		"moments-search":    map[string]any{"usage": "v-local-cli moments-search [--account NAME] [--fresh] [--contact USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--resolve-media] <关键词>", "read_only": true, "fresh_snapshot": true, "all_without_limit": "unbounded", "remote_fetch": false, "searches_interactions": true, "interaction_scope": "locally_retained_visible_only", "complete_interaction_history": false},
+		"moments":           map[string]any{"usage": "v-local-cli moments [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--resolve-media] <username>", "read_only": true, "fresh_snapshot": true, "all_time_window_only": true, "unbounded_limit_value": 0, "option_constraints": queryLimitOptionConstraints(200, 5000), "remote_fetch": false, "includes": "post,visible_likes,visible_comments,replies,comment_media", "interaction_scope": "locally_retained_visible_only", "complete_interaction_history": false},
+		"moments-search":    map[string]any{"usage": "v-local-cli moments-search [--account NAME] [--fresh] [--contact USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--resolve-media] <关键词>", "read_only": true, "fresh_snapshot": true, "all_time_window_only": true, "unbounded_limit_value": 0, "option_constraints": queryLimitOptionConstraints(200, 5000), "remote_fetch": false, "searches_interactions": true, "interaction_scope": "locally_retained_visible_only", "complete_interaction_history": false},
 		"official-accounts": map[string]any{"usage": "v-local-cli official-accounts [--account NAME] [--fresh] [--limit N] [关键词]", "read_only": true, "fresh_snapshot": true, "scope": "locally_known_only"},
-		"official-history":  map[string]any{"usage": "v-local-cli official-history [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <gh_username>", "read_only": true, "fresh_snapshot": true, "all_without_limit": "unbounded", "content_level": "card_metadata", "remote_fetch": false},
-		"official-search":   map[string]any{"usage": "v-local-cli official-search [--account NAME] [--fresh] [--publisher GH_USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <关键词>", "read_only": true, "fresh_snapshot": true, "all_without_limit": "unbounded", "content_level": "card_metadata", "remote_fetch": false},
+		"official-history":  map[string]any{"usage": "v-local-cli official-history [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <gh_username>", "read_only": true, "fresh_snapshot": true, "all_time_window_only": true, "unbounded_limit_value": 0, "option_constraints": queryLimitOptionConstraints(200, 5000), "content_level": "card_metadata", "remote_fetch": false},
+		"official-search":   map[string]any{"usage": "v-local-cli official-search [--account NAME] [--fresh] [--publisher GH_USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <关键词>", "read_only": true, "fresh_snapshot": true, "all_time_window_only": true, "unbounded_limit_value": 0, "option_constraints": queryLimitOptionConstraints(200, 5000), "content_level": "card_metadata", "remote_fetch": false},
 		"official-article":  map[string]any{"usage": "v-local-cli official-article [--account NAME] [--fresh] [--allow-network] <publication_evidence_id>", "read_only": true, "fresh_snapshot": true, "network_default": false, "network_requires_flag": "allow-network", "destination": "mp.weixin.qq.com", "redirects": false, "cookies": false, "tun_fake_ip_dns_fallback": false, "content_level": "remote_article_plain_text"},
-		"export":            map[string]any{"usage": "v-local-cli export --output FILE [--format json|jsonl] [--account NAME] [--fresh] [--chat USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--force] <history|search> <值>", "fresh_snapshot": true, "writes_output": true, "output_exists_default": "reject", "all_without_limit": "unbounded"},
+		"export":            map[string]any{"usage": "v-local-cli export --output FILE [--format json|jsonl] [--account NAME] [--fresh] [--chat USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--force] <history|search> <值>", "fresh_snapshot": true, "writes_output": true, "output_exists_default": "reject", "all_time_window_only": true, "unbounded_limit_value": 0, "truncation_fields": []string{"has_more", "truncated"}, "option_constraints": queryLimitOptionConstraints(exportDefaultResultLimit, exportMaximumResultLimit)},
 		"export-media":      map[string]any{"usage": "v-local-cli export-media --output FILE [--account NAME] [--fresh] [--force] <input.dat>", "fresh_snapshot": true, "writes_output": true, "output_exists_default": "reject"},
-		"export-chat-image": map[string]any{"usage": "v-local-cli export-chat-image --output FILE [--account NAME] [--fresh] [--force] <image_evidence_id>", "fresh_snapshot": true, "writes_output": true, "output_exists_default": "reject", "evidence_binding": "message_resource_stem+hardlink_map", "container_validation": "full_decode", "network": false},
+		"export-chat-image": map[string]any{
+			"usage": "v-local-cli export-chat-image --output FILE [--account NAME] [--fresh] [--force] <image_evidence_id>", "fresh_snapshot": true,
+			"writes_output": true, "output_exists_default": "reject", "evidence_binding": "message_resource_stem+hardlink_map", "container_validation": "full_decode",
+			"quality_tiers": []string{"high", "medium", "thumbnail", "unknown"}, "quality_basis": "hardlink_cache_filename_variant",
+			"quality_claim_scope": "wechat_cache_variant_only", "source_original_dimensions_known": false,
+			"dimensions_role":                  "decoded_output_observation_not_quality_gate",
+			"higher_quality_local_statuses":    []string{"not_applicable", "missing", "decoder_unavailable", "validation_failed", "unknown"},
+			"higher_quality_recovery_actions":  []string{"none", "ask_user_to_open_original_then_refresh_and_retry", "do_not_request_redownload_same_candidate", "inspect_key_or_format_before_retry", "manual_review"},
+			"local_resolution_statuses":        []string{"verified_local", "evidence_unavailable", "resource_descriptor_unavailable", "local_mapping_unavailable", "local_file_missing", "decoder_unavailable", "local_validation_failed", "content_conflict"},
+			"failure_recovery_actions":         []string{"ask_user_to_open_original_then_refresh_and_retry", "do_not_request_redownload_same_candidate", "inspect_key_or_format_before_retry", "manual_review"},
+			"remote_descriptor_statuses":       []string{"present_expiry_unknown", "missing", "unknown"},
+			"remote_descriptor_parse_statuses": []string{"parsed_unverified_protocol", "parsed_partial_unverified_protocol", "present_incomplete", "present_invalid", "not_applicable", "not_evaluated"},
+			"remote_protocol_statuses":         []string{"unverified_desktop_protocol", "not_applicable", "not_evaluated"},
+			"remote_acquisition_statuses":      []string{"unavailable_unverified_protocol", "not_available_no_descriptor", "not_evaluated"},
+			"remote_descriptor_expiry":         "unknown_without_verified_request; may_already_be_expired",
+			"remote_protocol_qualification":    "not_qualified",
+			"remote_synthetic_harness_status":  "crypto_binding_passed",
+			"remote_synthetic_endpoint_scope":  "literal_loopback_tls_only",
+			"remote_qualification_binding":     "plaintext_md5_or_size_plus_dimensions",
+			"remote_real_endpoint_enabled":     false,
+			"remote_descriptor_secrets_output": false,
+			"agent_recovery": map[string]any{
+				"requires_user_confirmation": true, "refresh_command": "refresh --require-media",
+				"retry_evidence_binding": "same_image_evidence_id", "maximum_automatic_retries": 1,
+				"network": false, "still_missing_outcome": "stop_and_report_remote_may_be_expired_or_unavailable",
+			},
+			"remote_acquisition_implemented": false, "network": false, "secrets_in_output": false,
+		},
 		"export-moment-media": map[string]any{
 			"usage":                 "v-local-cli export-moment-media --output FILE [--account NAME] [--fresh] [--allow-network] [--force] <media_evidence_id>",
 			"fresh_snapshot":        true,
@@ -2634,6 +2832,8 @@ func commandSchemas() map[string]any {
 			"media_kinds":           []string{"image", "video"},
 			"network_default":       false,
 			"network_requires_flag": "allow-network",
+			"authorization_scope":   "single_evidence_single_attempt",
+			"descriptor_expiry":     "unknown_until_request; may_expire_after_success",
 			"redirects":             false,
 			"container_validation":  "strict",
 			"remote_formats":        []string{"jpg", "png", "gif", "mp4"},

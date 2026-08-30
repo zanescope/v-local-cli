@@ -165,6 +165,394 @@ func TestSkillContractMatchesCommandSchema(t *testing.T) {
 	}
 }
 
+func TestChatImageAgentRecoveryContract(t *testing.T) {
+	definition := schemaCommands(t)["export-chat-image"].(map[string]any)
+	recovery := definition["agent_recovery"].(map[string]any)
+	if recovery["requires_user_confirmation"] != true || recovery["refresh_command"] != "refresh --require-media" ||
+		recovery["retry_evidence_binding"] != "same_image_evidence_id" || recovery["maximum_automatic_retries"] != 1 ||
+		recovery["network"] != false || recovery["still_missing_outcome"] != "stop_and_report_remote_may_be_expired_or_unavailable" {
+		t.Fatalf("聊天图片 Agent 恢复契约发生漂移：%v", recovery)
+	}
+	if definition["remote_descriptor_expiry"] != "unknown_without_verified_request; may_already_be_expired" ||
+		definition["remote_protocol_qualification"] != "not_qualified" || definition["remote_synthetic_harness_status"] != "crypto_binding_passed" ||
+		definition["remote_real_endpoint_enabled"] != false ||
+		definition["remote_synthetic_endpoint_scope"] != "literal_loopback_tls_only" ||
+		definition["remote_qualification_binding"] != "plaintext_md5_or_size_plus_dimensions" ||
+		definition["remote_descriptor_secrets_output"] != false || definition["remote_acquisition_implemented"] != false || definition["network"] != false {
+		t.Fatalf("聊天 CDN 时效或联网边界发生漂移：%v", definition)
+	}
+	parseStatuses := definition["remote_descriptor_parse_statuses"].([]string)
+	for _, expected := range []string{"parsed_unverified_protocol", "parsed_partial_unverified_protocol", "present_incomplete", "present_invalid", "not_applicable", "not_evaluated"} {
+		found := false
+		for _, actual := range parseStatuses {
+			if actual == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("聊天 CDN 描述符解析状态缺失：%s", expected)
+		}
+	}
+	if definition["quality_claim_scope"] != "wechat_cache_variant_only" ||
+		definition["source_original_dimensions_known"] != false ||
+		definition["dimensions_role"] != "decoded_output_observation_not_quality_gate" {
+		t.Fatalf("聊天图片质量声明超出可用证据：%v", definition)
+	}
+
+	root := repositoryRoot(t)
+	skill, err := os.ReadFile(filepath.Join(root, "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"用户确认后由 Agent 自动运行 `refresh --require-media`",
+		"仍使用同一个 `image_evidence_id`",
+		"最多自动重试一次",
+		"远端描述符可能已经过期或资源不可用",
+		"不要循环催促用户",
+		"synthetic_crypto_binding_harness_only",
+		"真实端点被代码禁止",
+	} {
+		if !bytes.Contains(skill, []byte(expected)) {
+			t.Errorf("SKILL.md 缺少聊天图片恢复边界：%s", expected)
+		}
+	}
+	script, err := os.ReadFile(filepath.Join(root, "scripts", "accept-windows-chat-image-recovery.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptText := string(script)
+	for _, expected := range []string{
+		"[ValidateSet('Prompt', 'Skip')]",
+		"[string]$LowerTierMissingEvidenceId",
+		"[string]$WxgfCandidateEvidenceId",
+		"[string]$ExpiryUnknownDescriptorEvidenceId",
+		"$ConfirmationToken = \"OPENED-$($Definition.Name)\"",
+		"@('refresh', '--account', $AccountName, '--require-media')",
+		"maximum_automatic_retries = 1",
+		"automatic_retry_attempts = 1",
+		"stop_after_single_refresh_remote_may_be_expired_or_unavailable",
+		"contains_evidence_ids = $false",
+		"contains_urls_tokens_or_keys = $false",
+		"generation_changed_by_recovery",
+		"recovery_database_coverage_regressed",
+		"recovery_preflight_generation_mismatch",
+		"recovery_did_not_publish_new_generation",
+		"powershell_7_required",
+		"if ($ShowPaths)",
+		"fixed_dimension_quality_gate = $false",
+		"-Width 320 -Height 240",
+		"dimensions_role = 'decoded_output_observation_not_quality_gate'",
+		"remote_descriptor_parse_status = $RemoteParseStatus",
+		"pass_expected_decoder_unavailable",
+		"quality_claim_scope = 'wechat_cache_variant_only'",
+	} {
+		if !strings.Contains(scriptText, expected) {
+			t.Errorf("Windows 图片验收脚本缺少恢复边界：%s", expected)
+		}
+	}
+	if strings.Contains(scriptText, "--allow-network") {
+		t.Fatal("Windows 图片验收脚本不得启用聊天图片联网")
+	}
+	for _, forbidden := range []string{"MinImageLongEdge", "MinImageShortEdge", "decodable_high_dimensions_failed", "recovered_high_dimensions_failed"} {
+		if strings.Contains(scriptText, forbidden) {
+			t.Errorf("Windows 图片验收脚本不得用固定边长判定 high 层级：%s", forbidden)
+		}
+	}
+	for _, obsolete := range []string{"ThumbnailOnlyEvidenceId", "thumbnail_only", "WxgfHighEvidenceId", "wxgf_high", "StaleDescriptorEvidenceId", "stale_descriptor"} {
+		if strings.Contains(scriptText, obsolete) {
+			t.Errorf("Windows 图片验收脚本保留了会扩大或误述夹具语义的旧名称：%s", obsolete)
+		}
+	}
+	if strings.Count(scriptText, "@('refresh', '--account', $AccountName, '--require-media')") != 1 {
+		t.Fatal("Windows 图片验收脚本必须只保留一个受控 refresh 调用点")
+	}
+	staticEvidenceScript, err := os.ReadFile(filepath.Join(root, "scripts", "inspect-windows-chat-cdn-static-evidence.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	staticEvidenceText := string(staticEvidenceScript)
+	for _, expected := range []string{
+		"v-local-cli/windows-chat-cdn-static-evidence/v1",
+		"current_client_static_stack_present_unbound",
+		"sessionized_c2c_static_stack = $SessionizedC2CStack",
+		"direct_ilink_https_markers = $DirectIlinkHttpsMarkers",
+		"main_to_ilink_wrapper_static_reference = $MainToIlinkWrapperReference",
+		"weixin_main_public_c2c_download_entry",
+		"not_observed_in_current_client_binaries",
+		"delay_import_observed_unbound",
+		"not_observed_in_current_weixin_export_table",
+		"static_reference_not_observed_in_current_weixin_binary",
+		"System.Reflection.PortableExecutable.PEReader",
+		"descriptor_to_runtime_request_binding = 'not_observed'",
+		"runtime_protocol_selection = 'not_observed'",
+		"endpoint_qualification = 'not_qualified'",
+		"network_access_performed = $false",
+		"process_memory_access_performed = $false",
+		"account_data_access_performed = $false",
+		"secrets_output = $false",
+		"binary_changed_during_scan",
+	} {
+		if !strings.Contains(staticEvidenceText, expected) {
+			t.Errorf("Windows 聊天 CDN 静态证据脚本缺少边界：%s", expected)
+		}
+	}
+	for _, forbidden := range []string{"Invoke-WebRequest", "Invoke-RestMethod", "Start-BitsTransfer", "Get-DnsClientCache", "Get-NetTCPConnection", "netstat", "OpenProcess", "ReadProcessMemory"} {
+		if strings.Contains(staticEvidenceText, forbidden) {
+			t.Errorf("Windows 聊天 CDN 静态证据脚本不得联网或读取进程内存：%s", forbidden)
+		}
+	}
+	xlogEvidenceScript, err := os.ReadFile(filepath.Join(root, "scripts", "inspect-windows-chat-cdn-xlog-structure.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	xlogEvidenceText := string(xlogEvidenceScript)
+	for _, expected := range []string{
+		"v-local-cli/windows-chat-cdn-xlog-structure-evidence/v1",
+		"encrypted_mars_xlog_private_key_required",
+		"no_crypt_mars_xlog_decoder_candidate",
+		"mixed_mars_xlog_requires_separate_review",
+		"log_path_outside_xwechat_log_root",
+		"log_read_access_denied",
+		"log_open_failed",
+		"log_changed_during_scan",
+		"payload_decoding_performed = $false",
+		"plaintext_event_binding = 'not_observed'",
+		"descriptor_to_runtime_request_binding = 'not_observed'",
+		"endpoint_qualification = 'not_qualified'",
+		"embedded_key_material_output = $false",
+		"secrets_output = $false",
+	} {
+		if !strings.Contains(xlogEvidenceText, expected) {
+			t.Errorf("Windows 聊天 CDN xlog 结构检查器缺少边界：%s", expected)
+		}
+	}
+	for _, forbidden := range []string{"Invoke-WebRequest", "Invoke-RestMethod", "Start-BitsTransfer", "Get-NetTCPConnection", "pktmon", "wpr.exe", "netsh", "OpenProcess", "ReadProcessMemory", "decode_mars_crypt_log_file.py"} {
+		if strings.Contains(xlogEvidenceText, forbidden) {
+			t.Errorf("Windows 聊天 CDN xlog 结构检查器不得联网、读进程内存或尝试解密：%s", forbidden)
+		}
+	}
+	auditWorkflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "audit-gates.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(auditWorkflow, []byte("inspect-windows-chat-cdn-xlog-structure.ps1 -SelfTest")) {
+		t.Fatal("Windows audit gate 未运行聊天 CDN xlog 结构检查器自检")
+	}
+	acceptance, err := os.ReadFile(filepath.Join(root, "references", "windows-amd64-local-acceptance.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(acceptance, []byte("../scripts/accept-windows-chat-image-recovery.ps1")) ||
+		!bytes.Contains(acceptance, []byte("../scripts/inspect-windows-chat-cdn-static-evidence.ps1")) ||
+		!bytes.Contains(acceptance, []byte("../scripts/inspect-windows-chat-cdn-xlog-structure.ps1")) ||
+		!bytes.Contains(acceptance, []byte("current_client_static_stack_present_unbound")) ||
+		!bytes.Contains(acceptance, []byte("direct_ilink_https_markers=not_observed_in_current_client_binaries")) ||
+		!bytes.Contains(acceptance, []byte("main_to_ilink_wrapper_static_reference=delay_import_observed_unbound")) ||
+		!bytes.Contains(acceptance, []byte("本轮不增加聊天图片 `--allow-network`")) ||
+		!bytes.Contains(acceptance, []byte("encrypted_mars_xlog_private_key_required")) ||
+		!bytes.Contains(acceptance, []byte("退出码 `0`")) || !bytes.Contains(acceptance, []byte("`1` 表示")) ||
+		!bytes.Contains(acceptance, []byte("`2` 表示")) ||
+		!bytes.Contains(acceptance, []byte("不要设置固定像素门槛")) ||
+		!bytes.Contains(acceptance, []byte("WXGF 若返回预期的 `chat_image_unavailable/decoder_unavailable`")) ||
+		!bytes.Contains(acceptance, []byte("每次询问前用当前 generation 重新预检")) {
+		t.Fatal("Windows 真机验收文档没有公开脚本入口或退出状态")
+	}
+	mediaReference, err := os.ReadFile(filepath.Join(root, "references", "media-decrypt.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"不能把字段值本身当作可直接请求的 HTTPS URL",
+		"不能据此断言桌面聊天描述符可复用",
+		"synthetic_crypto_binding_harness_only",
+		"仅作历史线索",
+		"不能证明 2026 年当前 Windows 桌面端",
+		"Weixin 4.1.12.55",
+		"current_client_static_stack_present_unbound",
+		"descriptor_to_runtime_request_binding=not_observed",
+		"encrypted_mars_xlog_private_key_required",
+		"payload_decoding_performed=false",
+		"CdnCore::start_c2c_download -> CdnCore::_startDownloadMedia -> TaskFactory::CreateC2CImageDownloadTask",
+		"主模块确实 delay-import `ilink_wrapper.dll`",
+		"本轮不实现聊天图片直接 CDN 请求",
+		"当前受支持的自动恢复只有",
+		"描述符年龄、字段存在、HTTP 状态、缓存层级和像素尺寸都不能单独判定时效或质量",
+		"任何非 loopback 端点都会在请求前拒绝",
+		"重新取得单次授权",
+		"`429` 只表示限流",
+	} {
+		if !bytes.Contains(mediaReference, []byte(expected)) {
+			t.Errorf("聊天 CDN 资格门禁文档缺少边界：%s", expected)
+		}
+	}
+}
+
+func TestWXGFVisualReviewQualificationContract(t *testing.T) {
+	root := repositoryRoot(t)
+	visualScript, err := os.ReadFile(filepath.Join(root, "scripts", "accept-windows-wxgf-visual-equivalence.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	visualText := string(visualScript)
+	for _, expected := range []string{
+		"$HelperProtocol = 'v-local-cli/wxgf-visual-review-helper/v1'",
+		"$RecordProtocol = 'v-local-cli/wxgf-visual-review-record/v1'",
+		"$ReportProtocol = 'v-local-cli/windows-wxgf-visual-equivalence-evidence/v1'",
+		"$ProviderProtocol = 'v-local-cli-image-decoder/1'",
+		"[ValidateSet('Prompt', 'Skip')]",
+		"[string]$BrowserDisplayRoot",
+		"$HelperAction = if ($ReviewMode -ceq 'Skip') { 'inspect' } else { 'prepare' }",
+		"$Expected = \"CONFIRM-CONTENT-ORIENTATION-CROP-COLOR-$Challenge\"",
+		"Start-Process -FilePath $OpenPath",
+		"[System.IO.FileMode]::CreateNew",
+		"Set-BrowserDisplayDirectoryAcl",
+		"Get-BrowserDisplayReadSids",
+		"S-1-15-2-1",
+		"S-1-15-2-2",
+		"browser_display_root_acl_public_reader",
+		"$Sid.StartsWith('S-1-5-21-'",
+		"explicit_local_root_readers_downgraded_to_read_only",
+		"browser_display_root_overlaps_private_root",
+		"browser_display_root_not_local_fixed_disk",
+		"browser_display_copy_changed",
+		"CONFIRM-BROWSER-DISPLAY-$InteractiveChallenge",
+		"browser_display_interactive_checked",
+		"temporary_browser_display_artifacts_removed",
+		"browser_display_path_included = $false",
+		"browser_cache_erasure_proven = $false",
+		"fixed_dimension_quality_gate = $false",
+		"source_producer_version_status = $SourceProducerVersionStatus",
+		"provider_binary_trust_status = $ProviderBinaryTrustStatus",
+		"host_staged_manifest_bound_provider_and_decoder_sha256",
+		"provider_identity_manifest_protocol = $ProviderIdentityManifestProtocol",
+		"provider_identity_manifest_sha256 = $ProviderIdentityManifestSHA256",
+		"provider_sha256 = $ProviderSHA256",
+		"provider_signature_status = $ProviderSignatureStatus",
+		"decoder_signature_status = $DecoderSignatureStatus",
+		"decoder_distribution_license_status = $DecoderDistributionLicenseStatus",
+		"production_ready = $false",
+		"temporary_artifact_cleanup_failed",
+	} {
+		if !strings.Contains(visualText, expected) {
+			t.Errorf("WXGF 人工复审脚本缺少边界：%s", expected)
+		}
+	}
+
+	manifestScript, err := os.ReadFile(filepath.Join(root, "scripts", "new-windows-wxgf-provider-identity-manifest.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestText := string(manifestScript)
+	for _, expected := range []string{
+		"v-local-cli/wxgf-provider-identity-manifest/v1",
+		"[System.IO.FileMode]::CreateNew",
+		"Get-StableSHA256",
+		"Assert-NoReparsePoint",
+		"StartsWith('//')",
+		"provider_decoder_not_adjacent",
+		"provider_decoder_same_file",
+		"decoder_file_name_invalid",
+		"self_test_manifest_contains_trust_claim",
+		"identity_only = $true",
+		"proves_provenance = $false",
+		"qualifies_signatures = $false",
+		"qualifies_distribution_license = $false",
+		"network = $false",
+	} {
+		if !strings.Contains(manifestText, expected) {
+			t.Errorf("WXGF provider 身份清单脚本缺少边界：%s", expected)
+		}
+	}
+	for _, forbidden := range []string{"Invoke-WebRequest", "Invoke-RestMethod", "Start-BitsTransfer", "Copy-Item"} {
+		if strings.Contains(manifestText, forbidden) {
+			t.Errorf("WXGF provider 身份清单脚本包含越界能力：%s", forbidden)
+		}
+	}
+	auditWorkflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "audit-gates.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"new-windows-wxgf-provider-identity-manifest.ps1 -SelfTest",
+		"new-windows-wxgf-visual-review-session.ps1 -SelfTest",
+		"accept-windows-wxgf-visual-equivalence.ps1 -SelfTest",
+	} {
+		if !bytes.Contains(auditWorkflow, []byte(expected)) {
+			t.Errorf("Windows audit gate 未运行 WXGF 自检：%s", expected)
+		}
+	}
+	for _, forbidden := range []string{
+		"--allow-network", "Invoke-WebRequest", "Invoke-RestMethod", "Start-BitsTransfer", "Copy-Item",
+		"MinImageLongEdge", "MinImageShortEdge", "source_original_quality_known = $true",
+	} {
+		if strings.Contains(visualText, forbidden) {
+			t.Errorf("WXGF 人工复审脚本包含越界能力或固定尺寸门槛：%s", forbidden)
+		}
+	}
+
+	sessionScript, err := os.ReadFile(filepath.Join(root, "scripts", "new-windows-wxgf-visual-review-session.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionText := string(sessionScript)
+	for _, expected := range []string{
+		"V_LOCAL_TEST_WXGF_REVIEW_ROOT",
+		"SetAccessRuleProtection($true, $false)",
+		"Assert-PrivateDirectoryAcl $RootBase",
+		"temporary_images_present = $false",
+		"reads_wechat_data = $false",
+		"opens_wechat_ui = $false",
+	} {
+		if !strings.Contains(sessionText, expected) {
+			t.Errorf("WXGF 私有复审目录脚本缺少边界：%s", expected)
+		}
+	}
+
+	reference, err := os.ReadFile(filepath.Join(root, "references", "wxgf-decoder-qualification.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"installed_package_at_review_not_source_provenance",
+		"hardlink_cache_filename_variant_not_source_quality",
+		"provider_binary_trust_status=unverified",
+		"host_staged_manifest_bound_provider_and_decoder_sha256",
+		"pre_binding_records_excluded",
+		"provider_signature_status=not_qualified",
+		"decoder_signature_status=not_qualified",
+		"decoder_distribution_license_status=not_qualified",
+		"当前最终 v1 矩阵尚未用真实样本评估",
+		"项目本身只提供源码",
+		"不启用 GPL/nonfree 组件",
+		"browser_cache_erasure_proven=false",
+		"`production_ready=false`、`fixed_dimension_quality_gate=false`",
+		"本流程不操作微信 UI、不请求 CDN",
+		"两者仍都只命中 `medium`，没有观察到 `high` 本地缓存",
+		"`inconclusive/skipped`",
+		"`sample_review.status=confirmed`",
+		"`samples_confirmed=2`",
+		"`distinct_wxgf_samples=2`",
+		"`high=0`、`medium=2`",
+		"`-BrowserDisplayRoot`",
+		"`browser_display_path_included=false`",
+	} {
+		if !bytes.Contains(reference, []byte(expected)) {
+			t.Errorf("WXGF 人工复审文档缺少证据边界：%s", expected)
+		}
+	}
+	acceptance, err := os.ReadFile(filepath.Join(root, "references", "windows-amd64-local-acceptance.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(acceptance, []byte("wxgf-decoder-qualification.md#人工视觉等价复审")) ||
+		!bytes.Contains(acceptance, []byte("只查看解码图但跳过参考图")) ||
+		!bytes.Contains(acceptance, []byte("pre_binding_records_excluded")) {
+		t.Fatal("Windows 真机验收没有链接 WXGF 人工复审及其跳过边界")
+	}
+}
+
 func TestImplementedFlagsMatchCommandSchema(t *testing.T) {
 	root := repositoryRoot(t)
 	commands := schemaCommands(t)

@@ -9,7 +9,7 @@
 | `invalid_date` | 使用严格的 `YYYY-MM-DD` 本地日期。 |
 | `invalid_time_window` | 确保开始日期不晚于结束日期。 |
 | `conflicting_time_window` | `--all` 与 `--start/--end` 不能同时使用。 |
-| `missing_command`、`unknown_command`、`invalid_arguments` | 运行 `v-local-cli --help` 或 `v-local-cli schema <command>`，按机器契约修正命令和选项顺序。 |
+| `missing_command`、`unknown_command`、`invalid_arguments` | 运行 `v-local-cli --help` 或 `v-local-cli schema <command>`，按机器契约修正命令和选项顺序。查询的 `--all` 只控制日期范围；条数只用 `--limit`，其中 `--limit 0` 表示无上限。 |
 | `key_access_not_authorized` | 只有用户明确同意后才能加 `--allow-key-access`。 |
 | `private_state_unavailable` | 检查当前用户缓存目录的所有者、ACL 与剩余空间；不要把 acquisition endpoint 或 resume 文件移到共享目录。 |
 | `private_output_invalid` | 只在本机受控验收中设置 `V_LOCAL_CLI_PRIVATE_OUTPUT_PATH`；使用既有、非重解析点私有目录中的绝对新文件路径，不要覆盖现有文件。 |
@@ -63,7 +63,7 @@
 | `ocr_text_not_cached` | 微信兼容索引和 v-local-cli 私有缓存都没有该图片文字；对具体 `image_evidence_id` 运行 `ocr-recognize`，取得本次私有 IPC 明确授权后再增加 `--allow-private-ipc`。不要把零结果解释为图片没有文字。 |
 | `image_evidence_unavailable` | 重新从当前快照的 `history` 取得 `kind=image` 的 `evidence_id`，不要按文件名或时间猜测。 |
 | `ocr_input_invalid` | 只选择 64 MiB 内、结构验证通过的普通 JPEG、PNG 或 GIF 文件；不要改扩展名绕过。 |
-| `chat_image_unavailable` | 先在微信打开该图片并运行 `refresh`；确认 setup 已保存图片密钥。CLI 只接受消息资源标识与 hardlink 映射共同指向且完整解码通过的本地图片。 |
+| `chat_image_unavailable` | 失败先看 `details.local_resolution_status`：`local_file_missing` 才在微信打开该图片并运行 `refresh --require-media`；`decoder_unavailable` 表示 WXGF 等强关联候选已存在但本构建缺少已验收解码器，错误响应在账号已解析后仍应带 `meta.generation_id`/manifest，不能伪装成成功图片；`local_validation_failed` 检查图片密钥与容器；`content_conflict`、`resource_descriptor_unavailable`、`local_mapping_unavailable` 都要停止猜测并重新取证。若 `medium|thumbnail` 已成功，应改看 `higher_quality_local_status` 与 `higher_quality_recovery_action`：只有 `missing` / `ask_user_to_open_original_then_refresh_and_retry` 才询问用户；确认后用新私有输出路径自动 refresh，并对同一 evidence 最多重试一次，仍缺失就停止。`decoder_unavailable` / `do_not_request_redownload_same_candidate` 不要要求重复点开。`remote_descriptor_parse_status=parsed_unverified_protocol` 只代表本地结构检查通过；`remote_descriptor_status=present_expiry_unknown` 仍不代表当前可下载。真实端点被禁用，聊天远端协议尚未验收且不会联网。 |
 | `ocr_temporary_cleanup_failed` | OCR 已返回但临时明文图片未能删除；停止处理其他图片并运行 `doctor` 检查账号私有临时目录。 |
 | `wechat_native_ocr_authorization_required` | 说明这次会启动已安装微信的私有 OCR 子进程、能力与微信版本耦合；只在用户对这一个本地图片明确同意后增加 `--allow-private-ipc`。 |
 | `wechat_native_ocr_unavailable` | 用 `ocr-status` 检查平台和已安装微信组件；该实验后端只支持 Windows amd64。不要从非微信安装目录下载或补齐 DLL/模型。 |
@@ -86,7 +86,7 @@
 | `moment_media_verify_failed` | 媒体没有通过容器或摘要验真，没有生成输出文件；刷新本地快照后重试，不要打开失败负载。 |
 | `moment_media_kind_unsupported` | 当前只支持普通图片和普通视频；不要把实况照片等未绑定描述符猜成可导出媒体。 |
 | `moment_media_download_failed_authorization_rejected`、`moment_media_download_failed_resource_unavailable` | CDN 令牌或资源可能已失效；刷新快照并重新取得媒体证据后，再重新请求单次联网授权。 |
-| `moment_media_download_failed_dns_failed`、`moment_media_download_failed_connection_failed`、`moment_media_download_failed_request_failed`、`moment_media_download_failed_direct_dns_failed` | 检查 DNS 和网络后重试；不要启用环境代理、关闭 TLS 验证或把令牌交给其他下载器。 |
+| `moment_media_download_failed_dns_failed`、`moment_media_download_failed_connection_failed`、`moment_media_download_failed_request_failed`、`moment_media_download_failed_direct_dns_failed`、`moment_media_download_failed_direct_dns_transport_failed` | 检查 DNS 和网络；描述符时效仍未知，刷新快照重新取得证据并重新请求单次授权。不要启用环境代理、关闭 TLS 验证或把令牌交给其他下载器。 |
 | `moment_media_download_failed_non_public_address`、`moment_media_download_failed_invalid_address`、`moment_media_download_failed_request_build_failed`、`moment_media_download_failed_synthetic_proxy_address` | 目标未通过公网地址或请求构造检查；保持拒绝，不要绕过 SSRF 与 fake-IP 防线。 |
 | `moment_media_download_failed_redirect_rejected`、`moment_media_download_failed_rate_limited`、`moment_media_download_failed_http_status` | 不跟随跳转；稍后用当前证据重试，持续失败时刷新快照。 |
 | `moment_media_download_failed_response_read_failed`、`moment_media_download_failed_response_size_invalid` | 响应读取失败、为空或超过上限；没有可信输出，不要保留临时文件。 |
@@ -110,3 +110,5 @@
 系统凭据按桌面用户身份隔离。若 CLI 在不同用户、服务或沙箱身份下运行，`refresh` 可能看不到原身份保存的凭据；不要把密钥复制到项目文件来绕过隔离，应切回同一桌面用户身份，或重新 setup。
 
 `setup --dry-run` 永远不会启动 Provider。若它的输出显示 `key_provider.executable_present=false`，这不是数据库损坏，只表示没有解析到 Provider 可执行文件；即使为 `true` 也不能替代 `integrity`、协议和真机 route 验证。
+
+朋友圈远端错误会在可判断时通过 `remote_descriptor_status`、`descriptor_expiry_status`、`retry_policy`、`authorization_scope` 和 `network_access_performed` 给出不含令牌的状态。`present_expiry_unknown` / `unknown` 配合 `single_evidence_single_attempt` 表示当前只验证到描述符存在，尚未联网；`missing` / `not_available` 配合 `refresh_snapshot_for_new_descriptor` 表示没有可用描述符。`rejected_by_policy` 仍需刷新描述符，不能绕过目标限制。`request_failed` / `unknown_after_request_failure` 使用 `refresh_snapshot_for_new_descriptor_and_reauthorize`；`expired_or_rejected` 或 `resource_unavailable_or_expired` 使用 `requires_new_descriptor_and_new_authorization`。`temporarily_rate_limited` 的策略是 `retry_requires_new_single_attempt_authorization`，不能直接判定过期；普通 `http_error` 使用 `retry_then_refresh_descriptor`。`response_unverified` / `unknown_after_unverified_response` 表示虽然收到了数据，但尚未验证为目标媒体，也不能据此断言描述符仍有效；容器协议异常时使用 `inspect_protocol_then_refresh_descriptor_and_reauthorize`，不能盲目重复下载。

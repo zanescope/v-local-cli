@@ -23,6 +23,7 @@ import (
 	"github.com/zanescope/v-local-cli/internal/provider"
 	"github.com/zanescope/v-local-cli/internal/snapshot"
 	"github.com/zanescope/v-local-cli/internal/state"
+	"github.com/zanescope/v-local-cli/internal/store"
 	_ "modernc.org/sqlite"
 )
 
@@ -38,6 +39,40 @@ func runForTest(args ...string) (int, map[string]any, map[string]any) {
 		_ = json.Unmarshal(stderr.Bytes(), &errors)
 	}
 	return code, output, errors
+}
+
+func TestMomentMediaErrorsExposeDescriptorExpiryWithoutLeakingSecrets(t *testing.T) {
+	tests := []struct {
+		kind, descriptorStatus, expiryStatus, retryPolicy string
+		networkAccessPerformed                            any
+	}{
+		{"moment_media_network_authorization_required", "present_expiry_unknown", "unknown", "single_evidence_single_attempt", false},
+		{"moment_media_download_failed_authorization_rejected", "expired_or_rejected", "expired_or_rejected", "requires_new_descriptor_and_new_authorization", nil},
+		{"moment_media_download_failed_resource_unavailable", "resource_unavailable_or_expired", "resource_unavailable_or_expired", "requires_new_descriptor_and_new_authorization", nil},
+		{"moment_media_download_failed_rate_limited", "temporarily_rate_limited", "unknown", "retry_requires_new_single_attempt_authorization", nil},
+		{"moment_media_download_failed_request_failed", "request_failed", "unknown_after_request_failure", "refresh_snapshot_for_new_descriptor_and_reauthorize", nil},
+		{"moment_media_download_failed_dns_failed", "request_failed", "unknown_after_request_failure", "refresh_snapshot_for_new_descriptor_and_reauthorize", nil},
+		{"moment_media_download_failed_direct_dns_failed", "request_failed", "unknown_after_request_failure", "refresh_snapshot_for_new_descriptor_and_reauthorize", nil},
+		{"moment_media_download_failed_direct_dns_transport_failed", "request_failed", "unknown_after_request_failure", "refresh_snapshot_for_new_descriptor_and_reauthorize", nil},
+		{"moment_media_download_failed_non_public_address", "rejected_by_policy", "unknown", "refresh_snapshot_for_new_descriptor", nil},
+		{"moment_media_download_failed_redirect_rejected", "request_failed", "unknown_after_request_failure", "refresh_snapshot_for_new_descriptor_and_reauthorize", nil},
+		{"moment_media_download_failed_response_read_failed", "request_failed", "unknown_after_request_failure", "refresh_snapshot_for_new_descriptor_and_reauthorize", nil},
+		{"moment_media_verify_failed_container", "response_unverified", "unknown_after_unverified_response", "inspect_protocol_then_refresh_descriptor_and_reauthorize", nil},
+	}
+	for _, test := range tests {
+		mapped := momentMediaCommandError(&store.MomentMediaExportError{Kind: test.kind})
+		commandErr, ok := mapped.(*commandError)
+		if !ok {
+			t.Fatalf("%s 未映射为 commandError：%T", test.kind, mapped)
+		}
+		details := commandErr.details.(map[string]any)
+		if details["remote_descriptor_status"] != test.descriptorStatus || details["descriptor_expiry_status"] != test.expiryStatus || details["retry_policy"] != test.retryPolicy {
+			t.Fatalf("%s 的描述符时效状态异常：%v", test.kind, details)
+		}
+		if test.networkAccessPerformed != nil && details["network_access_performed"] != test.networkAccessPerformed {
+			t.Fatalf("%s 的联网状态异常：%v", test.kind, details)
+		}
+	}
 }
 
 func TestSecurityPostureRevalidationRequiresLiveProviderProvenance(t *testing.T) {
@@ -820,7 +855,7 @@ func TestMomentsAndOfficialCommands(t *testing.T) {
 	meta := output["meta"].(map[string]any)
 	coverage := data["moment_source_coverage"].(map[string]any)
 	resolution := coverage["media_resolution"].(map[string]any)
-	if data["count"].(float64) != 1 || resolution["verified_local_media"].(float64) != 1 || coverage["visible_likes"].(float64) != 1 || coverage["visible_comments"].(float64) != 1 || meta["unbounded_by_limit"] != true || meta["result_limit"] != nil {
+	if data["count"].(float64) != 1 || resolution["verified_local_media"].(float64) != 1 || coverage["visible_likes"].(float64) != 1 || coverage["visible_comments"].(float64) != 1 || meta["unbounded_by_limit"] != false || meta["result_limit"].(float64) != 200 {
 		t.Fatalf("朋友圈命令结果异常：%v", data)
 	}
 	serialized, err := json.Marshal(output)
@@ -838,7 +873,7 @@ func TestMomentsAndOfficialCommands(t *testing.T) {
 	momentImageOutput := filepath.Join(t.TempDir(), "moment.png")
 	code, output, errorOutput = runForTest("export-moment-media", "--output", momentImageOutput, mediaEvidenceID)
 	momentExport := output["data"].(map[string]any)
-	if code != 0 || momentExport["media_kind"] != "image" || momentExport["network_access_performed"] != false || momentExport["container_validation"] != "full_decode" || momentExport["decryption_scope"] != "local_cache" || momentExport["descriptor_md5_status"] != "not_applicable" || momentExport["descriptor_size_status"] != "not_applicable" {
+	if code != 0 || momentExport["media_kind"] != "image" || momentExport["network_access_performed"] != false || momentExport["container_validation"] != "full_decode" || momentExport["decryption_scope"] != "local_cache" || momentExport["descriptor_md5_status"] != "not_applicable" || momentExport["descriptor_size_status"] != "not_applicable" || momentExport["remote_descriptor_status"] != "not_used" || momentExport["descriptor_expiry_status"] != "not_applicable" {
 		t.Fatalf("朋友圈本地图片导出异常：code=%d output=%v error=%v", code, output, errorOutput)
 	}
 	exported, err := os.ReadFile(momentImageOutput)
@@ -862,7 +897,7 @@ func TestMomentsAndOfficialCommands(t *testing.T) {
 		t.Fatalf("朋友圈评论搜索字段异常：%v", matched)
 	}
 	code, output, errorOutput = runForTest("official-history", "--all", "gh_example")
-	if code != 0 || output["data"].(map[string]any)["count"].(float64) != 1 || output["meta"].(map[string]any)["unbounded_by_limit"] != true {
+	if code != 0 || output["data"].(map[string]any)["count"].(float64) != 1 || output["meta"].(map[string]any)["unbounded_by_limit"] != false {
 		t.Fatalf("official-history 异常：code=%d output=%v error=%v", code, output, errorOutput)
 	}
 	officialEvidenceID := output["data"].(map[string]any)["items"].([]any)[0].(map[string]any)["evidence_id"].(string)
@@ -1004,7 +1039,7 @@ func TestHistoryReturnsTimeWindowMetadata(t *testing.T) {
 	}
 }
 
-func TestAllWithoutExplicitLimitIsUnbounded(t *testing.T) {
+func TestAllOnlyChangesTimeWindowAndLimitZeroIsUnbounded(t *testing.T) {
 	home := testHome(t)
 	snapshot := filepath.Join(t.TempDir(), "snapshot")
 	messagePath := filepath.Join(snapshot, "message", "message_0.db")
@@ -1051,8 +1086,8 @@ func TestAllWithoutExplicitLimitIsUnbounded(t *testing.T) {
 	}
 	data := output["data"].(map[string]any)
 	meta := output["meta"].(map[string]any)
-	if data["count"].(float64) != 1005 || meta["unbounded_by_limit"] != true || meta["result_limit"] != nil {
-		t.Fatalf("history --all 未全量返回：data=%v meta=%v", data, meta)
+	if data["count"].(float64) != historyDefaultResultLimit || data["has_more"] != true || meta["unbounded_by_limit"] != false || meta["result_limit"].(float64) != historyDefaultResultLimit {
+		t.Fatalf("history --all 不应隐式取消条数上限：data=%v meta=%v", data, meta)
 	}
 
 	code, output, errorOutput = runForTest("history", "--all", "--limit", "50", "alice")
@@ -1061,17 +1096,27 @@ func TestAllWithoutExplicitLimitIsUnbounded(t *testing.T) {
 	}
 	data = output["data"].(map[string]any)
 	meta = output["meta"].(map[string]any)
-	if data["count"].(float64) != 50 || meta["unbounded_by_limit"] != false || meta["result_limit"].(float64) != 50 {
+	if data["count"].(float64) != 50 || data["has_more"] != true || data["truncated"] != true || meta["unbounded_by_limit"] != false || meta["result_limit"].(float64) != 50 || meta["has_more"] != true {
 		t.Fatalf("显式 limit 未生效：data=%v meta=%v", data, meta)
 	}
 
-	code, output, errorOutput = runForTest("search", "--all", "--chat", "alice", "消息")
+	code, output, errorOutput = runForTest("history", "--start", "2026-08-01", "--end", "2026-08-01", "--limit", "0", "alice")
+	if code != 0 {
+		t.Fatalf("history 显式日期 --limit 0 退出码=%d output=%v error=%v", code, output, errorOutput)
+	}
+	data = output["data"].(map[string]any)
+	meta = output["meta"].(map[string]any)
+	if data["count"].(float64) != 1005 || data["has_more"] != false || meta["limit_explicit"] != true || meta["unbounded_by_limit"] != true || meta["result_limit"] != nil {
+		t.Fatalf("显式日期 --limit 0 未全量返回：data=%v meta=%v", data, meta)
+	}
+
+	code, output, errorOutput = runForTest("search", "--all", "--limit", "0", "--chat", "alice", "消息")
 	if code != 0 {
 		t.Fatalf("search --all 退出码=%d output=%v error=%v", code, output, errorOutput)
 	}
 	data = output["data"].(map[string]any)
 	if data["count"].(float64) != 1005 {
-		t.Fatalf("search --all 未全量返回：%v", data)
+		t.Fatalf("search --limit 0 未全量返回：%v", data)
 	}
 	searchStatus := data["search_backend_status"].(map[string]any)
 	if searchStatus["message_coverage_status"] != "partial" || searchStatus["index_present"] != false {
@@ -1090,14 +1135,23 @@ func TestAllWithoutExplicitLimitIsUnbounded(t *testing.T) {
 	if err != nil || string(preserved) != "existing-output" {
 		t.Fatalf("export 拒绝覆盖时改写了已有输出：payload=%q err=%v", preserved, err)
 	}
-	code, output, errorOutput = runForTest("export", "--all", "--force", "--output", exportPath, "history", "alice")
+	code, output, errorOutput = runForTest("export", "--all", "--limit", "50", "--force", "--output", exportPath, "history", "alice")
+	if code != 0 {
+		t.Fatalf("有限 export 退出码=%d output=%v error=%v", code, output, errorOutput)
+	}
+	data = output["data"].(map[string]any)
+	meta = output["meta"].(map[string]any)
+	if data["count"].(float64) != 50 || data["has_more"] != true || data["truncated"] != true || meta["has_more"] != true {
+		t.Fatalf("有限 export 未报告截断：data=%v meta=%v", data, meta)
+	}
+	code, output, errorOutput = runForTest("export", "--all", "--limit", "0", "--force", "--output", exportPath, "history", "alice")
 	if code != 0 {
 		t.Fatalf("export --all 退出码=%d output=%v error=%v", code, output, errorOutput)
 	}
 	data = output["data"].(map[string]any)
 	exported, readErr := os.ReadFile(exportPath)
-	if data["count"].(float64) != 1005 || data["streamed"] != true || readErr != nil || bytes.Count(exported, []byte("\n")) != 1005 {
-		t.Fatalf("export --all 未全量返回：%v", data)
+	if data["count"].(float64) != 1005 || data["streamed"] != true || data["has_more"] != false || readErr != nil || bytes.Count(exported, []byte("\n")) != 1005 {
+		t.Fatalf("export --limit 0 未全量返回：%v", data)
 	}
 
 	code, output, errorOutput = runForTest("stats", "--all", "alice")

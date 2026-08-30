@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"container/list"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -33,12 +34,13 @@ const (
 )
 
 type daemonInfo struct {
-	SchemaVersion int    `json:"schema_version"`
-	Address       string `json:"address"`
-	Token         string `json:"token"`
-	PID           int    `json:"pid"`
-	Version       string `json:"version"`
-	StartedAt     string `json:"started_at"`
+	SchemaVersion    int    `json:"schema_version"`
+	Address          string `json:"address"`
+	Token            string `json:"token"`
+	PID              int    `json:"pid"`
+	Version          string `json:"version"`
+	ExecutableSHA256 string `json:"executable_sha256"`
+	StartedAt        string `json:"started_at"`
 }
 
 type daemonRequest struct {
@@ -136,6 +138,28 @@ func randomDaemonToken() (string, error) {
 	return hex.EncodeToString(payload), nil
 }
 
+func currentExecutableSHA256() (string, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func validLowerHexSHA256(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == value
+}
+
 func saveDaemonInfo(info daemonInfo) error {
 	path, err := daemonInfoPath()
 	if err != nil {
@@ -195,7 +219,7 @@ func loadDaemonInfo() (daemonInfo, error) {
 	host, _, splitErr := net.SplitHostPort(info.Address)
 	ip := net.ParseIP(host)
 	if info.SchemaVersion != daemonProtocolVersion || splitErr != nil || ip == nil || !ip.IsLoopback() ||
-		len(info.Token) != 64 || info.PID <= 0 {
+		len(info.Token) != 64 || info.PID <= 0 || strings.TrimSpace(info.Version) == "" || !validLowerHexSHA256(info.ExecutableSHA256) {
 		return daemonInfo{}, errors.New("daemon endpoint 信息无效")
 	}
 	if decoded, err := hex.DecodeString(info.Token); err != nil || len(decoded) != 32 {
@@ -375,9 +399,13 @@ func serveDaemon() error {
 	if err != nil {
 		return err
 	}
+	executableSHA256, err := currentExecutableSHA256()
+	if err != nil {
+		return err
+	}
 	info := daemonInfo{
 		SchemaVersion: daemonProtocolVersion, Address: listener.Addr().String(), Token: token,
-		PID: os.Getpid(), Version: Version, StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		PID: os.Getpid(), Version: Version, ExecutableSHA256: executableSHA256, StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if err := saveDaemonInfo(info); err != nil {
 		return err
@@ -424,7 +452,16 @@ func serveDaemon() error {
 	}
 }
 
-func daemonExchange(info daemonInfo, command string, args []string) (daemonResponse, error) {
+func daemonExchangeWithBuildPolicy(info daemonInfo, command string, args []string, requireCurrentBuild bool) (daemonResponse, error) {
+	if requireCurrentBuild {
+		currentSHA256, err := currentExecutableSHA256()
+		if err != nil {
+			return daemonResponse{}, err
+		}
+		if info.Version != Version || subtle.ConstantTimeCompare([]byte(info.ExecutableSHA256), []byte(currentSHA256)) != 1 {
+			return daemonResponse{}, errors.New("daemon 版本或可执行文件不匹配；请先运行 daemon stop，再用当前 CLI 重新启动")
+		}
+	}
 	connection, err := net.DialTimeout("tcp4", info.Address, 2*time.Second)
 	if err != nil {
 		return daemonResponse{}, err
@@ -445,6 +482,16 @@ func daemonExchange(info daemonInfo, command string, args []string) (daemonRespo
 		return daemonResponse{}, errors.New("daemon 响应协议版本不匹配")
 	}
 	return response, nil
+}
+
+func daemonExchange(info daemonInfo, command string, args []string) (daemonResponse, error) {
+	return daemonExchangeWithBuildPolicy(info, command, args, true)
+}
+
+func daemonStopExchange(info daemonInfo) (daemonResponse, error) {
+	// endpoint schema、loopback 地址和私有令牌已由 loadDaemonInfo 验证。只对 stop
+	// 放宽 build 绑定，使升级后的 CLI 仍能安全关闭同协议的旧进程；查询仍一律拒绝。
+	return daemonExchangeWithBuildPolicy(info, "__stop__", nil, false)
 }
 
 func runDaemonClient(args []string, stdout, stderr io.Writer, mode outputMode) int {
@@ -508,11 +555,12 @@ func runDaemon(args []string) (any, error) {
 		if err != nil {
 			return nil, &commandError{typeName: "daemon_unavailable", message: "查询 daemon 不可用", hint: "在独立终端运行 v-local-cli daemon serve。", code: 5}
 		}
-		command := "__ping__"
+		var response daemonResponse
 		if action == "stop" {
-			command = "__stop__"
+			response, err = daemonStopExchange(info)
+		} else {
+			response, err = daemonExchange(info, "__ping__", nil)
 		}
-		response, err := daemonExchange(info, command, nil)
 		if err != nil {
 			return nil, &commandError{typeName: "daemon_request_failed", message: "查询 daemon 请求失败", hint: err.Error(), code: 5}
 		}

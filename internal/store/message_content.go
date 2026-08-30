@@ -848,9 +848,10 @@ func parseMessageReply(content string) *MessageReply {
 		return nil
 	}
 	reply := &MessageReply{
-		ToName:   reference.child("displayname").value(),
-		Quoted:   reference.child("content").value(),
-		RefSvrID: reference.child("svrid").value(),
+		ToUsername: reference.child("fromusr").value(),
+		ToName:     reference.child("displayname").value(),
+		Quoted:     reference.child("content").value(),
+		RefSvrID:   reference.child("svrid").value(),
 	}
 	referenceType := parseInteger(reference.child("type").value())
 	rawQuoted := reply.Quoted
@@ -873,7 +874,7 @@ func parseMessageReply(content string) *MessageReply {
 			}
 		}
 	}
-	if reply.ToName == "" && reply.Quoted == "" {
+	if reply.ToUsername == "" && reply.ToName == "" && reply.Quoted == "" && reply.RefSvrID == "" {
 		return nil
 	}
 	reply.Quoted = normalizeEmojiText(reply.Quoted)
@@ -904,7 +905,7 @@ func parseMessageMentions(source string) []string {
 func messageSearchText(message Message) string {
 	parts := []string{strings.ToLower(message.Content), strings.ToLower(message.VoiceTranscript), strings.ToLower(message.Sender), strings.ToLower(message.SenderUsername), strings.ToLower(message.SenderNickname), strings.ToLower(message.SenderRemark), strings.ToLower(message.SenderGroupNickname)}
 	if message.ReplyTo != nil {
-		parts = append(parts, strings.ToLower(message.ReplyTo.ToName), strings.ToLower(message.ReplyTo.Quoted))
+		parts = append(parts, strings.ToLower(message.ReplyTo.ToUsername), strings.ToLower(message.ReplyTo.ToName), strings.ToLower(message.ReplyTo.Quoted))
 	}
 	parts = append(parts, strings.ToLower(strings.Join(message.Mentions, " ")))
 	if len(message.Details) > 0 {

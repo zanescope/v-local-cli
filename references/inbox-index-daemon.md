@@ -35,7 +35,7 @@ poll 的事务顺序是：计算一批 → 原子写入 pending batch → 输出
 
 ## immutable 查询 daemon
 
-daemon 与 CLI 使用同一二进制。`serve` 是前台单实例服务，在 IPv4 loopback 的随机端口监听，并把 endpoint、PID 和随机 bearer token 写入当前用户私有状态目录；另一个 `serve` 会被操作系统锁拒绝。请求有大小、响应大小、并发数和 deadline 上限；endpoint 不是 loopback、token 不匹配或协议版本不符时拒绝。
+daemon 与 CLI 使用同一二进制。`serve` 是前台单实例服务，在 IPv4 loopback 的随机端口监听，并把 endpoint、PID、CLI 版本、启动时可执行文件 SHA-256 和随机 bearer token 写入当前用户私有状态目录；另一个 `serve` 会被操作系统锁拒绝。客户端连接前重新计算当前可执行文件摘要，版本或摘要不一致时拒绝查询并要求先 `daemon stop` 再重启；同协议旧进程的停止请求仍须私有 token，只对这一控制动作放宽 build 摘要绑定。请求有大小、响应大小、并发数和 deadline 上限；endpoint 不是 loopback、token 不匹配或协议版本不符时拒绝。
 
 daemon 白名单只包含不刷新、不联网、不导出、不改变派生状态的 snapshot 查询。它拒绝 `--fresh`、`--resolve-media`、setup、refresh、index build、new-messages、导出、联网正文/媒体请求等命令。history/search 在 daemon 中只合并 snapshot 内微信已有的语音文字，不读取可变的私有 ASR cache。缓存键包含账号、generation、snapshot manifest 摘要、派生索引身份、完整参数、本地日期和二进制版本，只有成功响应进入有界 LRU；generation、摘要或索引可用性改变后不会命中旧结果。
 
