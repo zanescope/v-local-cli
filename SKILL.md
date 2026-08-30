@@ -28,8 +28,8 @@ description: 用户要查看、搜索、统计、导出或分析本机微信（W
 |---|---|---|
 | 只读元数据 | `--version`、`schema`、`capabilities`、`status`、`accounts`、`doctor`、`provider status`、`voice-status`、`ocr-status`、`index status`、`daemon status`、所有 `--dry-run` | 任务需要时直接运行。`doctor --bundle` 另会写入脱敏文件。 |
 | 读取用户数据 | `contacts`、`resolve-contact`、`sessions`、`unread`、`members`、`favorites`、`new-messages`、`history`、`search`、`moments*`、`official-accounts`/`history`/`search`、`ocr-read`/`ocr-search`、`stats`、`refresh`、`--fresh` | 会把联系人、聊天正文、收藏、朋友圈或 OCR 文字带入 Agent 数据处理边界。首次读取前说明这一点；用户当前请求已明确要求读取时无需重复。`refresh`/`--fresh` 还会写入新的只读快照。 |
-| 需逐次授权 | `setup --allow-key-access`、`ocr-recognize`/`ocr-file --allow-private-ipc`、`official-article --allow-network`、`export-moment-media --allow-network` | 每次操作前单独说明影响并取得明确同意；一次同意不扩展到其他目标或后续任务。详见各领域段落。 |
-| 写入或删除 | `index build`、`new-messages` 创建/确认/删除 consumer、`daemon serve`/`stop`、`export`/`export-chat-image`/`export-media`/`export-moment-media`（写入文件）、`install`、`gc`、`forget --yes`、`setup --cancel-all-external-workflows` | 用户明确要求或当前任务直接需要时执行；索引和游标只写账号私有派生状态，不改微信或快照；已有输出默认返回 `output_exists`；`forget` 必须先 `--dry-run` 并取得确认。全局 checkpoint 清理也必须取得明确确认，并只用于损坏记录无法按账号清理时。 |
+| 需逐次授权 | `setup --allow-key-access`、`ocr-recognize`/`ocr-file --allow-private-ipc`、`official-article --allow-network`、`export-moment-media --allow-network`、`recover-chat-image --consent <challenge>` | 每次操作前单独说明影响并取得明确同意；一次同意不扩展到其他目标或后续任务。聊天图片 challenge 还会绑定账号、消息、generation、manifest、候选描述符、规范化输出路径和父目录文件身份，并且只能消费一次。详见各领域段落。 |
+| 写入或删除 | `index build`、`new-messages` 创建/确认/删除 consumer、`daemon serve`/`stop`、`export`/`export-chat-image`/`recover-chat-image`/`export-media`/`export-moment-media`（写入文件）、`install`、`gc`、`forget --yes`、`setup --cancel-all-external-workflows` | 用户明确要求或当前任务直接需要时执行；索引和游标只写账号私有派生状态，不改微信或快照；已有输出默认返回 `output_exists`；`forget` 必须先 `--dry-run` 并取得确认。全局 checkpoint 清理也必须取得明确确认，并只用于损坏记录无法按账号清理时。 |
 
 ## 选择调用入口
 
@@ -73,6 +73,7 @@ v-local-cli capabilities
 | 查看某个会话最近消息 | 用 `contacts` 解析稳定 `username`，再运行 `history`。 |
 | 查看指定日期、月份或全部本地记录 | 为 `history`、`search` 或 `export` 设置 `--start`、`--end` 或 `--all`。 |
 | 导出某条聊天图片 | 从 `history` 取得 `kind=image` 的 `evidence_id`，经用户确认输出路径后运行 `export-chat-image`；它只接受当前 generation 中由消息资源标识和 hardlink 映射共同证明、且完整解码通过的本地图片，不联网。 |
+| 当前本地聊天图片不足，尝试更高缓存层级 | 先不带 `--consent` 运行 `recover-chat-image`。只有返回结构化 `chat_image_recovery_network_authorization_required` 时才向用户说明具体 challenge；明确同意后对原命令增加该一次性 `--consent`。不透明桌面参数仍走“用户手动打开原图 → Agent refresh → 同 evidence 重试一次”。 |
 | 在某个会话搜索 | 用 `contacts` 解析 `username`，再运行带 `--chat` 的 `search`。 |
 | 跨会话搜索 | 运行不带 `--chat` 的 `search`，并明确说明覆盖不完整。 |
 | 转写一条语音 | 从 `history` 取得 `kind=voice` 的 `evidence_id`；`voice-transcribe` 先返回微信已有文字，再查私有暂存，只有缺失时才需要可选本地 ASR。 |
@@ -360,11 +361,29 @@ v-local-cli export-chat-image --account <account> --output <output-file> <image_
 
 该命令重新在当前 generation 定位消息，用 `message_resource` 资源标识与 `hardlink.db` 映射共同绑定本地候选，解密需要时只使用系统凭据库中已验真的图片密钥，并要求完整图片解码。以返回的 `width`、`height`、`sha256`、`verified_by=message_resource_stem+hardlink_map+full_decode` 判断结果；不会在响应中返回微信源路径。high/medium/thumbnail 本来就可能经过不同缩放或编码，CLI 先选择最高可验真的层级；只有同一最高层级内的强候选产生不同内容时才 fail closed。
 
-- `quality_tier=high|medium|thumbnail|unknown` 只证明该消息在微信缓存中的相对文件层级，不是绝对分辨率或视觉质量评级。`width`/`height` 只是已解码输出的客观尺寸；原图本身可能很小，因此不得设置固定边长门槛来否定 `high` 层级，也不得因像素较大就把 thumbnail/medium 改称原图。成功会返回 `quality_claim_scope=wechat_cache_variant_only`、`source_original_dimensions_known=false` 和 `resolution_status=verified_local`。
-- 当当前图片不足以完成任务时，再看 `higher_quality_local_status`：成功导出的 `quality_tier=medium|thumbnail` 都是可解码的较低缓存层级，不要求必须命中 thumbnail；`missing` 配合 `ask_user_to_open_original_then_refresh_and_retry` 才表示本地没有更高层级可验真候选。第一次诊断使用新的私有临时输出路径，避免稍后被 `output_exists` 阻断；先请用户在微信中打开这一张原图，用户确认后由 Agent 自动运行 `refresh --require-media`，仍使用同一个 `image_evidence_id` 和新输出路径完成重试，不要让用户手工拼命令。最多自动重试一次；重试后仍缺失就说明远端描述符可能已经过期或资源不可用，并停止，不要循环催促用户。`decoder_unavailable` 配合 `higher_quality_detected_format=wxgf|webp` 和 `do_not_request_redownload_same_candidate` 表示更高层级已在本地但本构建不能严格解码，不得再归因于用户没有点开。`validation_failed` 要先检查密钥或格式，`not_applicable` 表示已选中 `high`。不要自动化快速翻图；CLI 不操作微信界面。
-- 失败时检查 `local_resolution_status`：`local_file_missing` 才适合提示用户在微信打开原图并 `refresh --require-media`；`decoder_unavailable` 表示本地强关联容器（例如 WXGF）已存在但当前构建缺少通过验收的解码器，再次打开原图未必有效。此类错误在账号已解析后仍必须用 `meta.generation_id` 与 `meta.snapshot_manifest_sha256` 绑定诊断所用快照，不能为了验收而伪装成成功图片；其 `quality_tier` 仍只表示候选缓存层级。`local_validation_failed` 与 `content_conflict` 必须停止猜测。
-- `remote_descriptor_status=present_expiry_unknown` 只说明消息记录中保留了某些缓存档位的 CDN 描述符，不能证明现在仍可用。`remote_descriptor_parse_status=parsed_unverified_protocol` 仅表示不透明参数、16 字节 key，以及“明文 MD5”或“长度 + 成对尺寸”至少一组绑定材料通过本地结构检查；XML 中可选长度或宽高的 `0` 占位按“未提供”处理，尺寸即使存在也只用于绑定响应，绝不是清晰度门槛。`parsed_partial_unverified_protocol`、`present_incomplete`、`present_invalid` 分别表示部分候选可解析、缺必需材料或结构非法。所有这些状态都不能证明端点、解密协议或时效。当前只完成 `synthetic_crypto_binding_harness_only` 的 TLS loopback 加解密/绑定安全壳测试，不代表桌面请求协议已经通过；真实端点被代码禁止，`remote_protocol_status=unverified_desktop_protocol`、`remote_acquisition_status=unavailable_unverified_protocol`，所以聊天图片不会联网。只有未来补齐桌面会话材料、单证据真机探测及发布门禁后，才可增加逐图片、单次 `--allow-network` 流程。
-- 用户要求复审或实现聊天 CDN 协议时，可在 Windows 上运行 `scripts/inspect-windows-chat-cdn-static-evidence.ps1` 和 `scripts/inspect-windows-chat-cdn-xlog-structure.ps1`。前者只读取当前 Weixin 安装二进制并输出版本、摘要、固定标志和 PE import/export 事实；后者只检查 xlog 帧结构，绝不解码正文或猜测私钥；两者都不读取账号数据、进程内存或网络。`current_client_static_stack_present_unbound` 只证明当前客户端仍包含消息字段和会话化 C2C 任务材料；`direct_ilink_https_markers=not_observed_in_current_client_binaries`、wrapper delay-import、主模块未观察到公开 C2C 下载导出及 `encrypted_mars_xlog_private_key_required` 共同否定把旧 iLink GET 当作已合格方案，但仍不能证明运行时协议。必须同时读取 `descriptor_to_runtime_request_binding=not_observed` 与 `endpoint_qualification=not_qualified`，不得据此启用真实端点、注入私有 ABI 或启动包捕获。当前唯一受支持的自动恢复仍是用户确认打开指定原图后，由 Agent 执行一次 refresh 和一次同 evidence 重试。
+- `quality_tier=high|medium|thumbnail|unknown` 只证明该消息在微信缓存中的相对文件层级，不是绝对分辨率或视觉质量评级。`width`/`height` 只是已解码输出的客观尺寸；原图本身可能很小，因此不得设置固定边长门槛来否定 `high` 层级，也不得因像素较大就把 thumbnail/medium 改称原图。成功会返回 `quality_claim_scope=wechat_cache_variant_only`、`source_original_dimensions_known=false`、`source_original_quality_status=unknown` 和 `resolution_status=verified_local`。LongEdge、ShortEdge、文件大小及 high/medium 名称都不能单独升级这个 unknown。
+- 当当前图片不足以完成任务时，再看 `higher_quality_local_status`：成功导出的 `quality_tier=medium|thumbnail` 都是可解码的较低缓存层级，不要求必须命中 thumbnail。若当前快照观察到 full URL，输出会把动作改为 `run_recover_chat_image_offline_then_request_structured_consent`；先运行不带 `--consent` 的离线预检，只有它返回 challenge 才询问本次联网授权。只有不透明桌面参数仍使用 `missing + ask_user_to_open_original_then_refresh_and_retry`：第一次诊断使用新的私有临时输出路径，避免稍后被 `output_exists` 阻断；先请用户在微信中打开这一张原图，用户确认后由 Agent 自动运行 `refresh --require-media`，仍使用同一个 `image_evidence_id` 和新输出路径完成重试，不要让用户手工拼命令。最多自动重试一次；重试后仍缺失就说明远端描述符可能已经过期或资源不可用，并停止，不要循环催促用户。`decoder_unavailable` 配合 `higher_quality_detected_format=wxgf|webp` 和 `do_not_request_redownload_same_candidate` 表示更高层级已在本地但本构建不能严格解码，不得再归因于用户没有点开。WXGF 还必须读取 `higher_quality_decoder_diagnostics`：公共 CLI 固定不扫描 PATH，`binary_presence_status=not_evaluated` 不能解释为二进制缺失；`public_cli_integration_status=not_wired` 与 `production_qualification_status=not_qualified` 才是停止原因。`validation_failed` 要先检查密钥或格式，`not_applicable` 表示已选中 `high`。不要自动化快速翻图；CLI 不操作微信界面。
+- 失败时检查 `local_resolution_status`：`local_file_missing` 才适合提示用户在微信打开原图并 `refresh --require-media`；`decoder_unavailable` 表示本地强关联容器（例如 WXGF）已存在但公共 CLI 没有接入通过生产验收的解码器，再次打开原图未必有效。WXGF 错误读取 `decoder_diagnostics`；`qualification_interface_status=explicit_test_only` 表示资格测试是独立显式入口，即使通过也不会自动启用公共导出。不要自行查找或执行 PATH 中的 FFmpeg。此类错误在账号已解析后仍必须用 `meta.generation_id` 与 `meta.snapshot_manifest_sha256` 绑定诊断所用快照，不能为了验收而伪装成成功图片；其 `quality_tier` 仍只表示候选缓存层级。`local_validation_failed` 与 `content_conflict` 必须停止猜测。
+- `remote_descriptor_status=present_expiry_unknown` 只说明消息记录中保留了某些缓存档位的 CDN 描述符，不能证明现在仍可用。`remote_descriptor_parse_status=parsed_unverified_protocol` 仅表示 16 字节 key、请求引用，以及“明文 MD5”或“长度 + 成对尺寸”至少一组绑定材料通过本地结构检查；XML 中可选长度或宽高的 `0` 占位按“未提供”处理，尺寸即使存在也只用于绑定响应，绝不是清晰度门槛。`parsed_partial_unverified_protocol`、`present_incomplete`、`present_invalid` 分别表示部分候选可解析、缺必需材料或结构非法。这些状态本身都不能证明时效或原始质量。
+- 旧的 loopback TLS 加解密夹具只证明 `synthetic_crypto_binding_harness_only`：它验证 AES/容器/描述符绑定安全壳，不代表桌面十六进制参数或真实 CDN 端点已合格。
+- 只有当前快照直接携带 `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=...` full URL、没有重定向/额外查询参数、且候选高于当前本地缓存层级时，`recover-chat-image` 才能签发联网 challenge。首次调用必须不带 `--consent`，保持 `network_access_performed=false`：
+
+  输出父目录必须已经存在且位于本机；challenge 会绑定规范化字面路径和链接解析后的稳定目录身份。消费授权后 CLI 会保持目录句柄直到原子发布结束；两次命令间替换目录或重定向链接都会使旧 challenge 失效。
+
+  ```text
+  v-local-cli recover-chat-image --account <account> --output <new-output-file> <image_evidence_id>
+  ```
+
+  Agent 必须把 `consent_challenge` 中的账号、`evidence_id`、候选层级、目标域名、`observed_at`、授权到期时间和“一次 HTTPS 请求”影响说明给用户。用户对这一次操作明确同意后，才运行同一命令并增加返回的 challenge ID：
+
+  ```text
+  v-local-cli recover-chat-image --account <account> --output <same-output-file> --consent <challenge-id> <same-image_evidence_id>
+  ```
+
+  challenge 的作用域固定为 `single_account_message_image_candidate_attempt`，绑定账号、消息、generation、snapshot manifest、消息摘要、候选描述符摘要和输出路径摘要；签发和消费期间持有同账号快照事务锁并重新加载当前 state，拿不到锁时在消费 challenge 和联网前返回 `snapshot_busy`。challenge 先原子消费后联网，重放、过期、快照变化或描述符变化都要求新 challenge 和新授权。不要手工传 URL、token 或 key，也不要把 challenge 当长期凭据。授权聊天 CDN 请求不授权操作微信 UI；CLI 永不自动点开原图。
+- 联网恢复只发一次 GET，不使用环境代理/Cookie，不做 DNSPod 回退，不跟随任何重定向，并限制响应为 64 MiB 加一个 AES block。它要求 MIME 与明文/解密后的完整图片结构一致，再核对该消息描述符的 MD5，或同时核对长度与成对尺寸。任何错配、下载中断或清理失败都返回明确错误且不静默输出缩略图。成功只返回 `remote_descriptor_status=verified_at_request_time`、`descriptor_expiry_known=false`、`descriptor_expiry_status=unknown_future`、分开的 `observed_at`/`retrieved_at`，并继续保持 `source_original_quality_status=unknown`。
+- 现有十六进制 `cdn*imgurl` 不透明参数仍是 `remote_protocol_status=unverified_desktop_protocol`、`remote_acquisition_status=unavailable_unverified_protocol`；绝不能把它拼接到 iLink Bot URL。此时 `recover-chat-image` 返回 `chat_image_recovery_protocol_unavailable`，然后才使用已有人工回退：请用户手动在微信打开这一张原图；用户确认完成后由 Agent 自动运行一次 `refresh --require-media`，再以同一个 `image_evidence_id` 和新输出路径重试一次。这里没有 CLI 联网授权，也没有微信 UI 自动化授权。
+- 用户要求复审聊天 CDN 协议时，可在 Windows 上运行 `scripts/inspect-windows-chat-cdn-static-evidence.ps1` 和 `scripts/inspect-windows-chat-cdn-xlog-structure.ps1`。前者只读取当前 Weixin 安装二进制并输出版本、摘要、固定标志和 PE import/export 事实；后者只检查 xlog 帧结构，绝不解码正文或猜测私钥；两者都不读取账号数据、进程内存或网络。`current_client_static_stack_present_unbound` 只证明当前客户端仍包含消息字段和会话化 C2C 任务材料；`direct_ilink_https_markers=not_observed_in_current_client_binaries`、wrapper delay-import、主模块未观察到公开 C2C 下载导出及 `encrypted_mars_xlog_private_key_required` 共同否定把旧 iLink GET 当作已合格方案。它们不影响“快照本身已经提供受限 full URL”的单次响应验证路线，也绝不能被用来为只有十六进制参数的消息构造 URL、注入私有 ABI 或启动包捕获。
 
 ## 导出独立 DAT 图片
 

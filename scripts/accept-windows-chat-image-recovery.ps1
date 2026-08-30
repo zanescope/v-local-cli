@@ -7,8 +7,9 @@ Probes four distinct image evidence IDs, requests an exact user confirmation onl
 the two cases with a decodable lower cache tier but no higher local tier, then performs one
 saved-key refresh and one retry per confirmed evidence. A local WXGF candidate may be an
 expected decoder-unavailable error and remains bound to the same snapshot generation.
-Chat CDN access is never enabled. Private image artifacts and the sanitized report are
-stored in separate current-user directories.
+This local/manual W64-08 gate never enables Chat CDN access. The separate
+recover-chat-image consent gate covers the bounded network path. Private image artifacts
+and the sanitized report are stored in separate current-user directories.
 
 .EXAMPLE
 Get-Help .\scripts\accept-windows-chat-image-recovery.ps1 -Detailed
@@ -62,6 +63,39 @@ function Get-Field {
         return $null
     }
     return $Property.Value
+}
+
+function New-WXGFDecoderDiagnosticsFixture {
+    return [pscustomobject]@{
+        format = 'wxgf'
+        status_scope = 'public_cli_build'
+        binary_presence_status = 'not_evaluated'
+        binary_presence_reason = 'public_cli_does_not_inspect_path'
+        path_auto_discovery = $false
+        public_cli_integration_status = 'not_wired'
+        qualification_interface_status = 'explicit_test_only'
+        production_qualification_status = 'not_qualified'
+        qualification_success_enables_public_export = $false
+    }
+}
+
+function Assert-WXGFDecoderDiagnostics {
+    param(
+        [Parameter(Mandatory = $true)][object]$Container,
+        [Parameter(Mandatory = $true)][string]$FieldName,
+        [Parameter(Mandatory = $true)][string]$Code
+    )
+    $Diagnostics = Get-Field $Container $FieldName
+    Assert-Acceptance (($null -ne $Diagnostics) -and
+        ([string](Get-Field $Diagnostics 'format') -ceq 'wxgf') -and
+        ([string](Get-Field $Diagnostics 'status_scope') -ceq 'public_cli_build') -and
+        ([string](Get-Field $Diagnostics 'binary_presence_status') -ceq 'not_evaluated') -and
+        ([string](Get-Field $Diagnostics 'binary_presence_reason') -ceq 'public_cli_does_not_inspect_path') -and
+        ((Get-Field $Diagnostics 'path_auto_discovery') -eq $false) -and
+        ([string](Get-Field $Diagnostics 'public_cli_integration_status') -ceq 'not_wired') -and
+        ([string](Get-Field $Diagnostics 'qualification_interface_status') -ceq 'explicit_test_only') -and
+        ([string](Get-Field $Diagnostics 'production_qualification_status') -ceq 'not_qualified') -and
+        ((Get-Field $Diagnostics 'qualification_success_enables_public_export') -eq $false)) $Code
 }
 
 function Assert-PrivateIdentifier {
@@ -208,17 +242,19 @@ function Assert-KnownProbeEnums {
     $Format = [string](Get-Field $Data 'format')
     $QualityBasis = [string](Get-Field $Data 'quality_basis')
     $QualityClaimScope = [string](Get-Field $Data 'quality_claim_scope')
+    $SourceOriginalQualityStatus = [string](Get-Field $Data 'source_original_quality_status')
     $DimensionsRole = [string](Get-Field $Data 'dimensions_role')
     Assert-Acceptance (@('high', 'medium', 'thumbnail', 'unknown') -ccontains $Quality) 'probe_quality_enum_invalid'
     Assert-Acceptance (@('not_applicable', 'missing', 'decoder_unavailable', 'validation_failed', 'unknown') -ccontains $HigherStatus) 'probe_higher_status_enum_invalid'
-    Assert-Acceptance (@('none', 'ask_user_to_open_original_then_refresh_and_retry', 'do_not_request_redownload_same_candidate', 'inspect_key_or_format_before_retry', 'manual_review') -ccontains $RecoveryAction) 'probe_recovery_action_enum_invalid'
+    Assert-Acceptance (@('none', 'run_recover_chat_image_offline_then_request_structured_consent', 'ask_user_to_open_original_then_refresh_and_retry', 'do_not_request_redownload_same_candidate', 'inspect_key_or_format_before_retry', 'manual_review') -ccontains $RecoveryAction) 'probe_recovery_action_enum_invalid'
     Assert-Acceptance (@('present_expiry_unknown', 'missing', 'unknown') -ccontains $RemoteStatus) 'probe_remote_status_enum_invalid'
     Assert-Acceptance (@('parsed_unverified_protocol', 'parsed_partial_unverified_protocol', 'present_incomplete', 'present_invalid', 'not_applicable', 'not_evaluated') -ccontains $RemoteParseStatus) 'probe_remote_parse_status_enum_invalid'
-    Assert-Acceptance (@('unverified_desktop_protocol', 'not_applicable', 'not_evaluated') -ccontains $ProtocolStatus) 'probe_protocol_status_enum_invalid'
-    Assert-Acceptance (@('unavailable_unverified_protocol', 'not_available_no_descriptor', 'not_evaluated') -ccontains $AcquisitionStatus) 'probe_acquisition_status_enum_invalid'
+    Assert-Acceptance (@('direct_https_descriptor_response_unverified', 'unverified_desktop_protocol', 'not_applicable', 'not_evaluated') -ccontains $ProtocolStatus) 'probe_protocol_status_enum_invalid'
+    Assert-Acceptance (@('inspect_via_recover_chat_image_with_single_attempt_consent', 'unavailable_unverified_protocol', 'not_available_no_descriptor', 'not_evaluated') -ccontains $AcquisitionStatus) 'probe_acquisition_status_enum_invalid'
     Assert-Acceptance (@('jpg', 'png', 'gif') -ccontains $Format) 'probe_format_enum_invalid'
     Assert-Acceptance ($QualityBasis -ceq 'hardlink_cache_filename_variant') 'probe_quality_basis_invalid'
     Assert-Acceptance ($QualityClaimScope -ceq 'wechat_cache_variant_only') 'probe_quality_claim_scope_invalid'
+    Assert-Acceptance ($SourceOriginalQualityStatus -ceq 'unknown') 'probe_source_original_quality_overclaim'
     Assert-Acceptance ((Get-Field $Data 'source_original_dimensions_known') -eq $false) 'probe_original_dimensions_claim_invalid'
     Assert-Acceptance ($DimensionsRole -ceq 'decoded_output_observation_not_quality_gate') 'probe_dimensions_role_invalid'
     Assert-Acceptance (([int](Get-Field $Data 'width') -gt 0) -and ([int](Get-Field $Data 'height') -gt 0) -and
@@ -229,6 +265,9 @@ function Assert-KnownProbeEnums {
         'decoder_unavailable' {
             Assert-Acceptance (($RecoveryAction -ceq 'do_not_request_redownload_same_candidate') -and
                 (@('wxgf', 'webp') -ccontains [string](Get-Field $Data 'higher_quality_detected_format'))) 'probe_quality_state_inconsistent'
+            if ([string](Get-Field $Data 'higher_quality_detected_format') -ceq 'wxgf') {
+                Assert-WXGFDecoderDiagnostics $Data 'higher_quality_decoder_diagnostics' 'probe_higher_decoder_diagnostics_invalid'
+            }
         }
         'validation_failed' { Assert-Acceptance ($RecoveryAction -ceq 'inspect_key_or_format_before_retry') 'probe_quality_state_inconsistent' }
         'unknown' { Assert-Acceptance ($RecoveryAction -ceq 'manual_review') 'probe_quality_state_inconsistent' }
@@ -271,6 +310,7 @@ function Assert-FixtureState {
             Assert-Acceptance ((@('medium', 'thumbnail') -ccontains $Quality) -and ($HigherStatus -ceq 'decoder_unavailable') -and
                 ([string](Get-Field $Data 'higher_quality_detected_format') -ceq 'wxgf') -and
                 ($RecoveryAction -ceq 'do_not_request_redownload_same_candidate')) 'wxgf_candidate_contract_failed'
+            Assert-WXGFDecoderDiagnostics $Data 'higher_quality_decoder_diagnostics' 'wxgf_candidate_decoder_diagnostics_failed'
         }
         'expiry_unknown_descriptor' {
             Assert-Acceptance ((@('medium', 'thumbnail') -ccontains $Quality) -and ($HigherStatus -ceq 'missing') -and
@@ -308,9 +348,11 @@ function Assert-DecoderUnavailableProbe {
         ([string](Get-Field $Details 'local_resolution_status') -ceq 'decoder_unavailable') -and
         ([string](Get-Field $Details 'detected_format') -ceq 'wxgf') -and
         ([string](Get-Field $Details 'recovery_action') -ceq 'do_not_request_redownload_same_candidate')) 'wxgf_error_contract_failed'
+    Assert-WXGFDecoderDiagnostics $Details 'decoder_diagnostics' 'wxgf_error_decoder_diagnostics_failed'
     Assert-Acceptance (([string](Get-Field $Details 'quality_basis') -ceq 'hardlink_cache_filename_variant') -and
         ([string](Get-Field $Details 'quality_claim_scope') -ceq 'wechat_cache_variant_only') -and
-        ((Get-Field $Details 'source_original_dimensions_known') -eq $false)) 'wxgf_error_quality_claim_failed'
+        ((Get-Field $Details 'source_original_dimensions_known') -eq $false) -and
+        ([string](Get-Field $Details 'source_original_quality_status') -ceq 'unknown')) 'wxgf_error_quality_claim_failed'
     Assert-Acceptance ((Get-Field $Details 'network_access_performed') -eq $false) 'chat_image_network_boundary_failed'
     Assert-Acceptance (@('present_expiry_unknown', 'missing', 'unknown') -ccontains $RemoteStatus) 'wxgf_remote_status_invalid'
     switch ($RemoteStatus) {
@@ -343,6 +385,7 @@ function Assert-DecoderUnavailableProbe {
             quality_tier = $Quality
             quality_claim_scope = [string](Get-Field $Details 'quality_claim_scope')
             source_original_dimensions_known = $false
+            source_original_quality_status = 'unknown'
             dimensions_role = 'no_decoded_output'
             dimensions_are_observational_not_quality_gate = $true
             width = $null
@@ -352,6 +395,7 @@ function Assert-DecoderUnavailableProbe {
             higher_quality_local_status = $null
             higher_quality_recovery_action = [string](Get-Field $Details 'recovery_action')
             detected_format = 'wxgf'
+            decoder_diagnostics = Get-Field $Details 'decoder_diagnostics'
             remote_descriptor_status = $RemoteStatus
             remote_descriptor_parse_status = $RemoteParseStatus
             remote_protocol_status = $ProtocolStatus
@@ -402,6 +446,7 @@ function Assert-ImageProbe {
             quality_tier = [string](Get-Field $Data 'quality_tier')
             quality_claim_scope = [string](Get-Field $Data 'quality_claim_scope')
             source_original_dimensions_known = $false
+            source_original_quality_status = 'unknown'
             dimensions_role = [string](Get-Field $Data 'dimensions_role')
             dimensions_are_observational_not_quality_gate = $true
             width = [int](Get-Field $Data 'width')
@@ -410,6 +455,7 @@ function Assert-ImageProbe {
             local_resolution_status = 'verified_local'
             higher_quality_local_status = [string](Get-Field $Data 'higher_quality_local_status')
             higher_quality_recovery_action = [string](Get-Field $Data 'higher_quality_recovery_action')
+            higher_quality_decoder_diagnostics = Get-Field $Data 'higher_quality_decoder_diagnostics'
             remote_descriptor_status = [string](Get-Field $Data 'remote_descriptor_status')
             remote_descriptor_parse_status = [string](Get-Field $Data 'remote_descriptor_parse_status')
             remote_protocol_status = [string](Get-Field $Data 'remote_protocol_status')
@@ -581,15 +627,21 @@ function New-MockProbeData {
             default { 'not_evaluated' }
         }
     }
+    $HigherDecoderDiagnostics = $null
+    if (($HigherStatus -ceq 'decoder_unavailable') -and ($HigherFormat -ceq 'wxgf')) {
+        $HigherDecoderDiagnostics = New-WXGFDecoderDiagnosticsFixture
+    }
     return [pscustomobject]@{
         quality_tier = $Quality
         quality_basis = 'hardlink_cache_filename_variant'
         quality_claim_scope = 'wechat_cache_variant_only'
         source_original_dimensions_known = $false
+        source_original_quality_status = 'unknown'
         dimensions_role = 'decoded_output_observation_not_quality_gate'
         higher_quality_local_status = $HigherStatus
         higher_quality_recovery_action = $RecoveryAction
         higher_quality_detected_format = $HigherFormat
+        higher_quality_decoder_diagnostics = $HigherDecoderDiagnostics
         remote_descriptor_status = $RemoteStatus
         remote_descriptor_parse_status = $RemoteParseStatus
         remote_protocol_status = $ProtocolStatus
@@ -640,10 +692,12 @@ function Invoke-SelfTest {
                     local_resolution_status = 'decoder_unavailable'
                     recovery_action = 'do_not_request_redownload_same_candidate'
                     detected_format = 'wxgf'
+                    decoder_diagnostics = (New-WXGFDecoderDiagnosticsFixture)
                     quality_tier = 'medium'
                     quality_basis = 'hardlink_cache_filename_variant'
                     quality_claim_scope = 'wechat_cache_variant_only'
                     source_original_dimensions_known = $false
+                    source_original_quality_status = 'unknown'
                     remote_descriptor_status = 'present_expiry_unknown'
                     remote_descriptor_parse_status = 'parsed_unverified_protocol'
                     remote_protocol_status = 'unverified_desktop_protocol'
@@ -661,6 +715,16 @@ function Invoke-SelfTest {
     $FailureProbe = Assert-DecoderUnavailableProbe $MockFailure $MissingOutput
     Assert-Acceptance (($FailureProbe.LocalResolutionStatus -ceq 'decoder_unavailable') -and
         ($FailureProbe.Generation -ceq 'self-test-generation')) 'self_test_wxgf_error_not_generation_bound'
+    $Rejected = $false
+    try {
+        $UnsafeWXGF = New-MockProbeData 'medium' 'decoder_unavailable' 'do_not_request_redownload_same_candidate' -HigherFormat 'wxgf'
+        $UnsafeWXGF.higher_quality_decoder_diagnostics = $null
+        Assert-KnownProbeEnums $UnsafeWXGF
+    }
+    catch {
+        $Rejected = $_.Exception.Message -ceq 'acceptance:probe_higher_decoder_diagnostics_invalid'
+    }
+    Assert-Acceptance $Rejected 'self_test_missing_wxgf_decoder_diagnostics_not_rejected'
     $Public = [ordered]@{
         schema_version = 1
         maximum_automatic_retries = 1
@@ -834,6 +898,7 @@ try {
             fixture = $_.Public.fixture
             status = $_.Public.status
             quality_tier = $_.Public.quality_tier
+            source_original_quality_status = $_.Public.source_original_quality_status
             local_resolution_status = $_.Public.local_resolution_status
             higher_quality_local_status = $_.Public.higher_quality_local_status
             remote_descriptor_status = $_.Public.remote_descriptor_status

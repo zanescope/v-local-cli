@@ -404,3 +404,49 @@ manifest/provider 字段及缺失资格状态字段识别它们，计入
 因此当前最终 v1 矩阵尚未用真实样本评估；若以后确有必要继续资格验证，必须从新的宿主
 staging capture 开始并重新取得独立参考图与一次性人工确认。这次收敛不改变早期记录的
 `high=0`、`medium=2` 观察，也不把它升级为生产证据。
+
+### 2026-08-29 最终 v1 宿主绑定结构资格复核
+
+在 `a2c2090` 代码基线上又执行了一次最终 v1 宿主绑定的只读结构资格复核。本轮没有让
+公共 CLI 搜索 PATH；操作者先独立确认本机已有
+`ffmpeg 8.1.2-full_build-www.gyan.dev`，再把该确切字节和从当前源码离线构建的
+qualification provider 复制进新的当前用户私有 staging，并生成邻接身份清单。FFmpeg
+SHA-256 为
+`ad8f211bc894755e0061c55ab280ae00e8d3d4f15a8cc4372b24cfa247b5942e`，
+Authenticode 状态为 `NotSigned`，构建配置包含
+`--enable-gpl --enable-version3 --enable-static`。这些事实只识别本次测试字节和许可证风险，
+不构成来源或签名信任根。
+
+`TestRealWXGFQualificationFromSnapshot` 在进程级显式测试环境中通过 3/3 个真实 WXGF：
+
+- `medium`，60,705 字节，解码输出 1080×2338；
+- `medium`，56,161 字节，解码输出 1280×2774；
+- `medium`，144,654 字节，解码输出 1280×1706。
+
+宿主索引了 18,043 个候选文件，三个解码输出没有零距离感知指纹，最小 Hamming 距离为
+21。字节数、尺寸、`medium` 名称和指纹在这里都只用于结构验证和样本区分，不能证明
+发送前源图质量；`source_original_quality_status` 仍必须为 `unknown`。本轮没有设置视觉
+复审目录，没有独立参考 PNG，也没有内容、方向、裁剪或颜色确认，因此没有新增正式视觉
+等价记录，最终 v1 视觉矩阵仍然不足。
+
+按五个复审维度，本轮结论限定如下：
+
+- 安全性：provider 与解码器由宿主 staging 和邻接清单绑定，测试不联网、不操作微信 UI，
+  但没有生产级操作系统网络隔离或凭据文件系统隔离；
+- 可验证性：保留版本、摘要、结构解码结果和样本差异统计，但没有独立视觉参考，不能从
+  “测试 PASS”升级为内容等价或生产可用；
+- 兼容性：只覆盖当前单机快照中的三个 `medium` 样本，没有两个微信版本或每版本
+  `high+medium` 矩阵；
+- 隐私：公开记录不包含账号、evidence ID、源路径、图片摘要、感知指纹或图片内容；
+- 失败恢复：公共 CLI 仍不检查 PATH、不接线该 provider，继续返回
+  `decoder_unavailable`，不会循环刷新、联网或回退缩略图后声称取得更高质量图片。
+
+测试报告中的以下阻断项全部保留：
+`wxgf_container_layout_not_fully_specified`、`provider_source_not_verified`、
+`decoder_source_not_verified`、`provider_signature_not_qualified`、
+`decoder_signature_not_qualified`、`os_network_isolation_not_enforced`、
+`os_filesystem_credential_isolation_not_enforced`、`real_fixture_matrix_insufficient`、
+`decoded_visual_equivalence_not_confirmed`、`decoder_distribution_license_not_qualified`。
+因此本轮只证明“显式资格入口能在这三个绑定样本上完成结构解码”，不能关闭任何生产门禁。
+运行结束后已删除 staging provider、FFmpeg 副本、身份清单和临时目录，并清除所有
+`V_LOCAL_TEST_WXGF_*` 进程环境；没有保留私有解码输出。

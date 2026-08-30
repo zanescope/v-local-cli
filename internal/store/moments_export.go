@@ -100,10 +100,11 @@ type momentMediaLookup struct {
 }
 
 type momentRemoteResponse struct {
-	Payload   []byte
-	Path      string
-	Bytes     int64
-	Encrypted bool
+	Payload     []byte
+	Path        string
+	Bytes       int64
+	Encrypted   bool
+	ContentType string
 }
 
 type momentRemoteDownloader interface {
@@ -582,7 +583,7 @@ func (downloader *safeMomentDownloader) Download(ctx context.Context, target *ur
 			return momentRemoteResponse{}, &momentDownloadError{Kind: "response_size_invalid"}
 		}
 		remove = false
-		return momentRemoteResponse{Path: path, Bytes: written, Encrypted: strings.TrimSpace(response.Header.Get("X-Enc")) == "1"}, nil
+		return momentRemoteResponse{Path: path, Bytes: written, Encrypted: strings.TrimSpace(response.Header.Get("X-Enc")) == "1", ContentType: response.Header.Get("Content-Type")}, nil
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
 	if err != nil {
@@ -591,7 +592,7 @@ func (downloader *safeMomentDownloader) Download(ctx context.Context, target *ur
 	if len(payload) == 0 || int64(len(payload)) > maxBytes {
 		return momentRemoteResponse{}, &momentDownloadError{Kind: "response_size_invalid"}
 	}
-	return momentRemoteResponse{Payload: payload, Bytes: int64(len(payload)), Encrypted: strings.TrimSpace(response.Header.Get("X-Enc")) == "1"}, nil
+	return momentRemoteResponse{Payload: payload, Bytes: int64(len(payload)), Encrypted: strings.TrimSpace(response.Header.Get("X-Enc")) == "1", ContentType: response.Header.Get("Content-Type")}, nil
 }
 
 func chooseRemoteMediaVariant(media MomentMedia) (momentRemoteVariant, error) {

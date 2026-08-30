@@ -82,6 +82,12 @@ v-local-cli contacts --limit 50 "张三"
 v-local-cli history --start 2026-08-01 --limit 200 <chat_username>
 # 使用 history 返回的 kind=image evidence_id 导出与该消息强绑定的完整本地图片
 v-local-cli export-chat-image --account <account> --output <image-file> <image_evidence_id>
+# 若本地层级不足，先离线生成与账号/消息/图片/快照/输出路径绑定的单次联网 challenge；
+# Agent 必须向用户说明范围并取得本次明确同意，随后才可原样提交 challenge：
+v-local-cli recover-chat-image --account <account> --output <image-file> <image_evidence_id>
+v-local-cli recover-chat-image --account <account> --output <image-file> --consent <challenge_id> <image_evidence_id>
+# WXGF 返回 decoder_unavailable 时读取 decoder_diagnostics；公共 CLI 不扫描 PATH，
+# 因而 binary_presence_status=not_evaluated 不表示本机缺少 FFmpeg。
 v-local-cli search --chat <chat_username> "关键词"
 v-local-cli sessions --limit 100
 v-local-cli unread --limit 100
@@ -117,7 +123,7 @@ v-local-cli history --fresh --limit 200 <chat_username>
 | OCR | `ocr-status` · `ocr-read` · `ocr-search` · `ocr-recognize` · `ocr-file` |
 | 朋友圈 | `moments-contacts` · `moments` · `moments-search` · `export-moment-media` |
 | 公众号 | `official-accounts` · `official-history` · `official-search` · `official-article` |
-| 导出 | `export` · `export-chat-image` · `export-media` |
+| 导出 | `export` · `export-chat-image` · `recover-chat-image` · `export-media` |
 
 要彻底删除某个账号：先用 `forget --account <account> --dry-run` 确认范围，再加 `--yes` 执行（不可恢复）。
 
@@ -125,7 +131,7 @@ v-local-cli history --fresh --limit 200 <chat_username>
 
 - **时间窗口** — `history`、`search`、`stats` 以及朋友圈与公众号历史，默认按本地时区限定范围：指定联系人或公众号时取当前自然月，群聊和跨会话搜索取当前自然日。显式传入 `--start` 或 `--end` 就会关闭这个默认，传入 `--all` 则取消整个默认日期范围。
 - **条数** — `--all` 只取消日期范围，不改变条数；`--limit N` 独立控制结果上限，`--limit 0` 明确表示不设条数上限。默认通常为 200 条，`export` 为 1000 条。`history`、`search` 与 `export` 的有限结果用 `has_more` 与 `truncated` 明示是否还有命中项。
-- **覆盖保护** — `export`、`export-chat-image`、`export-media`、`export-moment-media`、`doctor --bundle` 默认拒绝覆盖已有输出（返回 `output_exists`），只有显式传入 `--force` 才会覆盖；符号链接、junction 等重解析点即使传了 `--force` 也一律拒绝。
+- **覆盖保护** — `export`、`export-chat-image`、`export-media`、`export-moment-media`、`doctor --bundle` 默认拒绝覆盖已有输出（返回 `output_exists`），只有显式传入 `--force` 才会覆盖；符号链接、junction 等重解析点即使传了 `--force` 也一律拒绝。`recover-chat-image` 刻意不提供 `--force`，并要求输出父目录已经存在且位于本机；每个 challenge 同时绑定规范化字面路径和链接解析后的父目录稳定文件身份，链接重定向会使授权失效。执行期间通过保持打开的目录句柄创建、发布和清理临时文件。Windows 恢复临时文件的当前用户/System 专属 DACL 在创建时原子生效，而不是事后收紧。
 
 ## 输出约定
 
@@ -143,7 +149,9 @@ v-local-cli history --fresh --limit 200 <chat_username>
 ## 安全与隐私
 
 - **只处理本人拥有或已获明确授权访问的数据。** CLI 只读，不操作微信界面、不发送消息。
-- **普通查询不联网。** 只有两处例外，而且每次都需要显式开启：`export-moment-media --allow-network`（受限腾讯 CDN）与 `official-article --allow-network`（`mp.weixin.qq.com`）；令牌与密钥不会进入 JSON、日志或错误文本。CDN 描述符可能随时过期，成功只证明请求当时可用，不形成后续授权或长期可用性保证。聊天图片当前会脱敏报告远端描述符结构状态，并已通过 TLS 假服务的单请求/解密/证据绑定测试；当前客户端深度复审显示实际路径依赖内部会话化 C2C 任务，而非可由描述符直接拼接的已验证 GET，所以真实端点仍由代码禁止。缺少本地高层级候选时，受支持的恢复方式是用户打开指定原图后由 Agent 自动 refresh 并单次重试。
+- **普通查询不联网。** 联网能力只有三类且都要求逐次授权：`export-moment-media --allow-network`（受限腾讯 CDN）、`official-article --allow-network`（`mp.weixin.qq.com`），以及 `recover-chat-image --consent <challenge_id>`。聊天图片 challenge 仅在当前快照已经观察到严格的 `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=...` 完整 URL、候选层级高于当前本地层级且具备消息归属校验元数据时签发；它绑定账号、消息、图片、generation、manifest、候选描述符和输出路径，五分钟失效且只能消费一次。签发和消费会持有同账号快照事务锁，阻止并发 refresh 在检查后换代。授权只覆盖一次网络请求，不授权微信 UI 自动化，也不把 URL、鉴权参数或密钥写入 JSON、日志或 challenge 文件。
+- **CDN 不是长期信任根。** 聊天图片请求只允许 HTTPS 固定目标，不使用环境代理、Cookie 或外部 DNS 回退，也不跟随重定向；响应受大小上限约束并须通过 MIME、完整图片结构、描述符摘要和消息绑定验证。`401/403/404/410` 只报告“本次不可用、时效未知”，`429` 只报告限流；任何重试都必须重新生成 challenge 并再次获得授权。成功分别记录 `observed_at` 与 `retrieved_at`，只证明请求时验真成功，`descriptor_expiry_known=false` 且未来时效仍未知。
+- **缓存层级不等于原图。** `high`、`medium`、LongEdge、ShortEdge、文件大小和像素尺寸都不能单独证明源图片质量；本地和联网成功结果都保持 `source_original_quality_status=unknown`。只有桌面十六进制不透明描述符时，CLI 不猜 URL；需要用户手动在微信打开指定原图，Agent 再执行一次 `refresh --require-media` 并对同一 evidence ID 重试一次，仍失败就停止。
 - **密钥最小化。** 系统凭据库只保存通过验证的最小密钥集；`refresh` 直接复用它，不再读微信进程，也不启动 Provider。
 - **快照隔离。** 私有目录会设置当前用户专属的 ACL，并拒绝符号链接和 junction；查询走 SQLite 的只读、不可变（immutable）、`query_only` 模式。
 - **派生状态绑定。** 全文索引同时绑定账号、generation、快照 manifest 摘要和 parser/schema 版本；增量 pending batch 在输出前持久化，未 ack 会重放。
@@ -176,7 +184,7 @@ v-local-cli history --fresh --limit 200 <chat_username>
 | 语音 ASR 协议 | [asr-provider.md](references/asr-provider.md) |
 | 统计口径 | [statistics.md](references/statistics.md) |
 | 排错 | [troubleshooting.md](references/troubleshooting.md) |
-| Windows 聊天图片真机验收 | [验收说明](references/windows-amd64-local-acceptance.md) · [静态协议证据检查](scripts/inspect-windows-chat-cdn-static-evidence.ps1) · [xlog 结构检查](scripts/inspect-windows-chat-cdn-xlog-structure.ps1) · [半自动恢复脚本](scripts/accept-windows-chat-image-recovery.ps1) |
+| Windows 聊天图片真机验收 | [验收说明](references/windows-amd64-local-acceptance.md) · [静态协议证据检查](scripts/inspect-windows-chat-cdn-static-evidence.ps1) · [xlog 结构检查](scripts/inspect-windows-chat-cdn-xlog-structure.ps1) · [本地/手动恢复脚本](scripts/accept-windows-chat-image-recovery.ps1) · [联网授权契约自检](scripts/test-chat-image-recovery-consent.ps1) |
 
 Agent 行为约束与授权规则见 [SKILL.md](SKILL.md)。
 
