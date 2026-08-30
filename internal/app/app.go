@@ -21,6 +21,7 @@ import (
 	"github.com/zanescope/v-local-cli/internal/messageindex"
 	localplatform "github.com/zanescope/v-local-cli/internal/platform"
 	"github.com/zanescope/v-local-cli/internal/provider"
+	"github.com/zanescope/v-local-cli/internal/shadowkeychain"
 	"github.com/zanescope/v-local-cli/internal/snapshot"
 	"github.com/zanescope/v-local-cli/internal/state"
 	"github.com/zanescope/v-local-cli/internal/store"
@@ -105,6 +106,12 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	if err := hardenSensitiveProcess(); err != nil {
 		writeError(stderr, &commandError{typeName: "crash_protection_unavailable", message: "无法禁用密钥处理进程的 crash artifact", hint: "停止密钥获取并检查当前进程的 core dump / crash reporting 策略。", code: 5})
 		return 5
+	}
+	if len(args) == 1 && args[0] == shadowkeychain.HelperCommand {
+		return shadowkeychain.RunHelper(context.Background(), os.Stdin, stdout)
+	}
+	if len(args) > 0 && args[0] == "__shadow-qualify" {
+		return runShadowQualificationCommand(args[1:], stdout, stderr)
 	}
 	if output := strings.TrimSpace(os.Getenv(privateOutputPathEnv)); output != "" {
 		return mainWithPrivateOutput(args, output, stderr)
