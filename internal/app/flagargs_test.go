@@ -60,6 +60,24 @@ func TestAccountSelectorFromArgsAcceptsSingleDashForms(t *testing.T) {
 	}
 }
 
+func TestDaemonMovingTimeWindowIsNeverCached(t *testing.T) {
+	for _, args := range [][]string{
+		{"--last-24h"}, {"-last-24h"}, {"--last-24h=true"}, {"-last-24h=1"},
+		{"--last-24h=invalid"},
+	} {
+		if !daemonQueryUsesMovingTimeWindow(args) {
+			t.Fatalf("滚动时间窗仍可进入 daemon 缓存: %v", args)
+		}
+	}
+	for _, args := range [][]string{
+		{}, {"--date", "today"}, {"--last-24h=false"}, {"-last-24h=0"},
+	} {
+		if daemonQueryUsesMovingTimeWindow(args) {
+			t.Fatalf("固定时间窗被误判为滚动时间窗: %v", args)
+		}
+	}
+}
+
 func TestDaemonResponseMatchesBindingRequiresEchoedGeneration(t *testing.T) {
 	binding := daemonCacheBinding{key: "k", generationID: "gen-1", snapshotManifestSHA256: "manifest-1"}
 	matching := `{"schema_version":1,"command_status":"succeeded","data":{},` +

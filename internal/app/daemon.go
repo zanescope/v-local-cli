@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -248,7 +249,27 @@ type daemonCacheBinding struct {
 	snapshotManifestSHA256 string
 }
 
+func daemonQueryUsesMovingTimeWindow(args []string) bool {
+	for _, argument := range args {
+		name, value, hasValue := flagArgument(argument)
+		if name != "last-24h" {
+			continue
+		}
+		if !hasValue {
+			return true
+		}
+		enabled, err := strconv.ParseBool(value)
+		if err != nil || enabled {
+			return true
+		}
+	}
+	return false
+}
+
 func daemonCacheKey(command string, args []string) daemonCacheBinding {
+	if daemonQueryUsesMovingTimeWindow(args) {
+		return daemonCacheBinding{}
+	}
 	value, err := resolveInitializedAccount(accountSelectorFromArgs(args))
 	if err != nil || value.GenerationID == "" || value.SnapshotManifestSHA256 == "" {
 		return daemonCacheBinding{}

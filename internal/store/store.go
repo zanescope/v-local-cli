@@ -423,10 +423,13 @@ func Search(root, keyword, chat string, limit int) ([]Message, error) {
 }
 
 func messageNewer(left, right Message) bool {
-	if left.SortKey == right.SortKey {
-		return left.EvidenceID > right.EvidenceID
+	if left.Timestamp != right.Timestamp {
+		return left.Timestamp > right.Timestamp
 	}
-	return left.SortKey > right.SortKey
+	if left.SortKey != right.SortKey {
+		return left.SortKey > right.SortKey
+	}
+	return left.EvidenceID > right.EvidenceID
 }
 
 // oldestMessageHeap keeps the oldest retained search hit at index zero so a

@@ -508,10 +508,11 @@ func StatsAll(root string, start, end *int64, top int) (AllChatStats, error) {
 				failedTables = append(failedTables, qualifiedTable+":query")
 				continue
 			}
-			result.SourceTables++
+			scanFailed := false
 			for rows.Next() {
 				var localType, timestamp sql.NullInt64
-				if rows.Scan(&localType, &timestamp) != nil {
+				if scanErr := rows.Scan(&localType, &timestamp); scanErr != nil {
+					scanFailed = true
 					continue
 				}
 				result.SourceRows++
@@ -547,7 +548,12 @@ func StatsAll(root string, start, end *int64, top int) (AllChatStats, error) {
 				}
 			}
 			if rowErr := rows.Err(); rowErr != nil {
+				scanFailed = true
+			}
+			if scanFailed {
 				failedTables = append(failedTables, qualifiedTable+":scan")
+			} else {
+				result.SourceTables++
 			}
 			_ = rows.Close()
 		}
