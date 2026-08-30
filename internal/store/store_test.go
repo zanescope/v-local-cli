@@ -297,6 +297,14 @@ func TestSearchMatchesStructuredCardDetails(t *testing.T) {
 
 func TestPrivateAndGroupStats(t *testing.T) {
 	root := t.TempDir()
+	contactPath := filepath.Join(root, "contact", "contact.db")
+	if err := ensureParent(contactPath); err != nil {
+		t.Fatal(err)
+	}
+	createTestDatabase(t, contactPath,
+		"CREATE TABLE contact(username TEXT,nick_name TEXT)",
+		"INSERT INTO contact VALUES('alice','Alice'),('room@chatroom','AI 讨论群')",
+	)
 	messagePath := filepath.Join(root, "message", "message_0.db")
 	if err := ensureParent(messagePath); err != nil {
 		t.Fatal(err)
@@ -372,6 +380,18 @@ func TestPrivateAndGroupStats(t *testing.T) {
 	}
 	if messageKind(244813135921) != "quote" {
 		t.Fatalf("大整数消息类型未正确拆分：%s", messageKind(244813135921))
+	}
+
+	all, err := StatsAll(root, nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if all.Scope != "all_chats" || all.TotalMessages != 6 || all.SystemMessages != 1 || all.SourceRows != 7 ||
+		all.ActiveChats != 2 || all.SourceTables != 2 || len(all.Chats) != 2 || all.Coverage["complete"] != true {
+		t.Fatalf("跨会话统计异常：%+v", all)
+	}
+	if all.ByMediaKind["image"] != 2 || all.ByMediaKind["voice"] != 2 || all.Chats[0].TotalMessages != 3 {
+		t.Fatalf("跨会话类型或排行异常：%+v", all)
 	}
 }
 

@@ -137,3 +137,16 @@ func TestFreshNewMessagesOnlyAllowsPoll(t *testing.T) {
 		}
 	}
 }
+
+func TestDaemonAllowsImmutableCrossChatQueriesOnly(t *testing.T) {
+	for _, command := range []string{"messages", "stats"} {
+		if !allowedDaemonCommand(command) {
+			t.Fatalf("daemon 白名单缺少只读跨会话命令：%s", command)
+		}
+	}
+	for _, command := range []string{"new-messages", "refresh", "export"} {
+		if allowedDaemonCommand(command) {
+			t.Fatalf("daemon 白名单包含可变命令：%s", command)
+		}
+	}
+}

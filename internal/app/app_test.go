@@ -331,6 +331,12 @@ func TestCapabilitiesDoNotPromoteBuildTargetsWithoutEmbeddedEvidence(t *testing.
 	if providerCapabilities["automatic_key_access_validation"] != "requires_signed_live_release_evidence" || providerCapabilities["user_supplied_candidate_file"] != true {
 		t.Fatalf("provider validation boundary is ambiguous: %v", providerCapabilities)
 	}
+	mediaCapabilities := capabilities["media"].(map[string]any)
+	if mediaCapabilities["chat_remote_real_endpoint_enabled"] != true || mediaCapabilities["chat_remote_live_cdn_evidence_embedded"] != false ||
+		mediaCapabilities["chat_remote_production_readiness"] != "requires_current_snapshot_full_url_and_user_authorized_live_acceptance" {
+		t.Fatalf("chat image live CDN validation boundary is ambiguous: %v", mediaCapabilities)
+	}
+	assertWXGFDecoderDiagnostics(t, mediaCapabilities["wxgf_decoder"])
 	ocrCapabilities := capabilities["ocr"].(map[string]any)
 	targets, ok := ocrCapabilities["native_backend_implementation_targets"].([]string)
 	if !ok || len(targets) != 1 || targets[0] != "windows/amd64" {
@@ -363,8 +369,31 @@ func TestSchemaOnlyListsImplementedCommands(t *testing.T) {
 		t.Fatalf("schema 缺少朋友圈媒体严格校验边界：%v", momentMedia)
 	}
 	chatImage := commands["export-chat-image"].(map[string]any)
-	if chatImage["evidence_binding"] != "message_resource_stem+hardlink_map" || chatImage["container_validation"] != "full_decode" || chatImage["network"] != false {
+	if chatImage["evidence_binding"] != "message_resource_stem+hardlink_map" || chatImage["container_validation"] != "full_decode" || chatImage["network"] != false ||
+		chatImage["source_original_quality_status"] != "unknown" {
 		t.Fatalf("schema 缺少聊天图片强绑定与离线校验边界：%v", chatImage)
+	}
+	decoderContract := chatImage["wxgf_decoder_diagnostics_contract"].(map[string]any)
+	if decoderContract["failure_field"] != "decoder_diagnostics" || decoderContract["higher_quality_field"] != "higher_quality_decoder_diagnostics" {
+		t.Fatalf("schema 缺少 WXGF 解码器诊断字段：%v", decoderContract)
+	}
+	assertWXGFDecoderDiagnostics(t, decoderContract["value"])
+	recoverChatImage := commands["recover-chat-image"].(map[string]any)
+	bindings, bindingsOK := recoverChatImage["authorization_bindings"].([]any)
+	validation, validationOK := recoverChatImage["response_validation"].([]any)
+	if recoverChatImage["network_default"] != false || recoverChatImage["network_authorization"] != "structured_one_time_challenge" ||
+		recoverChatImage["account_lock"] != true || recoverChatImage["account_lock_scope"] != "entire_offline_preflight_or_authorized_attempt" ||
+		recoverChatImage["authorization_scope"] != "single_account_message_image_candidate_attempt" ||
+		recoverChatImage["authorization_replay_protected"] != true || recoverChatImage["authorization_consumed_before_network"] != true ||
+		recoverChatImage["network_attempts_per_authorization"] != float64(1) || recoverChatImage["automatic_network_retries"] != float64(0) ||
+		recoverChatImage["network_method"] != "GET" ||
+		recoverChatImage["wechat_ui_automation"] != false || recoverChatImage["constructed_url_from_opaque_parameter"] != false ||
+		recoverChatImage["https_required"] != true || recoverChatImage["redirects"] != false || recoverChatImage["ambient_proxy"] != false ||
+		recoverChatImage["external_dns_fallback"] != false || recoverChatImage["url_stored_in_consent"] != false ||
+		recoverChatImage["descriptor_secrets_output"] != false || recoverChatImage["lower_quality_fallback"] != false ||
+		recoverChatImage["source_original_quality_status"] != "unknown" || recoverChatImage["cleanup_failure_is_error"] != true ||
+		!bindingsOK || len(bindings) != 8 || !validationOK || len(validation) != 5 {
+		t.Fatalf("schema 缺少聊天图片单次授权恢复边界：%v", recoverChatImage)
 	}
 	refresh := commands["refresh"].(map[string]any)
 	if refresh["reads_saved_keychain"] != true || refresh["reads_process"] != false || refresh["network"] != false || refresh["writes_snapshot"] != true || refresh["modifies_saved_secrets"] != false || refresh["account_lock"] != true || refresh["prevents_coverage_regression"] != true {
@@ -391,7 +420,14 @@ func TestSchemaOnlyListsImplementedCommands(t *testing.T) {
 		commands["ocr-search"].(map[string]any)["source"] != "wechat_index_probe+v-local-cli_private_cache" {
 		t.Fatal("schema 缺少 OCR 私有缓存或原生 OCR 授权边界")
 	}
-	if len(commands) != 42 {
+	messages := commands["messages"].(map[string]any)
+	stats := commands["stats"].(map[string]any)
+	if messages["scope"] != "all_recognized_chats" || messages["natural_day_option"] != "--date" ||
+		messages["rolling_24_hours_option"] != "--last-24h" || messages["content_for_agent_analysis"] != true ||
+		stats["scope_without_username"] != "all_recognized_chats" || stats["loads_message_content"] != false {
+		t.Fatalf("schema 缺少跨会话自然日查询或统计契约：messages=%v stats=%v", messages, stats)
+	}
+	if len(commands) != 44 {
 		t.Fatalf("schema 命令数量异常：%d", len(commands))
 	}
 }
@@ -993,6 +1029,26 @@ func TestResolveTimeWindowRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestResolveMessageTimeWindowSupportsNaturalDayAndRolling24Hours(t *testing.T) {
+	location := time.FixedZone("test", 8*60*60)
+	now := time.Date(2026, time.August, 30, 16, 45, 30, 0, location)
+	day, err := resolveMessageTimeWindow("", "", "", "yesterday", false, false, now)
+	if err != nil || day.Mode != "explicit_natural_day" || day.Start == nil || *day.Start != "2026-08-29" ||
+		day.End == nil || *day.End != "2026-08-29" || day.DurationSeconds == nil || *day.DurationSeconds != 24*60*60 {
+		t.Fatalf("昨天自然日时间窗异常：window=%+v err=%v", day, err)
+	}
+	rolling, err := resolveMessageTimeWindow("", "", "", "", true, false, now)
+	if err != nil || rolling.Mode != "rolling_24_hours" || rolling.StartTimestamp == nil || rolling.EndTimestamp == nil ||
+		*rolling.EndTimestamp-*rolling.StartTimestamp != 24*60*60 || rolling.StartLocal == nil || rolling.EndLocal == nil {
+		t.Fatalf("滚动 24 小时时间窗异常：window=%+v err=%v", rolling, err)
+	}
+	_, err = resolveMessageTimeWindow("", "2026-08-01", "", "yesterday", false, false, now)
+	var commandErr *commandError
+	if !errors.As(err, &commandErr) || commandErr.typeName != "conflicting_time_window" {
+		t.Fatalf("冲突时间窗未拒绝：%v", err)
+	}
+}
+
 func TestHistoryReturnsTimeWindowMetadata(t *testing.T) {
 	home := testHome(t)
 	snapshot := filepath.Join(t.TempDir(), "snapshot")
@@ -1036,6 +1092,87 @@ func TestHistoryReturnsTimeWindowMetadata(t *testing.T) {
 	window := meta["time_window"].(map[string]any)
 	if window["mode"] != "explicit" || window["start"] != "2026-08-01" || window["end"] != "2026-08-01" || meta["untrusted"] != true {
 		t.Fatalf("history 元数据异常：%v", meta)
+	}
+}
+
+func TestMessagesAndStatsCoverAllChatsForOneNaturalDay(t *testing.T) {
+	home := testHome(t)
+	snapshot := filepath.Join(t.TempDir(), "snapshot")
+	contactPath := filepath.Join(snapshot, "contact", "contact.db")
+	if err := os.MkdirAll(filepath.Dir(contactPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	contactDB, err := sql.Open("sqlite", contactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contactDB.Exec("CREATE TABLE contact(username TEXT,nick_name TEXT); INSERT INTO contact VALUES('alice','Alice'),('room@chatroom','AI 讨论群')"); err != nil {
+		t.Fatal(err)
+	}
+	_ = contactDB.Close()
+	messagePath := filepath.Join(snapshot, "message", "message_0.db")
+	if err := os.MkdirAll(filepath.Dir(messagePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	messageDB, err := sql.Open("sqlite", messagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceDigest, roomDigest := md5.Sum([]byte("alice")), md5.Sum([]byte("room@chatroom"))
+	aliceTable := "Msg_" + hex.EncodeToString(aliceDigest[:])
+	roomTable := "Msg_" + hex.EncodeToString(roomDigest[:])
+	for _, table := range []string{aliceTable, roomTable} {
+		if _, err := messageDB.Exec("CREATE TABLE [" + table + "](local_id INTEGER,server_id INTEGER,local_type INTEGER,sort_seq INTEGER,create_time INTEGER,message_content TEXT)"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dayMorning := time.Date(2026, time.August, 29, 9, 0, 0, 0, time.Local).Unix()
+	dayEvening := time.Date(2026, time.August, 29, 20, 0, 0, 0, time.Local).Unix()
+	previousDay := time.Date(2026, time.August, 28, 23, 59, 59, 0, time.Local).Unix()
+	if _, err := messageDB.Exec("INSERT INTO ["+aliceTable+"] VALUES(1,11,1,100,?,'讨论大模型推理成本'),(2,12,1,90,?,'旧消息')", dayMorning, previousDay); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := messageDB.Exec("INSERT INTO ["+roomTable+"] VALUES(3,13,1,200,?,'Agent 自动化方案')", dayEvening); err != nil {
+		t.Fatal(err)
+	}
+	_ = messageDB.Close()
+	t.Setenv("V_LOCAL_CLI_HOME", home)
+	accountID := state.AccountID("daily-analysis-account")
+	snapshot = privateTestSnapshot(t, home, accountID, snapshot)
+	account := state.AccountState{AccountID: accountID, AccountName: "test", SnapshotPath: snapshot, Storage: "snapshot-only"}
+	if err := state.Save(&account); err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, errorOutput := runForTest("messages", "--date", "2026-08-29", "--limit", "0")
+	if code != 0 {
+		t.Fatalf("messages 自然日查询退出码=%d output=%v error=%v", code, output, errorOutput)
+	}
+	data := output["data"].(map[string]any)
+	meta := output["meta"].(map[string]any)
+	window := meta["time_window"].(map[string]any)
+	coverage := data["message_source_coverage"].(map[string]any)
+	items := data["items"].([]any)
+	if data["count"].(float64) != 2 || data["has_more"] != false || len(items) != 2 ||
+		items[0].(map[string]any)["chat_display"] != "AI 讨论群" || coverage["complete"] != true ||
+		window["mode"] != "explicit_natural_day" || window["duration_seconds"].(float64) != 24*60*60 || meta["untrusted"] != true {
+		t.Fatalf("messages 自然日范围或覆盖异常：data=%v meta=%v", data, meta)
+	}
+	code, output, errorOutput = runForTest("messages", "--date", "2026-08-29", "--limit", "1")
+	if code != 0 || output["data"].(map[string]any)["count"].(float64) != 1 ||
+		output["data"].(map[string]any)["has_more"] != true || output["meta"].(map[string]any)["truncated"] != true {
+		t.Fatalf("messages 有限结果未报告截断：code=%d output=%v error=%v", code, output, errorOutput)
+	}
+
+	code, output, errorOutput = runForTest("stats", "--date", "2026-08-29", "--top", "0")
+	if code != 0 {
+		t.Fatalf("stats 跨会话查询退出码=%d output=%v error=%v", code, output, errorOutput)
+	}
+	statistics := output["data"].(map[string]any)["stats"].(map[string]any)
+	if statistics["scope"] != "all_chats" || statistics["total_messages"].(float64) != 2 ||
+		statistics["active_chats"].(float64) != 2 || len(statistics["chats"].([]any)) != 2 ||
+		statistics["statistic_basis"].(map[string]any)["complete"] != true {
+		t.Fatalf("跨会话自然日统计异常：%v", statistics)
 	}
 }
 

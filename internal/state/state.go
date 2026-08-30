@@ -212,6 +212,24 @@ func EnsureExportTempPath(accountID string) (string, error) {
 	return temporary, nil
 }
 
+// EnsureRecoveryConsentPath stores only one-time, descriptor-hash-bound recovery
+// challenges. The directory inherits the same private ACL as the account state and
+// is removed together with the account by forget.
+func EnsureRecoveryConsentPath(accountID string) (string, error) {
+	directory, err := AccountDir(accountID)
+	if err != nil {
+		return "", err
+	}
+	if err := securePrivateDirectory(directory); err != nil {
+		return "", err
+	}
+	consents := filepath.Join(directory, "recovery-consents")
+	if err := securePrivateDirectory(consents); err != nil {
+		return "", err
+	}
+	return consents, nil
+}
+
 // VoiceTranscriptPath 返回当前账号的私有语音转写缓存路径。
 // 缓存位于账号私有目录中，因此 forget 会和快照、凭据一起清理它。
 func VoiceTranscriptPath(accountID string) (string, error) {

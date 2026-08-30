@@ -61,6 +61,7 @@ jobs:
           pwsh -NoProfile -File scripts/inspect-windows-chat-cdn-static-evidence.ps1 -SelfTest
           pwsh -NoProfile -File scripts/inspect-windows-chat-cdn-xlog-structure.ps1 -SelfTest
           pwsh -NoProfile -File scripts/accept-windows-chat-image-recovery.ps1 -SelfTest
+          pwsh -NoProfile -File scripts/test-chat-image-recovery-consent.ps1 -SelfTest
           pwsh -NoProfile -File scripts/new-windows-wxgf-provider-identity-manifest.ps1 -SelfTest
           pwsh -NoProfile -File scripts/new-windows-wxgf-visual-review-session.ps1 -SelfTest
           pwsh -NoProfile -File scripts/accept-windows-wxgf-visual-equivalence.ps1 -SelfTest
@@ -90,6 +91,11 @@ jobs:
         run: |
           node -e "require('fs').mkdirSync('build',{recursive:true})"
           go build -trimpath -o build/v-local-cli${{ matrix.suffix }} ./cmd/v-local-cli
+      - name: 验证实际聊天图片恢复 schema
+        if: runner.os == 'Windows'
+        run: |
+          $cliPath = (Resolve-Path -LiteralPath build/v-local-cli.exe).Path
+          pwsh -NoProfile -File scripts/test-chat-image-recovery-consent.ps1 -Cli $cliPath
       - name: 验证受支持平台的 npm 本地二进制安装与启动
         if: runner.os != 'Linux'
         run: node npm/tests/e2e-local.js build/v-local-cli${{ matrix.suffix }}

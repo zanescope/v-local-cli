@@ -15,13 +15,19 @@ unsigned early-access 即使带有摘要和 GitHub 来源证明，也不应作�
 
 密钥 Provider、whisper.cpp、ASR 适配器以及实验性微信 OCR 都是当前桌面用户权限下的本地执行边界，不是沙箱。发行版 Provider 只能来自其当前用户固定安装目录：CLI 在调用和 daemon 复用前验证 canonical file identity、平台签名及实际 PID image；Windows 固定 Authenticode 叶证书 SHA-256，macOS 固定 identifier 并要求 CLI/Provider/helper 同一 Developer ID Team。`--provider`、`V_LOCAL_CLI_KEY_PROVIDER`、PATH 替代和 helper 路径 override 在发行构建中 fail closed。开发构建允许显式测试组件，但协议的输出限制仍不能约束恶意同用户程序；高保证环境应使用操作系统沙箱、防火墙或专用低权限账号。ASR/whisper 等其他可选程序仍必须由用户选择并从可信来源验证。
 
+公共聊天图片导出同样不扫描 PATH，也不会因为发现 `ffmpeg.exe` 就执行它。WXGF 资格 provider 只存在于显式测试接口，并要求宿主暂存、邻接身份清单和摘要绑定；测试通过不等于来源、签名、隔离、视觉等价或许可证门禁已经关闭，也不会自动接入公共 CLI。`decoder_unavailable` 的结构化诊断因此把本机二进制存在性保持为 `not_evaluated`，并分别报告公共接线与生产资格状态，避免把“未接线”误写成“系统缺少解码器”或反向升级为可安全执行。
+
 密钥流程不把候选写入 endpoint、resume 或普通临时文件。Unix 进程要求 core dump hard limit 为零；Windows 要求 WER 禁止堆采集，并把敏感 byte buffer登记为 excluded memory block。若启动时无法启用这些 crash artifact 门禁，CLI/Provider 会拒绝密钥处理。Go 字符串和第三方操作系统组件仍不提供形式化内存清零保证，因此不要为这些进程启用外部全内存转储；真机发布验收必须检查组织级 crash dump 策略。
 
 Windows 原生 OCR 只从系统 Known Folder API 返回的 Program Files 根发现已安装微信，不信任 `ProgramFiles*` 环境变量，并校验组件 ZIP 的路径、大小和 CRC。该实验后端为兼容微信私有 Mojo 协议，会向微信 OCR 子进程传入供应商协议所需的 `no-sandbox` 开关；因此每张图片都必须单独取得 `--allow-private-ipc` 授权，不能把它视为受 CLI 沙箱隔离的解析器。
 
 ## 隐私边界
 
-CLI 不上传遥测。普通查询和刷新不联网。只有用户对具体朋友圈媒体显式传入 `--allow-network` 时，才会把该记录自带的临时令牌发给它绑定的受限腾讯 CDN；只有用户对具体公众号文章显式传入 `--allow-network` 时，才会把从本地卡片重新验证并清理后的公开文章标识发送给 `mp.weixin.qq.com`。这两类请求都不使用浏览器 Cookie、不跟随重定向，也不会复用彼此的网络授权。
+CLI 不上传遥测。普通查询、聊天图片本地导出和刷新不联网。朋友圈媒体与公众号文章继续分别要求本次 `--allow-network`，且不会复用彼此的授权。
+
+聊天图片使用更窄的授权模型：`recover-chat-image` 第一次调用只离线检查当前不可变快照并创建五分钟有效的一次性 challenge；它不接受长期 `--allow-network` 开关。challenge 只保存摘要，绑定具体账号、消息、图片候选、generation、snapshot manifest 和输出目标。签发与消费都持有同账号快照事务锁并重新加载当前 state，防止并发 refresh 在检查后更换 generation；拿不到锁时在联网和消费 challenge 前返回 `snapshot_busy`。每次签发还会在该锁内有界清理严格验真且已经过期的 pending/used 记录，避免一次性状态永久累积。Agent 必须在用户对这一个 challenge 明确同意后才传入 `--consent`；challenge 在任何联网动作前原子消费，不能重放。该授权只允许向快照直接携带的 `novac2c.cdn.weixin.qq.com` HTTPS full URL 发起一次 GET，不授权操作微信 UI，也不能用于从十六进制桌面参数猜测或拼接 URL。
+
+聊天图片请求不使用环境代理、浏览器 Cookie、外部 DNS 回退或重定向。CLI 在写出前核对响应大小、MIME、完整图片结构、候选描述符摘要、消息绑定以及描述符提供的 MD5 或“长度 + 成对尺寸”。下载和解密缓冲区会清零；落盘临时文件在 Windows 使用只允许当前用户与 LocalSystem 的受保护 DACL，在 Unix 使用 owner-only `0600`。清理失败会显式报错并说明最终输出是否已经提交。URL、鉴权参数和描述符不作为长期信任根；结果分别记录 `observed_at`、`retrieved_at` 和 `descriptor_expiry_known=false`。即使成功，`source_original_quality_status` 仍为 `unknown`。
 
 ## 派生索引、增量游标与查询 daemon
 

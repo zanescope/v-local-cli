@@ -18,7 +18,7 @@ import (
 )
 
 const syntheticChatImageProtocolProfile = "synthetic_loopback_crypto_binding_harness_aes_128_ecb_pkcs7"
-const maxSyntheticChatImageRemoteResponseBytes = maxChatImageBytes + aes.BlockSize
+const maxChatImageRemoteResponseBytes = maxChatImageBytes + aes.BlockSize
 
 // chatImageQualificationProtocol is deliberately not exported or wired to the CLI. This is a
 // crypto/binding harness, not a model of the authenticated desktop CDN request envelope.
@@ -158,8 +158,8 @@ func newSyntheticChatImageQualificationDownloader(source *http.Client) (*safeMom
 	return &safeMomentDownloader{client: client}, nil
 }
 
-func decryptSyntheticChatImageAES128ECBPKCS7(ciphertext []byte, key [16]byte) ([]byte, error) {
-	if len(ciphertext) == 0 || len(ciphertext) > maxSyntheticChatImageRemoteResponseBytes || len(ciphertext)%aes.BlockSize != 0 {
+func decryptChatImageAES128ECBPKCS7(ciphertext []byte, key [16]byte) ([]byte, error) {
+	if len(ciphertext) == 0 || len(ciphertext) > maxChatImageRemoteResponseBytes || len(ciphertext)%aes.BlockSize != 0 {
 		return nil, errors.New("ciphertext_size_invalid")
 	}
 	block, err := aes.NewCipher(key[:])
@@ -202,7 +202,7 @@ func qualifySyntheticChatImageRemoteCandidate(
 	if err != nil {
 		return chatImageQualificationArtifact{}, err
 	}
-	response, err := downloader.Download(ctx, target, maxSyntheticChatImageRemoteResponseBytes)
+	response, err := downloader.Download(ctx, target, maxChatImageRemoteResponseBytes)
 	if len(response.Payload) > 0 {
 		defer clear(response.Payload)
 	}
@@ -217,7 +217,7 @@ func qualifySyntheticChatImageRemoteCandidate(
 	if response.Path != "" || len(response.Payload) == 0 || response.Bytes != int64(len(response.Payload)) {
 		return chatImageQualificationArtifact{}, newChatImageQualificationError("chat_image_qualification_download_failed_response_read_failed")
 	}
-	plain, err := decryptSyntheticChatImageAES128ECBPKCS7(response.Payload, candidate.aesKey)
+	plain, err := decryptChatImageAES128ECBPKCS7(response.Payload, candidate.aesKey)
 	if err != nil {
 		return chatImageQualificationArtifact{}, newChatImageQualificationError("chat_image_qualification_decrypt_failed")
 	}

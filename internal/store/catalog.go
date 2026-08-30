@@ -51,13 +51,10 @@ func bindMessageChat(tableToChat map[string]string, ambiguousTables map[string]b
 	tableToChat[table] = chat
 }
 
-// WalkMessages 对 generation 中的全部已识别消息表做一次确定性扫描。无法映射到
-// 联系人的 Msg_* 表会进入 coverage，而不是被悄悄视为完整。
-func WalkMessages(root string, emit func(Message) error) (MessageScanCoverage, error) {
-	coverage := MessageScanCoverage{}
+func resolveMessageTableChats(root string) (map[string]string, map[string]bool, []string, error) {
 	contacts, err := Contacts(root, "", 0)
 	if err != nil {
-		return coverage, err
+		return nil, nil, nil, err
 	}
 	tableToChat := map[string]string{}
 	ambiguousTables := map[string]bool{}
@@ -73,7 +70,7 @@ func WalkMessages(root string, emit func(Message) error) (MessageScanCoverage, e
 	}
 	files, err := sqliteFiles(root)
 	if err != nil {
-		return coverage, err
+		return nil, nil, nil, err
 	}
 	// Name2Id 保留消息库已经知道的稳定 username。仅当其精确哈希对应同库实际
 	// Msg_* 表时才用于补足已删除联系人或已移出 SessionTable 的历史会话。
@@ -99,6 +96,17 @@ func WalkMessages(root string, emit func(Message) error) (MessageScanCoverage, e
 		}
 		_ = database.Close()
 	}
+	return tableToChat, ambiguousTables, files, nil
+}
+
+// walkMessagesWindow 对 generation 中的全部已识别消息表做一次确定性扫描。
+// 无法映射到联系人的 Msg_* 表会进入 coverage，而不是被悄悄视为完整。
+func walkMessagesWindow(root string, start, end *int64, emit func(Message) error) (MessageScanCoverage, error) {
+	coverage := MessageScanCoverage{}
+	tableToChat, ambiguousTables, files, err := resolveMessageTableChats(root)
+	if err != nil {
+		return coverage, err
+	}
 	for _, path := range files {
 		if !messageDatabase(path) {
 			continue
@@ -123,7 +131,7 @@ func WalkMessages(root string, emit func(Message) error) (MessageScanCoverage, e
 				continue
 			}
 			identity := loadMessageIdentity(root, chat)
-			queryErr := messageQueryEach(database, table, chat, filepath.ToSlash(relative), nil, nil, 0, identity, func(message Message) error {
+			queryErr := messageQueryEach(database, table, chat, filepath.ToSlash(relative), start, end, 0, identity, func(message Message) error {
 				coverage.RowsEmitted++
 				return emit(message)
 			})
@@ -137,4 +145,32 @@ func WalkMessages(root string, emit func(Message) error) (MessageScanCoverage, e
 	}
 	coverage.Complete = len(coverage.UnknownTables) == 0 && len(coverage.FailedTables) == 0 && coverage.TablesDiscovered == coverage.TablesIndexed
 	return coverage, nil
+}
+
+// WalkMessages 扫描 generation 中的全部已识别消息，供内容寻址索引构建使用。
+func WalkMessages(root string, emit func(Message) error) (MessageScanCoverage, error) {
+	return walkMessagesWindow(root, nil, nil, emit)
+}
+
+// MessagesWindow 返回跨会话、按全局时间倒序排列的消息。limit=0 表示不设条数上限；
+// coverage 始终反映完整表扫描情况，未知哈希表不会被静默忽略。
+func MessagesWindow(root string, start, end *int64, limit int) ([]Message, MessageScanCoverage, error) {
+	results := newBoundedSearchResults(limit)
+	redPackets := loadRedPacketIndex(root)
+	contacts := loadContactIdentity(root)
+	coverage, err := walkMessagesWindow(root, start, end, func(message Message) error {
+		enrichRedPacketMessage(&message, redPackets)
+		if contact, found := contacts[message.Chat]; found {
+			message.ChatDisplay = firstNonEmpty(contact.Display, contact.Remark, contact.Nickname, message.Chat)
+			message.ChatKind = contact.Kind
+		} else {
+			message.ChatDisplay = message.Chat
+			message.ChatKind = contactKind(message.Chat)
+		}
+		return results.emit(message)
+	})
+	if err != nil {
+		return nil, coverage, err
+	}
+	return results.values(), coverage, nil
 }
