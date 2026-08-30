@@ -231,7 +231,7 @@ func loadDaemonInfo() (daemonInfo, error) {
 func allowedDaemonCommand(command string) bool {
 	return map[string]bool{
 		"contacts": true, "resolve-contact": true, "sessions": true, "unread": true,
-		"members": true, "favorites": true, "history": true, "search": true, "stats": true,
+		"members": true, "favorites": true, "messages": true, "history": true, "search": true, "stats": true,
 		"moments-contacts": true, "moments": true, "moments-search": true,
 		"official-accounts": true, "official-history": true, "official-search": true,
 	}[command]

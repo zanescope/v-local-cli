@@ -35,6 +35,8 @@ type Contact struct {
 
 type Message struct {
 	Chat                  string         `json:"chat"`
+	ChatDisplay           string         `json:"chat_display,omitempty"`
+	ChatKind              string         `json:"chat_kind,omitempty"`
 	LocalID               int64          `json:"local_id,omitempty"`
 	ServerID              int64          `json:"server_id,omitempty"`
 	LocalType             int64          `json:"local_type,omitempty"`

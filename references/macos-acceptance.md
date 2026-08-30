@@ -46,7 +46,7 @@ GitHub runner 的架构与临时虚拟机边界以 [GitHub-hosted runners refere
 2. 自动发现失败时，只在本地用 `V_LOCAL_CLI_ACCOUNT_DIR` 指向已核对的账号目录。记录「自动发现失败」，不能把显式路径成功算作自动发现通过。
 3. 使用候选文件执行 `setup --dry-run --account <账号> --keys <本地候选文件> --storage snapshot-only --database-only`。这一步明确只验收数据库快照，不保存密钥，也不是完整媒体流程。
 4. 核对计划后执行相同 setup，确认源数据库没有被修改，已发布快照具有 manifest、版本标识和数据库摘要。
-5. 对联系人、会话、快照未读、群成员、收藏、私聊、群聊和结构化卡片分别运行受限 `contacts`、`resolve-contact`、`sessions`、`unread`、`members`、`favorites`、`history`、`search` 与 `stats`，再用人工已知样本核对时间、发送方、类型和条数。至少制造一次同名联系人，确认模糊名称返回 `ambiguous_contact` 而不是自动取第一项。
+5. 对联系人、会话、快照未读、群成员、收藏、私聊、群聊和结构化卡片分别运行受限 `contacts`、`resolve-contact`、`sessions`、`unread`、`members`、`favorites`、`history`、`search` 与 `stats`，再用人工已知样本核对时间、发送方、类型和条数。另选一个包含至少两个会话已知消息的日期，运行 `messages --date YYYY-MM-DD --limit 0` 和省略 username 的同范围 `stats --date YYYY-MM-DD --top 0`，确认自然日边界、全局排序、会话显示名、总量及 coverage 一致；再验证 `--last-24h` 回显的精确边界相差 86400 秒。至少制造一次同名联系人，确认模糊名称返回 `ambiguous_contact` 而不是自动取第一项。
 6. 运行 `index status` 和 `index build`，确认 manifest 的账号、generation 和 snapshot 摘要与本次快照一致，document count 与 SQLite 行数一致；结构化搜索命中提及、引用和卡片文字，token/key 字段不会成为全文命中来源。破坏测试副本中的任一绑定后必须拒绝复用。
 7. 分别运行默认 JSON、命令前全局 `--output yaml` 和 `--output table`；JSON 契约保持不变，YAML 可解析，table 明确只供人工阅读且不泄露默认隐藏路径。
 8. 启动 `daemon serve`，确认只监听 `127.0.0.1`、无 token 请求被拒绝、白名单查询绑定当前 generation，且 endpoint 的版本/可执行文件 SHA-256 与客户端不一致时查询在连接前拒绝；同协议旧构建仍可由持有私有 token 的 `daemon stop` 关闭。`refresh`、`--fresh`、`index build`、`new-messages` 和联网/导出命令必须被拒绝。停止后 endpoint 文件删除。
