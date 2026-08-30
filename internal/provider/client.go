@@ -18,6 +18,7 @@ import (
 	"time"
 
 	localplatform "github.com/zanescope/v-local-cli/internal/platform"
+	shadowcontract "github.com/zanescope/v-local-cli/internal/shadowcontract"
 )
 
 // 4096 个 catalog proof 加上逐库 key/profile 可能合理地超过 1 MiB；仍以固定上限
@@ -151,16 +152,71 @@ type CatalogEntry struct {
 }
 
 type CandidateBundle struct {
-	Protocol           string              `json:"protocol,omitempty"`
-	RequestID          string              `json:"request_id,omitempty"`
-	CatalogID          string              `json:"catalog_id,omitempty"`
-	CatalogEntries     []CatalogEntry      `json:"catalog_entries,omitempty"`
-	DatabaseKeys       map[string]string   `json:"database_keys"`
-	DatabaseProfiles   map[string]string   `json:"database_profiles,omitempty"`
-	DatabaseCredential *DatabaseCredential `json:"database_credential,omitempty"`
-	ImageKeys          *ImageKeys          `json:"image_keys,omitempty"`
-	Profiles           []ProfileSummary    `json:"profiles,omitempty"`
-	Diagnostics        map[string]any      `json:"diagnostics,omitempty"`
+	Protocol           string                 `json:"protocol,omitempty"`
+	RequestID          string                 `json:"request_id,omitempty"`
+	CatalogID          string                 `json:"catalog_id,omitempty"`
+	CatalogEntries     []CatalogEntry         `json:"catalog_entries,omitempty"`
+	DatabaseKeys       map[string]string      `json:"database_keys"`
+	DatabaseProfiles   map[string]string      `json:"database_profiles,omitempty"`
+	DatabaseCredential *DatabaseCredential    `json:"database_credential,omitempty"`
+	ImageKeys          *ImageKeys             `json:"image_keys,omitempty"`
+	Profiles           []ProfileSummary       `json:"profiles,omitempty"`
+	Diagnostics        map[string]any         `json:"diagnostics,omitempty"`
+	ShadowAttempt      *shadowcontract.Result `json:"-"`
+}
+
+func (value *CandidateBundle) UnmarshalJSON(payload []byte) error {
+	type plain CandidateBundle
+	var decoded plain
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("Provider response contains trailing data")
+	}
+	var envelope struct {
+		Diagnostics json.RawMessage `json:"diagnostics"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return err
+	}
+	var attempt *shadowcontract.Result
+	if len(envelope.Diagnostics) != 0 && !bytes.Equal(bytes.TrimSpace(envelope.Diagnostics), []byte("null")) {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(envelope.Diagnostics, &fields); err != nil {
+			return errors.New("Provider diagnostics are invalid")
+		}
+		if raw, found := fields["shadow_attempt"]; found {
+			var parsed shadowcontract.Result
+			if err := shadowcontract.DecodeStrict(raw, &parsed); err != nil || parsed.Validate() != nil {
+				return errors.New("Provider Shadow result violates its typed contract")
+			}
+			attempt = &parsed
+		}
+	}
+	*value = CandidateBundle(decoded)
+	value.ShadowAttempt = attempt
+	return nil
+}
+
+func (value CandidateBundle) MarshalJSON() ([]byte, error) {
+	type plain CandidateBundle
+	copy := value
+	if value.Diagnostics != nil {
+		copy.Diagnostics = make(map[string]any, len(value.Diagnostics)+1)
+		for name, field := range value.Diagnostics {
+			copy.Diagnostics[name] = field
+		}
+	}
+	if value.ShadowAttempt != nil {
+		if copy.Diagnostics == nil {
+			copy.Diagnostics = map[string]any{}
+		}
+		copy.Diagnostics["shadow_attempt"] = value.ShadowAttempt
+	}
+	return json.Marshal(plain(copy))
 }
 
 type ProfileSummary struct {
@@ -189,10 +245,11 @@ func supportedProfileSummary(profile ProfileSummary) bool {
 }
 
 type workflowRequest struct {
-	Operation         string         `json:"operation"`
-	SessionID         string         `json:"session_id,omitempty"`
-	ExpectedCatalogID string         `json:"expected_catalog_id,omitempty"`
-	ActionReceipt     *actionReceipt `json:"action_receipt,omitempty"`
+	Operation         string                  `json:"operation"`
+	SessionID         string                  `json:"session_id,omitempty"`
+	ExpectedCatalogID string                  `json:"expected_catalog_id,omitempty"`
+	ActionReceipt     *actionReceipt          `json:"action_receipt,omitempty"`
+	Shadow            *shadowcontract.Request `json:"shadow,omitempty"`
 }
 
 type actionReceipt struct {

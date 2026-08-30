@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -170,6 +171,9 @@ func TestImplementedFlagsMatchCommandSchema(t *testing.T) {
 	commands := schemaCommands(t)
 	implemented := implementationFlagSets(t, root)
 	for command, flags := range implemented {
+		if strings.HasPrefix(command, "__") {
+			continue
+		}
 		rawDefinition, found := commands[command]
 		if !found {
 			t.Errorf("实现包含 schema 未声明的命令：%s", command)
@@ -193,6 +197,35 @@ func TestImplementedFlagsMatchCommandSchema(t *testing.T) {
 				t.Errorf("%s schema 声明了实现中不存在的选项 --%s", command, name)
 			}
 		}
+	}
+}
+
+func TestInternalFlagSetsStayExplicitAndOutsidePublicSchema(t *testing.T) {
+	root := repositoryRoot(t)
+	commands := schemaCommands(t)
+	implemented := implementationFlagSets(t, root)
+	expected := map[string]map[string]bool{
+		"__shadow-qualify": {"account": true, "database-only": true},
+	}
+	for command, flags := range implemented {
+		if !strings.HasPrefix(command, "__") {
+			continue
+		}
+		want, found := expected[command]
+		if !found {
+			t.Errorf("实现包含未审查的内部命令：%s", command)
+			continue
+		}
+		if !reflect.DeepEqual(flags, want) {
+			t.Errorf("内部命令 %s 的选项漂移：got=%v want=%v", command, flags, want)
+		}
+		if _, exposed := commands[command]; exposed {
+			t.Errorf("内部命令 %s 泄漏到公开 command schema", command)
+		}
+		delete(expected, command)
+	}
+	for command := range expected {
+		t.Errorf("受控内部命令未实现：%s", command)
 	}
 }
 
