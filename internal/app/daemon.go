@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	daemonProtocolVersion  = 2
+	daemonProtocolVersion  = 1
 	maxDaemonRequestBytes  = 1024 * 1024
 	maxDaemonResponseBytes = 16 * 1024 * 1024
 	maxDaemonCacheEntries  = 64

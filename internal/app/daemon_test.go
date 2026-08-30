@@ -30,7 +30,7 @@ func TestDaemonUsesAuthenticatedLoopbackAndStopsCleanly(t *testing.T) {
 	if err := serveDaemon(); err == nil || !strings.Contains(err.Error(), "已经运行") {
 		t.Fatalf("daemon 单实例锁未生效：%v", err)
 	}
-	if !strings.HasPrefix(info.Address, "127.0.0.1:") || len(info.Token) != 64 || !validLowerHexSHA256(info.ExecutableSHA256) || info.Version != Version {
+	if info.SchemaVersion != 1 || !strings.HasPrefix(info.Address, "127.0.0.1:") || len(info.Token) != 64 || !validLowerHexSHA256(info.ExecutableSHA256) || info.Version != Version {
 		t.Fatalf("daemon 端点不安全：%+v", info)
 	}
 	path, _ := daemonInfoPath()
