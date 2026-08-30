@@ -58,9 +58,9 @@ Windows 实验 OCR 只从 Known Folder API 返回的 Program Files 根发现安�
 
 查询只连接已发布的明文快照，SQLite 连接同时使用 `mode=ro`、`immutable=1` 和 `query_only`。联系人按字段探测读取；消息表按 `Msg_<md5(username)>` 定位；zstd 压缩正文在内存中受限解码。
 
-聊天查询按本地时区解析共享时间窗：个人或公众号默认当前自然月，群聊和跨会话搜索默认当前自然日；显式日期或 `--all` 可以覆盖默认值，实际范围回显在 `meta.time_window`，证据版本回显在 `meta.generation_id` 与 manifest 摘要。日期与条数正交：`--all` 只取消日期边界，`--limit 0` 才取消结果上限。
+聊天查询按本地时区解析共享时间窗：个人或公众号默认当前自然月，群聊、跨会话搜索、`messages` 及无 username 的 `stats` 默认当前自然日；显式日期或 `--all` 可以覆盖默认值。`messages`/跨会话 `stats` 还支持 `--date YYYY-MM-DD|today|yesterday` 的本地自然日和 `--last-24h` 的滚动窗口，精确范围、时区与秒数回显在 `meta.time_window`，证据版本回显在 `meta.generation_id` 与 manifest 摘要。日期与条数正交：`--all` 只取消日期边界，`--limit 0` 才取消结果上限。
 
-`stats` 直接扫描选定时间窗内的类型、发送者编号和时间字段，不加载正文；系统消息从发言统计中排除并单独计数。
+`messages` 扫描所有能由联系人、会话或 `Name2Id` 与 `Msg_<md5(username)>` 稳定绑定的消息表，按全局时间排序，并把未知或失败表留在 `message_source_coverage`。`stats` 可对单会话或同一套已识别消息表直接扫描类型、发送者编号和时间字段，不加载正文；系统消息从发言统计中排除并单独计数。
 
 朋友圈查询使用 `SnsTimeLine` 表列确认作者和记录 ID，再解析同一行 `TimelineObject` 的正文、时间、位置、链接与逻辑媒体，并从根节点 `LocalExtraInfo` 解析本地可见的点赞、评论、回复引用和评论图片。`--resolve-media` 对原帖与评论媒体都只接受对应 XML 节点派生的 MD5/资源键或 hardlink 映射，随后验证容器或解密结果；不以时间、目录或文件修改时间猜测归属。
 
@@ -74,7 +74,7 @@ Windows 实验 OCR 只从 Known Folder API 返回的 Program Files 根发现安�
 
 可选查询 daemon 与 CLI 使用同一二进制，只绑定 IPv4 loopback，并用当前用户私有随机令牌认证。endpoint 记录 CLI 版本和启动时可执行文件 SHA-256，客户端在连接前复核两者；替换或升级二进制后查询会拒绝旧 daemon，应先执行 `daemon stop` 再重启。同一 endpoint 协议下，停止动作仍要求私有令牌，但专门允许关闭摘要不同的旧构建。它只接受不刷新、不联网、不导出、不解析账号源媒体、不读取可变私有 ASR cache、不改变游标或索引的 immutable generation 查询。成功响应的有界缓存键包含账号、generation、snapshot manifest 摘要、派生索引身份、参数、本地日期和二进制版本；状态或索引可用性切换后旧缓存不会命中。客户端 YAML/table 只改变展示，daemon 协议仍为 JSON。
 
-`--all` 只改变时间窗口；默认结果上限仍生效。显式 `--limit 0` 才取消条数上限，并可与显式日期范围合用；结果仍只代表当前 generation、`meta.database_coverage_status` 和命令回显的领域限定状态。有限 `history`、`search` 与 `export` 多取一条探测并回显 `has_more`/`truncated`。无上限 `export` 通过账号私有临时 SQLite 完成跨分片排序，再流式写最终 JSON/JSONL，避免把全部消息装入内存，结束后立即删除暂存库。
+`--all` 只改变时间窗口；默认结果上限仍生效。显式 `--limit 0` 才取消条数上限，并可与显式日期范围合用；结果仍只代表当前 generation、`meta.database_coverage_status` 和命令回显的领域限定状态。有限 `messages`、`history`、`search` 与 `export` 多取一条探测并回显 `has_more`/`truncated`。无上限 `export` 通过账号私有临时 SQLite 完成跨分片排序，再流式写最终 JSON/JSONL，避免把全部消息装入内存，结束后立即删除暂存库。
 
 用户可见输出默认采用仅在目标不存在时发布的语义；`export`、`export-media`、`export-moment-media` 和诊断包只有显式 `--force` 才覆盖。输出目标是符号链接、Windows 重解析点或特殊文件时始终拒绝；硬链接覆盖通过发布新的普通文件打断链接关系，不修改其他名字指向的内容。写入与覆盖备份都使用目标目录内随机独占的兄弟临时文件，避免固定 PID、`.tmp` 或 `.old` 名称造成抢占和误删。
 

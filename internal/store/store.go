@@ -35,6 +35,8 @@ type Contact struct {
 
 type Message struct {
 	Chat                  string         `json:"chat"`
+	ChatDisplay           string         `json:"chat_display,omitempty"`
+	ChatKind              string         `json:"chat_kind,omitempty"`
 	LocalID               int64          `json:"local_id,omitempty"`
 	ServerID              int64          `json:"server_id,omitempty"`
 	LocalType             int64          `json:"local_type,omitempty"`
@@ -421,10 +423,13 @@ func Search(root, keyword, chat string, limit int) ([]Message, error) {
 }
 
 func messageNewer(left, right Message) bool {
-	if left.SortKey == right.SortKey {
-		return left.EvidenceID > right.EvidenceID
+	if left.Timestamp != right.Timestamp {
+		return left.Timestamp > right.Timestamp
 	}
-	return left.SortKey > right.SortKey
+	if left.SortKey != right.SortKey {
+		return left.SortKey > right.SortKey
+	}
+	return left.EvidenceID > right.EvidenceID
 }
 
 // oldestMessageHeap keeps the oldest retained search hit at index zero so a

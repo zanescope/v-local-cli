@@ -31,12 +31,14 @@ var Version = "0.1.0-dev.1"
 const responseSchemaVersion = 1
 
 const (
-	historyDefaultResultLimit = 200
-	historyMaximumResultLimit = 5000
-	searchDefaultResultLimit  = 200
-	searchMaximumResultLimit  = 1000
-	exportDefaultResultLimit  = 1000
-	exportMaximumResultLimit  = 5000
+	historyDefaultResultLimit  = 200
+	historyMaximumResultLimit  = 5000
+	messagesDefaultResultLimit = 200
+	messagesMaximumResultLimit = 5000
+	searchDefaultResultLimit   = 200
+	searchMaximumResultLimit   = 1000
+	exportDefaultResultLimit   = 1000
+	exportMaximumResultLimit   = 5000
 )
 
 const privateOutputPathEnv = "V_LOCAL_CLI_PRIVATE_OUTPUT_PATH"
@@ -68,13 +70,17 @@ func (writer *countingWriter) Write(payload []byte) (int, error) {
 }
 
 type timeWindow struct {
-	Mode           string  `json:"mode"`
-	ChatType       string  `json:"chat_type"`
-	DefaultApplied bool    `json:"default_applied"`
-	Start          *string `json:"start"`
-	End            *string `json:"end"`
-	StartTimestamp *int64  `json:"start_ts"`
-	EndTimestamp   *int64  `json:"end_ts"`
+	Mode            string  `json:"mode"`
+	ChatType        string  `json:"chat_type"`
+	DefaultApplied  bool    `json:"default_applied"`
+	Start           *string `json:"start"`
+	End             *string `json:"end"`
+	StartTimestamp  *int64  `json:"start_ts"`
+	EndTimestamp    *int64  `json:"end_ts"`
+	StartLocal      *string `json:"start_local,omitempty"`
+	EndLocal        *string `json:"end_local,omitempty"`
+	Timezone        string  `json:"timezone,omitempty"`
+	DurationSeconds *int64  `json:"duration_seconds,omitempty"`
 }
 
 type errorValue struct {
@@ -241,6 +247,8 @@ func mainWithPolicy(args []string, stdout, stderr io.Writer, immutableOnly bool)
 		data, err = runIndex(args[1:])
 	case "daemon":
 		data, err = runDaemon(args[1:])
+	case "messages":
+		data, err = runMessages(args[1:], immutableOnly)
 	case "history":
 		data, err = runHistory(args[1:], immutableOnly)
 	case "search":
@@ -343,7 +351,7 @@ func prepareFreshQuery(args []string) ([]string, bool, error) {
 	}
 	supported := map[string]bool{
 		"contacts": true, "resolve-contact": true, "sessions": true, "unread": true, "members": true,
-		"favorites": true, "new-messages": true, "history": true, "search": true, "stats": true,
+		"favorites": true, "new-messages": true, "messages": true, "history": true, "search": true, "stats": true,
 		"moments-contacts": true, "moments": true, "moments-search": true,
 		"official-accounts": true, "official-history": true, "official-search": true, "official-article": true,
 		"voice-status": true, "voice-transcribe": true, "voice-search": true,
@@ -467,6 +475,58 @@ func resolveTimeWindow(chat, startValue, endValue string, all bool, now time.Tim
 		Start: &startText, End: &endText,
 		StartTimestamp: &startTimestamp, EndTimestamp: &endTimestamp,
 	}, nil
+}
+
+func resolveMessageTimeWindow(chat, startValue, endValue, dateValue string, last24Hours, all bool, now time.Time) (timeWindow, error) {
+	dateValue = strings.ToLower(strings.TrimSpace(dateValue))
+	if (dateValue != "" || last24Hours) && (startValue != "" || endValue != "" || all) || (dateValue != "" && last24Hours) {
+		return timeWindow{}, &commandError{
+			typeName: "conflicting_time_window", message: "--date/--last-24h 不能与其他时间范围选项同时使用",
+			hint: "自然日使用 --date YYYY-MM-DD|today|yesterday；滚动 24 小时只使用 --last-24h。", code: 2,
+		}
+	}
+	location := now.Location()
+	if dateValue != "" {
+		switch dateValue {
+		case "today":
+			dateValue = now.In(location).Format("2006-01-02")
+		case "yesterday":
+			dateValue = now.In(location).AddDate(0, 0, -1).Format("2006-01-02")
+		}
+		window, err := resolveTimeWindow(chat, dateValue, dateValue, false, now)
+		if err != nil {
+			return timeWindow{}, err
+		}
+		window.Mode = "explicit_natural_day"
+		window.Timezone = location.String()
+		if window.StartTimestamp != nil && window.EndTimestamp != nil {
+			startLocal := time.Unix(*window.StartTimestamp, 0).In(location).Format(time.RFC3339)
+			endLocal := time.Unix(*window.EndTimestamp, 0).In(location).Format(time.RFC3339)
+			duration := *window.EndTimestamp - *window.StartTimestamp + 1
+			window.StartLocal, window.EndLocal, window.DurationSeconds = &startLocal, &endLocal, &duration
+		}
+		return window, nil
+	}
+	if last24Hours {
+		endTime := time.Unix(now.Unix(), 0).In(location)
+		startTime := endTime.Add(-24 * time.Hour)
+		startText, endText := startTime.Format("2006-01-02"), endTime.Format("2006-01-02")
+		startLocal, endLocal := startTime.Format(time.RFC3339), endTime.Format(time.RFC3339)
+		startTimestamp, endTimestamp := startTime.Unix(), endTime.Unix()
+		duration := int64((24 * time.Hour) / time.Second)
+		chatType := "contact"
+		if chat == "" {
+			chatType = "cross_chat"
+		} else if strings.HasSuffix(chat, "@chatroom") {
+			chatType = "group"
+		}
+		return timeWindow{
+			Mode: "rolling_24_hours", ChatType: chatType,
+			Start: &startText, End: &endText, StartTimestamp: &startTimestamp, EndTimestamp: &endTimestamp,
+			StartLocal: &startLocal, EndLocal: &endLocal, Timezone: location.String(), DurationSeconds: &duration,
+		}, nil
+	}
+	return resolveTimeWindow(chat, startValue, endValue, all, now)
 }
 
 func outputWithTimeWindow(data any, window timeWindow, untrusted bool) commandOutput {
@@ -782,7 +842,7 @@ func runCapabilities(args []string) (any, error) {
 		},
 		"query": map[string]any{
 			"contacts": true, "sessions": true, "snapshot_unread": true, "members": true, "favorites": true,
-			"new_messages": true, "history": true, "search": true, "stats": true, "moments": true, "official_cards": true,
+			"new_messages": true, "messages": true, "history": true, "search": true, "stats": true, "moments": true, "official_cards": true,
 			"voice_transcripts": true, "wechat_existing_voice_text": true, "wechat_existing_ocr_text": true, "official_article_body": true,
 			"structured_cards":      []string{"contact_card", "mini_program", "channels", "red_packet", "forward", "quote"},
 			"group_identity_fields": true, "emoji_normalization": "wechat_known_brackets_to_unicode",
@@ -1827,6 +1887,59 @@ func runContacts(args []string) (any, error) {
 	return outputWithGeneration(map[string]any{"account": value.AccountName, "items": items, "count": len(items), "query": keyword}, value), nil
 }
 
+func messageSourceCoverage(coverage store.MessageScanCoverage) map[string]any {
+	result := map[string]any{
+		"databases_scanned": coverage.DatabasesScanned,
+		"tables_discovered": coverage.TablesDiscovered,
+		"tables_scanned":    coverage.TablesIndexed,
+		"rows_matched":      coverage.RowsEmitted,
+		"complete":          coverage.Complete,
+	}
+	if len(coverage.UnknownTables) > 0 {
+		result["unknown_tables"] = coverage.UnknownTables
+	}
+	if len(coverage.FailedTables) > 0 {
+		result["failed_tables"] = coverage.FailedTables
+	}
+	return result
+}
+
+func runMessages(args []string, immutableOnly bool) (any, error) {
+	limitExplicit := flagProvided(args, "limit")
+	set := flag.NewFlagSet("messages", flag.ContinueOnError)
+	set.SetOutput(io.Discard)
+	account := set.String("account", "", "已初始化账号")
+	limit := set.Int("limit", messagesDefaultResultLimit, "最多返回条数；0 表示不设上限")
+	start := set.String("start", "", "开始日期 YYYY-MM-DD")
+	end := set.String("end", "", "结束日期 YYYY-MM-DD")
+	date := set.String("date", "", "单个本地自然日 YYYY-MM-DD|today|yesterday")
+	last24Hours := set.Bool("last-24h", false, "截至当前时刻的滚动 24 小时")
+	all := set.Bool("all", false, "取消默认日期范围")
+	if err := set.Parse(args); err != nil || len(set.Args()) != 0 || *limit < 0 || *limit > messagesMaximumResultLimit {
+		return nil, invalidArguments("用法：v-local-cli messages [--account NAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--date YYYY-MM-DD|today|yesterday | --last-24h | --all] [--limit N]")
+	}
+	value, err := resolveInitializedAccount(*account)
+	if err != nil {
+		return nil, err
+	}
+	window, err := resolveMessageTimeWindow("", *start, *end, *date, *last24Hours, *all, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	effectiveLimit := *limit
+	items, coverage, err := store.MessagesWindow(value.SnapshotPath, window.StartTimestamp, window.EndTimestamp, resultProbeLimit(effectiveLimit))
+	items, hasMore := truncateMessages(items, effectiveLimit)
+	if err == nil {
+		err = attachExistingVoiceTranscripts(value, items, !immutableOnly)
+	}
+	data := map[string]any{
+		"account": value.AccountName, "items": items, "count": len(items),
+		"has_more": hasMore, "truncated": hasMore, "message_source_coverage": messageSourceCoverage(coverage),
+	}
+	output := outputWithQueryMetadata(data, window, true, effectiveLimit, limitExplicit)
+	return withGeneration(withTruncationMetadata(output, hasMore), value), err
+}
+
 func runHistory(args []string, immutableOnly bool) (any, error) {
 	limitExplicit := flagProvided(args, "limit")
 	set := flag.NewFlagSet("history", flag.ContinueOnError)
@@ -1926,29 +2039,39 @@ func runStats(args []string) (any, error) {
 	account := set.String("account", "", "已初始化账号")
 	start := set.String("start", "", "开始日期 YYYY-MM-DD")
 	end := set.String("end", "", "结束日期 YYYY-MM-DD")
+	date := set.String("date", "", "单个本地自然日 YYYY-MM-DD|today|yesterday")
+	last24Hours := set.Bool("last-24h", false, "截至当前时刻的滚动 24 小时")
 	all := set.Bool("all", false, "取消默认日期范围")
-	top := set.Int("top", 20, "群成员排行条数；0 表示全部")
-	if err := set.Parse(args); err != nil || len(set.Args()) != 1 || *top < 0 || *top > 5000 {
-		return nil, invalidArguments("用法：v-local-cli stats [--account NAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--top N] <username>")
+	top := set.Int("top", 20, "跨会话排行或群成员排行条数；0 表示全部")
+	if err := set.Parse(args); err != nil || len(set.Args()) > 1 || *top < 0 || *top > 5000 {
+		return nil, invalidArguments("用法：v-local-cli stats [--account NAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--date YYYY-MM-DD|today|yesterday | --last-24h | --all] [--top N] [username]")
 	}
 	value, err := resolveInitializedAccount(*account)
 	if err != nil {
 		return nil, err
 	}
-	match, err := resolvedContact(value.SnapshotPath, set.Args()[0])
+	chat := ""
+	if len(set.Args()) == 1 {
+		match, resolveErr := resolvedContact(value.SnapshotPath, set.Args()[0])
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		chat = match.Contact.Username
+	}
+	window, err := resolveMessageTimeWindow(chat, *start, *end, *date, *last24Hours, *all, time.Now())
 	if err != nil {
 		return nil, err
 	}
-	chat := match.Contact.Username
-	window, err := resolveTimeWindow(chat, *start, *end, *all, time.Now())
+	var statistics any
+	if chat == "" {
+		statistics, err = store.StatsAll(value.SnapshotPath, window.StartTimestamp, window.EndTimestamp, *top)
+	} else {
+		statistics, err = store.Stats(value.SnapshotPath, chat, window.StartTimestamp, window.EndTimestamp, *top)
+	}
 	if err != nil {
 		return nil, err
 	}
-	statistics, err := store.Stats(value.SnapshotPath, chat, window.StartTimestamp, window.EndTimestamp, *top)
-	if err != nil {
-		return nil, err
-	}
-	data := map[string]any{"account": value.AccountName, "stats": statistics}
+	data := map[string]any{"account": value.AccountName, "chat": chat, "stats": statistics}
 	return withGeneration(outputWithTimeWindow(data, window, false), value), nil
 }
 
@@ -2819,6 +2942,7 @@ func commandSchemas() map[string]any {
 		"new-messages":      map[string]any{"usage": "v-local-cli new-messages [--account NAME] [--fresh] [--consumer NAME] [--start now|beginning] [--limit N] [--ack BATCH_ID | --status | --delete --yes]", "fresh_snapshot": true, "fresh_scope": "poll_only", "delivery_semantics": "at_least_once", "cursor_binding": "account+base_generation+base_manifest_sha256+target_generation+target_manifest_sha256", "ack_required": true},
 		"index":             map[string]any{"usage": "v-local-cli index [--account NAME] [--force] [--show-paths] <status|build>", "writes_private_derived_index_on_build": true, "immutable_generation_binding": true, "force_scope": "replace_invalid_or_version_mismatched_only", "paths_default": "redacted"},
 		"daemon":            map[string]any{"usage": "v-local-cli daemon [--show-paths] <serve|status|stop>", "serve_mode": "foreground_single_instance", "loopback_only": true, "authenticated_same_user_endpoint": true, "client_binding": "version+executable_sha256", "protocol_version": daemonProtocolVersion, "query_usage": "v-local-cli --daemon <只读查询命令> [参数]", "serves_immutable_generations_only": true, "paths_default": "redacted"},
+		"messages":          map[string]any{"usage": "v-local-cli messages [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--date YYYY-MM-DD|today|yesterday | --last-24h | --all] [--limit N]", "read_only": true, "fresh_snapshot": true, "scope": "all_recognized_chats", "default_time_window": "current_local_natural_day", "natural_day_option": "--date", "rolling_24_hours_option": "--last-24h", "unbounded_limit_value": 0, "truncation_fields": []string{"has_more", "truncated"}, "option_constraints": queryLimitOptionConstraints(messagesDefaultResultLimit, messagesMaximumResultLimit), "loads_message_content": true, "content_for_agent_analysis": true, "coverage_fields": []string{"databases_scanned", "tables_discovered", "tables_scanned", "rows_matched", "unknown_tables", "failed_tables", "complete"}, "unknown_message_tables_reduce_coverage": true},
 		"history":           map[string]any{"usage": "v-local-cli history [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <username>", "read_only": true, "fresh_snapshot": true, "default_time_window": "contact_month_or_group_day", "all_time_window_only": true, "unbounded_limit_value": 0, "truncation_fields": []string{"has_more", "truncated"}, "option_constraints": queryLimitOptionConstraints(historyDefaultResultLimit, historyMaximumResultLimit), "structured_non_text": true, "fields": "base_type,sub_type,type_label,details,reply_to,mentions,voice_duration_ms,voice_transcript,sender_username,sender_nickname,sender_group_nickname,sender_identity,is_from_me,media_md5", "reply_identity_fields": []string{"to_username", "to_name", "identity_status"}, "red_packet_fields": "receive_status,receive_status_label,receive_status_code,packet_status,message_timestamp,message_time,message_date,receive_timestamp,receive_time,receive_date,receive_time_status,amount,amount_minor_units,amount_currency,amount_status,amount_source,amount_kind"},
 		"search":            map[string]any{"usage": "v-local-cli search [--chat USERNAME] [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <关键词>", "read_only": true, "fresh_snapshot": true, "default_time_window": "selected_chat_or_cross_chat_day", "all_time_window_only": true, "unbounded_limit_value": 0, "truncation_fields": []string{"has_more", "truncated"}, "option_constraints": queryLimitOptionConstraints(searchDefaultResultLimit, searchMaximumResultLimit), "searches_structured_non_text": true},
 		"voice-status":      map[string]any{"usage": "v-local-cli voice-status [--account NAME] [--fresh] [--engine FILE | --asr-provider FILE] [--model PATH] [--show-paths]", "read_only": true, "fresh_snapshot": true, "preferred_source": "wechat_existing_index", "optional_dependencies": []string{"whisper.cpp", "SenseVoice via v-local-cli-asr/1 provider"}, "automatic_download": false},
@@ -2829,7 +2953,7 @@ func commandSchemas() map[string]any {
 		"ocr-recognize":     map[string]any{"usage": "v-local-cli ocr-recognize [--account NAME] [--fresh] [--allow-private-ipc] [--force] <image_evidence_id>", "fresh_snapshot": true, "reads_verified_chat_image": true, "writes_private_cache": true, "stores_original_image": false, "external_dependency": false, "private_ipc_requires_flag": "allow-private-ipc", "network_requested_by_cli": false, "subprocess_sandboxed": false, "vendor_no_sandbox_switch": true},
 		"ocr-read":          map[string]any{"usage": "v-local-cli ocr-read [--account NAME] [--fresh] <image_evidence_id>", "read_only": true, "fresh_snapshot": true, "source": "wechat_index_probe+v-local-cli_private_cache", "generates_new_results": false, "private_ipc": false, "network": false},
 		"ocr-search":        map[string]any{"usage": "v-local-cli ocr-search [--account NAME] [--fresh] [--chat USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] <关键词>", "read_only": true, "fresh_snapshot": true, "source": "wechat_index_probe+v-local-cli_private_cache", "all_time_window_only": true, "unbounded_limit_value": 0, "option_constraints": queryLimitOptionConstraints(200, 5000), "private_ipc": false, "network": false},
-		"stats":             map[string]any{"usage": "v-local-cli stats [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--top N] <username>", "read_only": true, "fresh_snapshot": true, "loads_message_content": false},
+		"stats":             map[string]any{"usage": "v-local-cli stats [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--date YYYY-MM-DD|today|yesterday | --last-24h | --all] [--top N] [username]", "read_only": true, "fresh_snapshot": true, "scope_without_username": "all_recognized_chats", "natural_day_option": "--date", "rolling_24_hours_option": "--last-24h", "loads_message_content": false, "cross_chat_rank_field": "chats"},
 		"moments-contacts":  map[string]any{"usage": "v-local-cli moments-contacts [--account NAME] [--fresh] [--limit N] [关键词]", "read_only": true, "fresh_snapshot": true, "scope": "locally_retained_only"},
 		"moments":           map[string]any{"usage": "v-local-cli moments [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--resolve-media] <username>", "read_only": true, "fresh_snapshot": true, "all_time_window_only": true, "unbounded_limit_value": 0, "option_constraints": queryLimitOptionConstraints(200, 5000), "remote_fetch": false, "includes": "post,visible_likes,visible_comments,replies,comment_media", "interaction_scope": "locally_retained_visible_only", "complete_interaction_history": false},
 		"moments-search":    map[string]any{"usage": "v-local-cli moments-search [--account NAME] [--fresh] [--contact USERNAME] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--limit N] [--resolve-media] <关键词>", "read_only": true, "fresh_snapshot": true, "all_time_window_only": true, "unbounded_limit_value": 0, "option_constraints": queryLimitOptionConstraints(200, 5000), "remote_fetch": false, "searches_interactions": true, "interaction_scope": "locally_retained_visible_only", "complete_interaction_history": false},
@@ -2952,7 +3076,7 @@ func writeHelp(writer io.Writer) {
 		"accounts", "status", "provider", "install", "doctor", "capabilities", "setup", "refresh", "forget", "gc",
 		"contacts", "resolve-contact", "sessions", "unread", "members", "favorites", "new-messages", "index",
 		"daemon",
-		"history", "search", "voice-status", "voice-transcribe", "voice-search", "ocr-status", "ocr-file",
+		"messages", "history", "search", "voice-status", "voice-transcribe", "voice-search", "ocr-status", "ocr-file",
 		"ocr-recognize", "ocr-read", "ocr-search", "stats", "moments-contacts", "moments", "moments-search",
 		"official-accounts", "official-history", "official-search", "official-article", "export", "export-media",
 		"export-chat-image", "recover-chat-image", "export-moment-media", "schema",
