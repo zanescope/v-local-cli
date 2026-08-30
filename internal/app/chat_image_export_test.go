@@ -20,6 +20,23 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func assertWXGFDecoderDiagnostics(t *testing.T, raw any) {
+	t.Helper()
+	diagnostics, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("WXGF 解码器诊断缺失或类型错误：%T %v", raw, raw)
+	}
+	if diagnostics["format"] != "wxgf" || diagnostics["status_scope"] != "public_cli_build" ||
+		diagnostics["binary_presence_status"] != "not_evaluated" ||
+		diagnostics["binary_presence_reason"] != "public_cli_does_not_inspect_path" ||
+		diagnostics["path_auto_discovery"] != false || diagnostics["public_cli_integration_status"] != "not_wired" ||
+		diagnostics["qualification_interface_status"] != "explicit_test_only" ||
+		diagnostics["production_qualification_status"] != "not_qualified" ||
+		diagnostics["qualification_success_enables_public_export"] != false {
+		t.Fatalf("WXGF 解码器诊断扩大了公共构建能力：%v", diagnostics)
+	}
+}
+
 func createChatImageExportFixture(t *testing.T) (string, string, []byte) {
 	t.Helper()
 	snapshot := t.TempDir()
@@ -568,6 +585,7 @@ func TestExportChatImageDoesNotRecommendRedownloadWhenHigherQualityIsWXGF(t *tes
 		data["higher_quality_detected_format"] != "wxgf" || data["higher_quality_recovery_action"] != "do_not_request_redownload_same_candidate" {
 		t.Fatalf("没有区分 WXGF high 缓存档位与 higher-tier 缺失：%v", data)
 	}
+	assertWXGFDecoderDiagnostics(t, data["higher_quality_decoder_diagnostics"])
 	exported, err := os.ReadFile(outputPath)
 	if err != nil || !bytes.Equal(exported, expected) {
 		t.Fatalf("WXGF high 缓存档位旁路下的缩略图内容异常：bytes=%d err=%v", len(exported), err)
@@ -577,6 +595,11 @@ func TestExportChatImageDoesNotRecommendRedownloadWhenHigherQualityIsWXGF(t *tes
 func TestExportChatImageClassifiesWXGFDecoderUnavailable(t *testing.T) {
 	home := testHome(t)
 	t.Setenv("V_LOCAL_CLI_HOME", home)
+	fakeDecoderDirectory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeDecoderDirectory, "ffmpeg.exe"), []byte("not-a-decoder"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeDecoderDirectory)
 	snapshot, accountPath, _ := createChatImageExportFixture(t)
 	stem := strings.Repeat("a", 32)
 	mediaPath := filepath.Join(accountPath, "msg", "attach", "segment-a", "segment-b", stem+".dat")
@@ -597,14 +620,19 @@ func TestExportChatImageClassifiesWXGFDecoderUnavailable(t *testing.T) {
 		t.Fatal("WXGF 在没有已验收解码器时不应伪装为可预览图片")
 	}
 	details := failure["error"].(map[string]any)["details"].(map[string]any)
+	hint := failure["error"].(map[string]any)["hint"].(string)
 	if details["local_resolution_status"] != "decoder_unavailable" || details["detected_format"] != "wxgf" ||
 		details["quality_tier"] != "medium" || details["recovery_action"] != "do_not_request_redownload_same_candidate" || details["network_access_performed"] != false {
 		t.Fatalf("WXGF 诊断异常：%v", details)
+	}
+	if !strings.Contains(hint, "不会检查 PATH") || !strings.Contains(hint, "资格测试成功也不会自动启用导出") {
+		t.Fatalf("WXGF 提示没有区分系统二进制与公共接线状态：%q", hint)
 	}
 	if details["quality_basis"] != "hardlink_cache_filename_variant" || details["quality_claim_scope"] != "wechat_cache_variant_only" ||
 		details["source_original_dimensions_known"] != false {
 		t.Fatalf("WXGF 错误路径扩大了图片质量声明：%v", details)
 	}
+	assertWXGFDecoderDiagnostics(t, details["decoder_diagnostics"])
 	meta := failure["meta"].(map[string]any)
 	if meta["generation_id"] != "generation-wxgf" || meta["snapshot_manifest_sha256"] != "manifest-wxgf" {
 		t.Fatalf("WXGF 错误路径未绑定到解析它的快照：%v", meta)

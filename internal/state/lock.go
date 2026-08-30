@@ -27,7 +27,7 @@ func validAccountID(value string) bool {
 	return true
 }
 
-// AcquireAccountLock 使用操作系统文件锁串行化同一账号的 setup 与 refresh。
+// AcquireAccountLock 使用操作系统文件锁串行化同一账号的快照变更与严格快照绑定操作。
 func AcquireAccountLock(accountID string) (*AccountLock, error) {
 	if !validAccountID(accountID) {
 		return nil, errors.New("账号标识无效")
