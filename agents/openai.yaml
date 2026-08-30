@@ -1,4 +1,4 @@
 interface:
   display_name: "v-local-cli 本地微信证据"
-  short_description: "按时间检索本地聊天、朋友圈、公众号及媒体证据并保留来源"
-  default_prompt: "Use $v-local-cli 按最小必要账号与时间范围检索我已授权的本地聊天、朋友圈或公众号记录，并说明媒体归属和覆盖边界。"
+  short_description: "查询分析本地聊天、收藏、朋友圈、公众号及媒体证据并保留来源"
+  default_prompt: "Use $v-local-cli 按最小必要账号与时间范围查询分析我已授权的本地聊天、收藏、朋友圈或公众号记录；需要跨会话话题分析时区分自然日与滚动 24 小时，并说明媒体归属和覆盖边界。"

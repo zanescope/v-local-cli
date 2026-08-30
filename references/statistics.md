@@ -1,9 +1,9 @@
 # 基础统计契约
 
-`stats` 对选定账号、会话和时间范围执行确定性聚合，不读取或返回 `message_content`。它只查询消息类型、发送者编号和时间字段，适合先回答数量与分布问题，再按需用 `history` 获取正文证据。
+`stats` 对选定账号、可选会话和时间范围执行确定性聚合，不读取或返回 `message_content`。它只查询消息类型、发送者编号和时间字段，适合先回答数量与分布问题，再按需用 `history` 或 `messages` 获取正文证据。
 
 ```text
-v-local-cli stats [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--all] [--top N] <username>
+v-local-cli stats [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--date YYYY-MM-DD|today|yesterday | --last-24h | --all] [--top N] [username]
 ```
 
 ## 公共字段
@@ -41,9 +41,20 @@ v-local-cli stats [--account NAME] [--fresh] [--start YYYY-MM-DD] [--end YYYY-MM
 
 `--top 20` 是默认展示范围；`--top 0` 返回全部已识别成员。排行只表示选定本地时间范围内的发言数量，不表示内容质量、贡献、影响力或关系强弱。
 
+## 跨会话统计
+
+省略 username 时扫描所有能够由联系人、会话或 `Name2Id` 与哈希表名稳定绑定的消息表，返回 `scope=all_chats`：
+
+- `active_chats`、`source_tables`：选定范围内的活跃会话数与成功扫描表数；
+- `chats`：按非系统消息数降序的会话排行，包含稳定 `chat`、显示名、会话类型、消息/系统/媒体数量、活跃天数及实际起止时间；
+- `--top 20` 默认只展示前 20 个会话，`--top 0` 展示全部已识别活跃会话；
+- `statistic_basis.complete=false` 时检查 `unknown_tables` 和 `failed_tables`，不得把结果描述成当前快照的全部会话。
+
+`--date YYYY-MM-DD|today|yesterday` 选择一个本地自然日；`--last-24h` 选择截至执行时刻的滚动 24 小时。两者含义不同且不能与 `--start`、`--end`、`--all` 混用。精确边界、时区与秒数读取 `meta.time_window`。
+
 ## 覆盖边界
 
 - 所有统计只覆盖当前已发布快照中仍留存、成功解密且当前结构适配器能读取的消息表。
 - `--all` 取消日期限制；统计命令本身不设消息条数上限。
-- `source_databases` 是实际包含目标会话表并成功扫描的数据库数量。
+- 单会话 `source_databases` 是实际包含目标会话表并成功扫描的数据库数量；跨会话时是成功打开并检查的消息数据库数量。
 - 比较不同会话时使用相同账号、日期范围、时区和系统消息排除规则。

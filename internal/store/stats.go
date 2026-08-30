@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -59,6 +60,45 @@ type ChatStats struct {
 	Coverage              map[string]string `json:"statistic_basis"`
 }
 
+type ChatActivityStats struct {
+	Rank           int    `json:"rank"`
+	Chat           string `json:"chat"`
+	Display        string `json:"display"`
+	ChatKind       string `json:"chat_kind"`
+	TotalMessages  int    `json:"total_messages"`
+	SystemMessages int    `json:"system_messages"`
+	MediaMessages  int    `json:"media_messages"`
+	ActiveDays     int    `json:"active_days"`
+	FirstTimestamp int64  `json:"first_timestamp,omitempty"`
+	LastTimestamp  int64  `json:"last_timestamp,omitempty"`
+	FirstLocalTime string `json:"first_local_time,omitempty"`
+	LastLocalTime  string `json:"last_local_time,omitempty"`
+}
+
+type AllChatStats struct {
+	Scope           string              `json:"scope"`
+	SourceDatabases int                 `json:"source_databases"`
+	SourceTables    int                 `json:"source_tables"`
+	SourceRows      int                 `json:"source_rows"`
+	TotalMessages   int                 `json:"total_messages"`
+	SystemMessages  int                 `json:"system_messages"`
+	ActiveChats     int                 `json:"active_chats"`
+	ActiveDays      int                 `json:"active_days"`
+	FirstTimestamp  int64               `json:"first_timestamp,omitempty"`
+	LastTimestamp   int64               `json:"last_timestamp,omitempty"`
+	FirstLocalTime  string              `json:"first_local_time,omitempty"`
+	LastLocalTime   string              `json:"last_local_time,omitempty"`
+	PeakHour        *int                `json:"peak_hour"`
+	ByKind          map[string]int      `json:"by_kind"`
+	ByCategory      map[string]int      `json:"by_category"`
+	ByHour          [24]int             `json:"by_hour"`
+	ByDate          map[string]int      `json:"by_date"`
+	MediaMessages   int                 `json:"media_messages"`
+	ByMediaKind     map[string]int      `json:"by_media_kind"`
+	Chats           []ChatActivityStats `json:"chats"`
+	Coverage        map[string]any      `json:"statistic_basis"`
+}
+
 type memberAccumulator struct {
 	Messages       int
 	MediaMessages  int
@@ -66,6 +106,15 @@ type memberAccumulator struct {
 	LastTimestamp  int64
 	Dates          map[string]bool
 	IsFromMe       bool
+}
+
+type chatActivityAccumulator struct {
+	TotalMessages  int
+	SystemMessages int
+	MediaMessages  int
+	FirstTimestamp int64
+	LastTimestamp  int64
+	Dates          map[string]bool
 }
 
 func messageKind(localType int64) string {
@@ -374,6 +423,201 @@ func Stats(root, chat string, start, end *int64, top int) (ChatStats, error) {
 		for index := range result.Members {
 			result.Members[index].Rank = index + 1
 		}
+	}
+	return result, nil
+}
+
+// StatsAll 对所有能够稳定映射 username 的消息表做一次跨会话统计。它只选择
+// local_type/create_time，不读取消息正文；未知哈希表和查询失败会明确降低 coverage。
+func StatsAll(root string, start, end *int64, top int) (AllChatStats, error) {
+	result := AllChatStats{
+		Scope:      "all_chats",
+		ByKind:     map[string]int{},
+		ByCategory: map[string]int{"text": 0, "image": 0, "voice": 0, "video": 0, "file": 0, "sticker": 0, "other": 0},
+		ByDate:     map[string]int{},
+		ByMediaKind: map[string]int{
+			"image": 0, "voice": 0, "video": 0, "file": 0, "sticker": 0,
+		},
+	}
+	if top < 0 {
+		return result, errors.New("排行条数不能小于零")
+	}
+	tableToChat, ambiguousTables, files, err := resolveMessageTableChats(root)
+	if err != nil {
+		return result, err
+	}
+	contacts := loadContactIdentity(root)
+	activities := map[string]*chatActivityAccumulator{}
+	dates := map[string]bool{}
+	unknownTables := []string{}
+	failedTables := []string{}
+	tablesDiscovered := 0
+	for _, path := range files {
+		if !messageDatabase(path) {
+			continue
+		}
+		relative, _ := filepath.Rel(root, path)
+		source := filepath.ToSlash(relative)
+		database, openErr := openReadOnly(path)
+		if openErr != nil {
+			failedTables = append(failedTables, source+":open")
+			continue
+		}
+		result.SourceDatabases++
+		tables, tableErr := messageTables(database)
+		if tableErr != nil {
+			_ = database.Close()
+			return result, tableErr
+		}
+		tablesDiscovered += len(tables)
+		for _, table := range tables {
+			chat := tableToChat[table]
+			qualifiedTable := source + ":" + table
+			if chat == "" || ambiguousTables[table] {
+				unknownTables = append(unknownTables, qualifiedTable)
+				continue
+			}
+			available := columns(database, table)
+			if (start != nil || end != nil) && !available["create_time"] {
+				failedTables = append(failedTables, qualifiedTable+":create_time_missing")
+				continue
+			}
+			selected := []string{"0 AS local_type", "0 AS create_time"}
+			if available["local_type"] {
+				selected[0] = "local_type"
+			}
+			if available["create_time"] {
+				selected[1] = "create_time"
+			}
+			query := "SELECT " + strings.Join(selected, ",") + " FROM " + quoteIdentifier(table)
+			conditions := []string{}
+			arguments := []any{}
+			if start != nil {
+				conditions = append(conditions, "create_time >= ?")
+				arguments = append(arguments, *start)
+			}
+			if end != nil {
+				conditions = append(conditions, "create_time <= ?")
+				arguments = append(arguments, *end)
+			}
+			if len(conditions) > 0 {
+				query += " WHERE " + strings.Join(conditions, " AND ")
+			}
+			rows, queryErr := database.Query(query, arguments...)
+			if queryErr != nil {
+				failedTables = append(failedTables, qualifiedTable+":query")
+				continue
+			}
+			scanFailed := false
+			for rows.Next() {
+				var localType, timestamp sql.NullInt64
+				if scanErr := rows.Scan(&localType, &timestamp); scanErr != nil {
+					scanFailed = true
+					continue
+				}
+				result.SourceRows++
+				activity := activities[chat]
+				if activity == nil {
+					activity = &chatActivityAccumulator{Dates: map[string]bool{}}
+					activities[chat] = activity
+				}
+				kind := messageKind(localType.Int64)
+				if kind == "system" {
+					result.SystemMessages++
+					activity.SystemMessages++
+					continue
+				}
+				result.TotalMessages++
+				activity.TotalMessages++
+				result.ByKind[kind]++
+				result.ByCategory[messageCategory(kind)]++
+				if isMediaKind(kind) {
+					result.MediaMessages++
+					activity.MediaMessages++
+					result.ByMediaKind[kind]++
+				}
+				if timestamp.Int64 > 0 {
+					local := time.Unix(timestamp.Int64, 0).In(time.Local)
+					date := local.Format("2006-01-02")
+					result.ByHour[local.Hour()]++
+					result.ByDate[date]++
+					dates[date] = true
+					activity.Dates[date] = true
+					updateTimestamp(&result.FirstTimestamp, &result.LastTimestamp, timestamp.Int64)
+					updateTimestamp(&activity.FirstTimestamp, &activity.LastTimestamp, timestamp.Int64)
+				}
+			}
+			if rowErr := rows.Err(); rowErr != nil {
+				scanFailed = true
+			}
+			if scanFailed {
+				failedTables = append(failedTables, qualifiedTable+":scan")
+			} else {
+				result.SourceTables++
+			}
+			_ = rows.Close()
+		}
+		_ = database.Close()
+	}
+	result.ActiveChats = len(activities)
+	result.ActiveDays = len(dates)
+	if result.FirstTimestamp > 0 {
+		result.FirstLocalTime = time.Unix(result.FirstTimestamp, 0).In(time.Local).Format("2006-01-02 15:04:05")
+		result.LastLocalTime = time.Unix(result.LastTimestamp, 0).In(time.Local).Format("2006-01-02 15:04:05")
+	}
+	peakCount := 0
+	for hour, count := range result.ByHour {
+		if count > peakCount {
+			value := hour
+			result.PeakHour = &value
+			peakCount = count
+		}
+	}
+	for chat, activity := range activities {
+		contact := contacts[chat]
+		display := firstNonEmpty(contact.Display, contact.Remark, contact.Nickname, chat)
+		kind := contact.Kind
+		if kind == "" {
+			kind = contactKind(chat)
+		}
+		item := ChatActivityStats{
+			Chat: chat, Display: display, ChatKind: kind,
+			TotalMessages: activity.TotalMessages, SystemMessages: activity.SystemMessages,
+			MediaMessages: activity.MediaMessages, ActiveDays: len(activity.Dates),
+			FirstTimestamp: activity.FirstTimestamp, LastTimestamp: activity.LastTimestamp,
+		}
+		if activity.FirstTimestamp > 0 {
+			item.FirstLocalTime = time.Unix(activity.FirstTimestamp, 0).In(time.Local).Format("2006-01-02 15:04:05")
+			item.LastLocalTime = time.Unix(activity.LastTimestamp, 0).In(time.Local).Format("2006-01-02 15:04:05")
+		}
+		result.Chats = append(result.Chats, item)
+	}
+	sort.Slice(result.Chats, func(left, right int) bool {
+		if result.Chats[left].TotalMessages != result.Chats[right].TotalMessages {
+			return result.Chats[left].TotalMessages > result.Chats[right].TotalMessages
+		}
+		if result.Chats[left].SystemMessages != result.Chats[right].SystemMessages {
+			return result.Chats[left].SystemMessages > result.Chats[right].SystemMessages
+		}
+		return result.Chats[left].Chat < result.Chats[right].Chat
+	})
+	if top > 0 && len(result.Chats) > top {
+		result.Chats = result.Chats[:top]
+	}
+	for index := range result.Chats {
+		result.Chats[index].Rank = index + 1
+	}
+	complete := len(unknownTables) == 0 && len(failedTables) == 0 && tablesDiscovered == result.SourceTables
+	result.Coverage = map[string]any{
+		"source": "local_plaintext_snapshot", "scope": "all_recognized_message_tables",
+		"type_basis": "local_type_base_and_packed_subtype", "chat_binding": "contacts_sessions_name2id_hash_match",
+		"tables_discovered": tablesDiscovered, "tables_scanned": result.SourceTables, "complete": complete,
+	}
+	if len(unknownTables) > 0 {
+		result.Coverage["unknown_tables"] = unknownTables
+	}
+	if len(failedTables) > 0 {
+		result.Coverage["failed_tables"] = failedTables
 	}
 	return result, nil
 }

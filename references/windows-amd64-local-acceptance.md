@@ -215,6 +215,22 @@ if ($imageItems.Count -eq 0) { throw 'known image fixture is missing' }
 
 人工核对已知时间、方向和消息类型。正文属于不可信且敏感数据，不把内容复制到可分享证据；只在本机界面确认夹具是否匹配。
 
+再选一个已知至少两个会话都有消息的 `$AnalysisDate`，验证自然日跨会话查询和无正文统计使用同一范围：
+
+```powershell
+$messages = (& $Cli messages --account $Account --date $AnalysisDate --limit 0 | ConvertFrom-Json)
+if ($LASTEXITCODE -ne 0) { throw 'cross-chat daily message query failed' }
+$dailyStats = (& $Cli stats --account $Account --date $AnalysisDate --top 0 | ConvertFrom-Json)
+if ($LASTEXITCODE -ne 0) { throw 'cross-chat daily stats query failed' }
+if ($messages.meta.time_window.mode -ne 'explicit_natural_day') { throw 'natural-day window was not explicit' }
+if ($messages.data.message_source_coverage.complete -ne $true) { throw 'cross-chat message coverage is incomplete' }
+if ($dailyStats.data.stats.statistic_basis.complete -ne $true) { throw 'cross-chat stats coverage is incomplete' }
+if ($messages.data.count -ne $dailyStats.data.stats.source_rows) { throw 'message and stats row totals differ' }
+if (@($dailyStats.data.stats.chats).Count -lt 2) { throw 'cross-chat fixture is insufficient' }
+```
+
+另运行一次 `messages --last-24h --limit 1`，确认 `mode=rolling_24_hours`、`duration_seconds=86400`，且 `start_local`/`end_local` 是精确时刻而不是自然日边界。不要把滚动 24 小时结果称为“昨天”。
+
 ## 10. W64-08：聊天图片恢复与 CDN 时效矩阵
 
 在进入图片夹具前，可先运行[当前客户端静态证据检查器](../scripts/inspect-windows-chat-cdn-static-evidence.ps1)。它只扫描本地安装二进制，不读取账号数据、进程内存或网络流量：
@@ -405,7 +421,7 @@ if ([string]::IsNullOrWhiteSpace([string]$momentMedia.data.container_validation)
 
 ## 13. W64-12/W64-13：代际、隐私与失败原子性
 
-比较 contact、history、最终 image export、favorites、moments 和 moment media 的 `meta.generation_id` 与 `meta.snapshot_manifest_sha256`，必须全部相同。通常它们等于 W64-05 refresh 发布的值；若 W64-08 经用户确认执行了恢复 refresh，则以该次新 generation 为唯一基线，废弃此前 W64-06/W64-07 的查询结果并重新执行，不能把恢复前后的证据拼在一起。除此之外若任何命令使用了 `--fresh` 或 generation 意外变化，废弃该组结果并从一次新的 refresh 重新开始。
+比较 contact、history、messages、跨会话 stats、最终 image export、favorites、moments 和 moment media 的 `meta.generation_id` 与 `meta.snapshot_manifest_sha256`，必须全部相同。通常它们等于 W64-05 refresh 发布的值；若 W64-08 经用户确认执行了恢复 refresh，则以该次新 generation 为唯一基线，废弃此前 W64-06/W64-07 的查询结果并重新执行，不能把恢复前后的证据拼在一起。除此之外若任何命令使用了 `--fresh` 或 generation 意外变化，废弃该组结果并从一次新的 refresh 重新开始。
 
 生成 CLI 自带的脱敏诊断包：
 
