@@ -28,7 +28,7 @@ const maxChatImageRecoveryPlainBytes = 64 * 1024 * 1024
 var chatImageRecoveryNow = time.Now
 var inspectChatImageRemoteRecovery = store.InspectChatImageRemoteRecovery
 var recoverChatImageRemote = store.RecoverChatImageRemote
-var removeChatImageRecoveryTemporary = os.Remove
+var removeChatImageRecoveryTemporary = func(string) error { return nil }
 
 type chatImageRecoveryConsentRecord struct {
 	SchemaVersion          int    `json:"schema_version"`
@@ -63,6 +63,20 @@ type chatImageRecoveryPublishError struct {
 
 func (err *chatImageRecoveryPublishError) Error() string { return err.kind }
 func (err *chatImageRecoveryPublishError) Unwrap() error { return err.cause }
+
+type chatImageRecoveryOutputTarget struct {
+	path          string
+	name          string
+	bindingSHA256 string
+	directory     *chatImageRecoveryOutputDirectory
+}
+
+func (target *chatImageRecoveryOutputTarget) Close() error {
+	if target == nil || target.directory == nil {
+		return nil
+	}
+	return target.directory.Close()
+}
 
 func chatImageRecoveryErrorDetails(values map[string]any) map[string]any {
 	if values == nil {
@@ -105,11 +119,41 @@ func newChatImageRecoveryChallengeID() (string, error) {
 	return hex.EncodeToString(value), nil
 }
 
-func chatImageRecoveryOutputSHA256(path string) string {
+func chatImageRecoveryOutputSHA256(path, directoryIdentity string) string {
 	absolute, _ := filepath.Abs(path)
 	canonical := filepath.Clean(absolute)
-	digest := sha256.Sum256([]byte(canonical))
+	digest := sha256.Sum256([]byte("v-local-cli/chat-image-recovery-output/v1\x00" + canonical + "\x00" + directoryIdentity))
 	return hex.EncodeToString(digest[:])
+}
+
+func openChatImageRecoveryOutputTarget(path string) (*chatImageRecoveryOutputTarget, error) {
+	directory, identity, err := openChatImageRecoveryOutputDirectory(filepath.Dir(path))
+	if err != nil {
+		return nil, &commandError{
+			typeName: "invalid_output", message: "恢复图片输出父目录不安全",
+			hint: "使用已存在、位于本机且整条路径不含符号链接或重解析点的目录。", code: 2,
+		}
+	}
+	return &chatImageRecoveryOutputTarget{
+		path: path, name: filepath.Base(path), directory: directory,
+		bindingSHA256: chatImageRecoveryOutputSHA256(path, identity),
+	}, nil
+}
+
+func requireExistingChatImageRecoveryOutputParent(path string) error {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	parent := filepath.Dir(filepath.Clean(absolute))
+	info, err := os.Lstat(parent)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return &commandError{
+			typeName: "invalid_output", message: "恢复图片输出父目录必须已经存在",
+			hint: "先创建一个位于本机且整条路径不含符号链接或重解析点的目录。", code: 2,
+		}
+	}
+	return nil
 }
 
 func chatImageRecoveryObservedAt(value state.AccountState) string {
@@ -205,7 +249,7 @@ func pruneExpiredChatImageRecoveryConsents(directory string, now time.Time) erro
 func issueChatImageRecoveryConsent(
 	value state.AccountState,
 	inspection store.ChatImageRemoteRecoveryInspection,
-	output string,
+	outputBindingSHA256 string,
 ) (chatImageRecoveryConsentRecord, error) {
 	observedAt := chatImageRecoveryObservedAt(value)
 	if _, err := time.Parse(time.RFC3339Nano, observedAt); err != nil {
@@ -213,7 +257,8 @@ func issueChatImageRecoveryConsent(
 	}
 	if value.AccountID == "" || value.GenerationID == "" || !validChatImageRecoverySHA256(value.SnapshotManifestSHA256) ||
 		inspection.EvidenceID == "" || !validChatImageRecoverySHA256(inspection.MessageBindingSHA256) ||
-		!validChatImageRecoverySHA256(inspection.CandidateDescriptorSHA256) || inspection.CandidateTier == "" || output == "" {
+		!validChatImageRecoverySHA256(inspection.CandidateDescriptorSHA256) || inspection.CandidateTier == "" ||
+		!validChatImageRecoverySHA256(outputBindingSHA256) {
 		return chatImageRecoveryConsentRecord{}, errors.New("恢复授权绑定信息不完整")
 	}
 	directory, err := state.EnsureRecoveryConsentPath(value.AccountID)
@@ -235,7 +280,7 @@ func issueChatImageRecoveryConsent(
 			GenerationID: value.GenerationID, SnapshotManifestSHA256: value.SnapshotManifestSHA256,
 			MessageBindingSHA256: inspection.MessageBindingSHA256, DescriptorSHA256: inspection.CandidateDescriptorSHA256,
 			CandidateTier: inspection.CandidateTier, LocalQualityTier: inspection.LocalQualityTier,
-			OutputPathSHA256: chatImageRecoveryOutputSHA256(output), ObservedAt: observedAt,
+			OutputPathSHA256: outputBindingSHA256, ObservedAt: observedAt,
 			IssuedAt: issuedAt.Format(time.RFC3339Nano), ExpiresAt: issuedAt.Add(chatImageRecoveryConsentTTL).Format(time.RFC3339Nano),
 		}
 		path := filepath.Join(directory, challengeID+".pending.json")
@@ -326,31 +371,44 @@ func consumeChatImageRecoveryConsent(accountID, challengeID string) (chatImageRe
 	return record, nil
 }
 
-func removeRecoveryTemporary(path string) error {
-	if path == "" {
-		return nil
+func createChatImageRecoveryTemporaryFile(target *chatImageRecoveryOutputTarget) (*os.File, string, string, error) {
+	for attempt := 0; attempt < 4; attempt++ {
+		suffix, err := newChatImageRecoveryChallengeID()
+		if err != nil {
+			return nil, "", "", err
+		}
+		name := ".v-local-cli-output-" + suffix + ".tmp"
+		file, err := target.directory.CreateTemporary(name)
+		if err == nil {
+			return file, name, filepath.Join(filepath.Dir(target.path), name), nil
+		}
+		if !chatImageRecoveryTemporaryExists(err) {
+			return nil, "", "", err
+		}
 	}
-	err := removeChatImageRecoveryTemporary(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return nil, "", "", errors.New("无法生成唯一恢复临时文件")
 }
 
-func publishChatImageRecoveryPayload(target string, payload []byte) (bool, error) {
-	file, temporary, err := createTemporaryFileNear(target)
+func removeRecoveryTemporary(target *chatImageRecoveryOutputTarget, file *os.File, name, path string) error {
+	hookErr := removeChatImageRecoveryTemporary(path)
+	var removeErr error
+	if hookErr == nil {
+		removeErr = target.directory.RemoveTemporary(file, name)
+	}
+	closeErr := file.Close()
+	return errors.Join(hookErr, removeErr, closeErr)
+}
+
+func publishChatImageRecoveryPayload(target *chatImageRecoveryOutputTarget, payload []byte) (bool, error) {
+	file, temporaryName, temporaryPath, err := createChatImageRecoveryTemporaryFile(target)
 	if err != nil {
 		return false, err
 	}
 	cleanup := func(cause error) (bool, error) {
-		_ = file.Close()
-		if cleanupErr := removeRecoveryTemporary(temporary); cleanupErr != nil {
+		if cleanupErr := removeRecoveryTemporary(target, file, temporaryName, temporaryPath); cleanupErr != nil {
 			return false, &chatImageRecoveryPublishError{kind: "temporary_cleanup_failed", cause: errors.Join(cause, cleanupErr)}
 		}
 		return false, cause
-	}
-	if err := secureRecoveryTemporaryFile(temporary); err != nil {
-		return cleanup(err)
 	}
 	if written, err := file.Write(payload); err != nil || written != len(payload) {
 		if err == nil {
@@ -361,13 +419,10 @@ func publishChatImageRecoveryPayload(target string, payload []byte) (bool, error
 	if err := file.Sync(); err != nil {
 		return cleanup(err)
 	}
-	if err := file.Close(); err != nil {
+	if err := target.directory.LinkTemporary(file, temporaryName, target.name); err != nil {
 		return cleanup(err)
 	}
-	if err := os.Link(temporary, target); err != nil {
-		return cleanup(err)
-	}
-	if err := removeRecoveryTemporary(temporary); err != nil {
+	if err := removeRecoveryTemporary(target, file, temporaryName, temporaryPath); err != nil {
 		return true, &chatImageRecoveryPublishError{kind: "temporary_cleanup_failed", outputCommitted: true, cause: err}
 	}
 	return true, nil
@@ -528,10 +583,18 @@ func runRecoverChatImage(args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	target, err := prepareOutputTarget(*output, false)
+	if err := requireExistingChatImageRecoveryOutputParent(*output); err != nil {
+		return nil, err
+	}
+	targetPath, err := prepareOutputTarget(*output, false)
 	if err != nil {
 		return nil, err
 	}
+	target, err := openChatImageRecoveryOutputTarget(targetPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = target.Close() }()
 	evidenceID := set.Args()[0]
 	if strings.TrimSpace(*consent) == "" {
 		bundle, _, err := state.LoadSecretsOptional(value.AccountID)
@@ -564,7 +627,7 @@ func runRecoverChatImage(args []string) (any, error) {
 		if inspection.AcquisitionStatus != "direct_https_candidate_available" {
 			return nil, errorWithGeneration(chatImageRecoveryUnavailableError(inspection, chatImageRecoveryObservedAt(value)), value)
 		}
-		record, err := issueChatImageRecoveryConsent(value, inspection, target)
+		record, err := issueChatImageRecoveryConsent(value, inspection, target.bindingSHA256)
 		if err != nil {
 			return nil, errorWithGeneration(&commandError{typeName: "chat_image_recovery_consent_issue_failed", message: "无法创建私有恢复授权 challenge", hint: "检查账号私有状态目录权限后重试。", details: chatImageRecoveryErrorDetails(map[string]any{"network_access_performed": false}), code: 5}, value)
 		}
@@ -603,7 +666,7 @@ func runRecoverChatImage(args []string) (any, error) {
 	if issuedParseErr != nil || expiresParseErr != nil || now.Before(issuedAt) || !now.Before(expiresAt) {
 		return nil, errorWithGeneration(&commandError{typeName: "chat_image_recovery_consent_expired", message: "恢复授权已过期", hint: "重新生成 challenge 并取得新的明确授权。", details: chatImageRecoveryTemporalErrorDetails(map[string]any{"network_access_performed": false, "authorization_consumed": true, "new_authorization_required": true, "descriptor_expiry_known": false, "descriptor_expiry_status": "not_evaluated"}, record.ObservedAt), code: 5}, value)
 	}
-	if record.EvidenceID != evidenceID || record.OutputPathSHA256 != chatImageRecoveryOutputSHA256(target) {
+	if record.EvidenceID != evidenceID || record.OutputPathSHA256 != target.bindingSHA256 {
 		return nil, errorWithGeneration(&commandError{typeName: "chat_image_recovery_consent_scope_mismatch", message: "恢复授权与当前消息、图片或输出目标不匹配", hint: "重新生成与当前操作严格绑定的 challenge。", details: chatImageRecoveryTemporalErrorDetails(map[string]any{"network_access_performed": false, "authorization_consumed": true, "new_authorization_required": true, "descriptor_expiry_known": false, "descriptor_expiry_status": "not_evaluated"}, record.ObservedAt), code: 5}, value)
 	}
 	if record.GenerationID != value.GenerationID || record.SnapshotManifestSHA256 != value.SnapshotManifestSHA256 {
@@ -632,7 +695,7 @@ func runRecoverChatImage(args []string) (any, error) {
 		return nil, errorWithGeneration(&commandError{typeName: "chat_image_recovery_output_failed", message: "无法安全发布恢复图片", hint: "没有复用授权；修复输出路径后生成新 challenge。", details: chatImageRecoveryErrorDetails(map[string]any{"network_access_performed": true, "authorization_consumed": true, "output_committed": committed, "remote_descriptor_status": "verified_at_request_time", "descriptor_expiry_known": false, "descriptor_expiry_status": "unknown_future", "observed_at": record.ObservedAt, "retrieved_at": artifact.RetrievedAt}), code: 5}, value)
 	}
 	return outputWithGeneration(map[string]any{
-		"account": value.AccountName, "evidence_id": artifact.EvidenceID, "output": target,
+		"account": value.AccountName, "evidence_id": artifact.EvidenceID, "output": target.path,
 		"chat": artifact.Chat, "local_id": artifact.LocalID, "server_id": artifact.ServerID,
 		"timestamp": artifact.Timestamp, "sort_key": artifact.SortKey,
 		"format": artifact.Format, "bytes": artifact.Bytes, "width": artifact.Width, "height": artifact.Height,

@@ -305,6 +305,43 @@ func TestRecoverChatImageRejectsOutputScopeMismatchBeforeNetwork(t *testing.T) {
 	}
 }
 
+func TestRecoverChatImageRejectsReplacedOutputDirectoryBeforeNetwork(t *testing.T) {
+	fixture := createChatImageRecoveryFixture(t)
+	challengeID, _ := recoveryChallenge(t, fixture)
+	authorizedDirectory := filepath.Dir(fixture.output)
+	displacedDirectory := authorizedDirectory + "-authorized"
+	if err := os.Rename(authorizedDirectory, displacedDirectory); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(authorizedDirectory)
+		_ = os.Rename(displacedDirectory, authorizedDirectory)
+	})
+	if err := os.Mkdir(authorizedDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	installSuccessfulChatImageRecovery(t, fixture, &calls)
+	code, _, failure := runForTest("recover-chat-image", "--account", fixture.account.AccountName, "--output", fixture.output, "--consent", challengeID, fixture.evidenceID)
+	if code == 0 || failure["error"].(map[string]any)["type"] != "chat_image_recovery_consent_scope_mismatch" || calls != 0 {
+		t.Fatalf("输出父目录替换未在联网前使授权失效：code=%d failure=%v calls=%d", code, failure, calls)
+	}
+}
+
+func TestRecoverChatImageRejectsLinkedOutputAncestorBeforeConsent(t *testing.T) {
+	fixture := createChatImageRecoveryFixture(t)
+	root := t.TempDir()
+	linked := filepath.Join(root, "linked-output")
+	if err := os.Symlink(filepath.Dir(fixture.output), linked); err != nil {
+		t.Skipf("当前环境不允许创建目录符号链接：%v", err)
+	}
+	output := filepath.Join(linked, "recovered.png")
+	code, _, failure := runForTest("recover-chat-image", "--account", fixture.account.AccountName, "--output", output, fixture.evidenceID)
+	if code == 0 || failure["error"].(map[string]any)["type"] != "invalid_output" {
+		t.Fatalf("含链接祖先的恢复输出仍签发授权：code=%d failure=%v", code, failure)
+	}
+}
+
 func TestRecoverChatImageSnapshotLockStopsBeforeConsentConsumption(t *testing.T) {
 	fixture := createChatImageRecoveryFixture(t)
 	calls := 0

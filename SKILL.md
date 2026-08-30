@@ -28,7 +28,7 @@ description: 用户要查看、搜索、统计、导出或分析本机微信（W
 |---|---|---|
 | 只读元数据 | `--version`、`schema`、`capabilities`、`status`、`accounts`、`doctor`、`provider status`、`voice-status`、`ocr-status`、`index status`、`daemon status`、所有 `--dry-run` | 任务需要时直接运行。`doctor --bundle` 另会写入脱敏文件。 |
 | 读取用户数据 | `contacts`、`resolve-contact`、`sessions`、`unread`、`members`、`favorites`、`new-messages`、`history`、`search`、`moments*`、`official-accounts`/`history`/`search`、`ocr-read`/`ocr-search`、`stats`、`refresh`、`--fresh` | 会把联系人、聊天正文、收藏、朋友圈或 OCR 文字带入 Agent 数据处理边界。首次读取前说明这一点；用户当前请求已明确要求读取时无需重复。`refresh`/`--fresh` 还会写入新的只读快照。 |
-| 需逐次授权 | `setup --allow-key-access`、`ocr-recognize`/`ocr-file --allow-private-ipc`、`official-article --allow-network`、`export-moment-media --allow-network`、`recover-chat-image --consent <challenge>` | 每次操作前单独说明影响并取得明确同意；一次同意不扩展到其他目标或后续任务。聊天图片 challenge 还会绑定账号、消息、generation、manifest、候选描述符和输出目标，并且只能消费一次。详见各领域段落。 |
+| 需逐次授权 | `setup --allow-key-access`、`ocr-recognize`/`ocr-file --allow-private-ipc`、`official-article --allow-network`、`export-moment-media --allow-network`、`recover-chat-image --consent <challenge>` | 每次操作前单独说明影响并取得明确同意；一次同意不扩展到其他目标或后续任务。聊天图片 challenge 还会绑定账号、消息、generation、manifest、候选描述符、规范化输出路径和父目录文件身份，并且只能消费一次。详见各领域段落。 |
 | 写入或删除 | `index build`、`new-messages` 创建/确认/删除 consumer、`daemon serve`/`stop`、`export`/`export-chat-image`/`recover-chat-image`/`export-media`/`export-moment-media`（写入文件）、`install`、`gc`、`forget --yes`、`setup --cancel-all-external-workflows` | 用户明确要求或当前任务直接需要时执行；索引和游标只写账号私有派生状态，不改微信或快照；已有输出默认返回 `output_exists`；`forget` 必须先 `--dry-run` 并取得确认。全局 checkpoint 清理也必须取得明确确认，并只用于损坏记录无法按账号清理时。 |
 
 ## 选择调用入口
@@ -367,6 +367,8 @@ v-local-cli export-chat-image --account <account> --output <output-file> <image_
 - `remote_descriptor_status=present_expiry_unknown` 只说明消息记录中保留了某些缓存档位的 CDN 描述符，不能证明现在仍可用。`remote_descriptor_parse_status=parsed_unverified_protocol` 仅表示 16 字节 key、请求引用，以及“明文 MD5”或“长度 + 成对尺寸”至少一组绑定材料通过本地结构检查；XML 中可选长度或宽高的 `0` 占位按“未提供”处理，尺寸即使存在也只用于绑定响应，绝不是清晰度门槛。`parsed_partial_unverified_protocol`、`present_incomplete`、`present_invalid` 分别表示部分候选可解析、缺必需材料或结构非法。这些状态本身都不能证明时效或原始质量。
 - 旧的 loopback TLS 加解密夹具只证明 `synthetic_crypto_binding_harness_only`：它验证 AES/容器/描述符绑定安全壳，不代表桌面十六进制参数或真实 CDN 端点已合格。
 - 只有当前快照直接携带 `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=...` full URL、没有重定向/额外查询参数、且候选高于当前本地缓存层级时，`recover-chat-image` 才能签发联网 challenge。首次调用必须不带 `--consent`，保持 `network_access_performed=false`：
+
+  输出父目录必须已经存在、位于本机且整条路径不含符号链接或重解析点；challenge 会绑定该目录的稳定文件身份。消费授权后 CLI 会保持目录句柄直到原子发布结束，因此不得在两次命令间替换或重定向输出目录。
 
   ```text
   v-local-cli recover-chat-image --account <account> --output <new-output-file> <image_evidence_id>
