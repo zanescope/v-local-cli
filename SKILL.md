@@ -368,7 +368,7 @@ v-local-cli export-chat-image --account <account> --output <output-file> <image_
 - 旧的 loopback TLS 加解密夹具只证明 `synthetic_crypto_binding_harness_only`：它验证 AES/容器/描述符绑定安全壳，不代表桌面十六进制参数或真实 CDN 端点已合格。
 - 只有当前快照直接携带 `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=...` full URL、没有重定向/额外查询参数、且候选高于当前本地缓存层级时，`recover-chat-image` 才能签发联网 challenge。首次调用必须不带 `--consent`，保持 `network_access_performed=false`：
 
-  输出父目录必须已经存在、位于本机且整条路径不含符号链接或重解析点；challenge 会绑定该目录的稳定文件身份。消费授权后 CLI 会保持目录句柄直到原子发布结束，因此不得在两次命令间替换或重定向输出目录。
+  输出父目录必须已经存在且位于本机；challenge 会绑定规范化字面路径和链接解析后的稳定目录身份。消费授权后 CLI 会保持目录句柄直到原子发布结束；两次命令间替换目录或重定向链接都会使旧 challenge 失效。
 
   ```text
   v-local-cli recover-chat-image --account <account> --output <new-output-file> <image_evidence_id>

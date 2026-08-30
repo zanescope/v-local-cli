@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -21,25 +20,9 @@ func openChatImageRecoveryOutputDirectory(path string) (*chatImageRecoveryOutput
 	if !filepath.IsAbs(clean) {
 		return nil, "", os.ErrInvalid
 	}
-	current, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	current, err := unix.Open(clean, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, "", err
-	}
-	parts := strings.Split(strings.TrimPrefix(clean, string(filepath.Separator)), string(filepath.Separator))
-	for _, part := range parts {
-		if part == "" || part == "." {
-			continue
-		}
-		if part == ".." {
-			_ = unix.Close(current)
-			return nil, "", os.ErrInvalid
-		}
-		next, openErr := unix.Openat(current, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		_ = unix.Close(current)
-		if openErr != nil {
-			return nil, "", openErr
-		}
-		current = next
 	}
 	var info unix.Stat_t
 	if err := unix.Fstat(current, &info); err != nil {

@@ -52,7 +52,7 @@ func openChatImageRecoveryOutputDirectory(path string) (*chatImageRecoveryOutput
 	}
 	attributes := &windows.OBJECT_ATTRIBUTES{
 		ObjectName: objectName,
-		Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+		Attributes: windows.OBJ_CASE_INSENSITIVE,
 	}
 	attributes.Length = uint32(unsafe.Sizeof(*attributes))
 	var handle windows.Handle
@@ -63,7 +63,7 @@ func openChatImageRecoveryOutputDirectory(path string) (*chatImageRecoveryOutput
 		attributes, &status, &allocationSize, 0,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		windows.FILE_OPEN,
-		windows.FILE_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT,
+		windows.FILE_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT,
 		0, 0,
 	)
 	if err != nil {
@@ -74,9 +74,9 @@ func openChatImageRecoveryOutputDirectory(path string) (*chatImageRecoveryOutput
 		_ = windows.CloseHandle(handle)
 		return nil, "", err
 	}
-	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
 		_ = windows.CloseHandle(handle)
-		return nil, "", errors.New("恢复图片输出父目录不是无重解析点的普通目录")
+		return nil, "", errors.New("恢复图片输出父目录不是普通目录")
 	}
 	identity := fmt.Sprintf("windows:%08x:%08x%08x", info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow)
 	return &chatImageRecoveryOutputDirectory{handle: handle}, identity, nil

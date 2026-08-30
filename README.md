@@ -131,7 +131,7 @@ v-local-cli history --fresh --limit 200 <chat_username>
 
 - **时间窗口** — `history`、`search`、`stats` 以及朋友圈与公众号历史，默认按本地时区限定范围：指定联系人或公众号时取当前自然月，群聊和跨会话搜索取当前自然日。显式传入 `--start` 或 `--end` 就会关闭这个默认，传入 `--all` 则取消整个默认日期范围。
 - **条数** — `--all` 只取消日期范围，不改变条数；`--limit N` 独立控制结果上限，`--limit 0` 明确表示不设条数上限。默认通常为 200 条，`export` 为 1000 条。`history`、`search` 与 `export` 的有限结果用 `has_more` 与 `truncated` 明示是否还有命中项。
-- **覆盖保护** — `export`、`export-chat-image`、`export-media`、`export-moment-media`、`doctor --bundle` 默认拒绝覆盖已有输出（返回 `output_exists`），只有显式传入 `--force` 才会覆盖；符号链接、junction 等重解析点即使传了 `--force` 也一律拒绝。`recover-chat-image` 刻意不提供 `--force`，并要求输出父目录已经存在、位于本机且整条路径不含链接；每个 challenge 同时绑定规范化字面路径和父目录稳定文件身份，执行期间通过保持打开的目录句柄创建、发布和清理临时文件。Windows 恢复临时文件的当前用户/System 专属 DACL 在创建时原子生效，而不是事后收紧。
+- **覆盖保护** — `export`、`export-chat-image`、`export-media`、`export-moment-media`、`doctor --bundle` 默认拒绝覆盖已有输出（返回 `output_exists`），只有显式传入 `--force` 才会覆盖；符号链接、junction 等重解析点即使传了 `--force` 也一律拒绝。`recover-chat-image` 刻意不提供 `--force`，并要求输出父目录已经存在且位于本机；每个 challenge 同时绑定规范化字面路径和链接解析后的父目录稳定文件身份，链接重定向会使授权失效。执行期间通过保持打开的目录句柄创建、发布和清理临时文件。Windows 恢复临时文件的当前用户/System 专属 DACL 在创建时原子生效，而不是事后收紧。
 
 ## 输出约定
 

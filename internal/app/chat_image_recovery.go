@@ -131,7 +131,7 @@ func openChatImageRecoveryOutputTarget(path string) (*chatImageRecoveryOutputTar
 	if err != nil {
 		return nil, &commandError{
 			typeName: "invalid_output", message: "恢复图片输出父目录不安全",
-			hint: "使用已存在、位于本机且整条路径不含符号链接或重解析点的目录。", code: 2,
+			hint: "使用已存在且位于本机的目录；CLI 会绑定链接解析后的稳定目录身份。", code: 2,
 		}
 	}
 	return &chatImageRecoveryOutputTarget{
@@ -146,11 +146,11 @@ func requireExistingChatImageRecoveryOutputParent(path string) error {
 		return err
 	}
 	parent := filepath.Dir(filepath.Clean(absolute))
-	info, err := os.Lstat(parent)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	info, err := os.Stat(parent)
+	if err != nil || !info.IsDir() {
 		return &commandError{
 			typeName: "invalid_output", message: "恢复图片输出父目录必须已经存在",
-			hint: "先创建一个位于本机且整条路径不含符号链接或重解析点的目录。", code: 2,
+			hint: "先创建一个位于本机的目录；CLI 会绑定链接解析后的稳定目录身份。", code: 2,
 		}
 	}
 	return nil
