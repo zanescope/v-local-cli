@@ -253,6 +253,30 @@ func TestListWithUnreadableReportsAccountsThisBuildCannotRead(t *testing.T) {
 	}
 }
 
+func TestListWithUnreadableReportsAccountShapedNonDirectory(t *testing.T) {
+	home := testHome(t)
+	t.Setenv("V_LOCAL_CLI_HOME", home)
+	accountID := AccountID("replaced-account-root")
+	accounts := filepath.Join(home, "accounts")
+	if err := os.MkdirAll(accounts, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(accounts, accountID), []byte("not-an-account-directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(accounts, "unrelated-file"), []byte("ignored"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	values, unreadable, err := ListWithUnreadable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 0 || len(unreadable) != 1 || unreadable[0] != accountID {
+		t.Fatalf("账号形态的非目录项没有被隔离：values=%+v unreadable=%v", values, unreadable)
+	}
+}
+
 func TestLoadReplacementBaselineAcceptsOnlySecureVersionMismatch(t *testing.T) {
 	home := testHome(t)
 	t.Setenv("V_LOCAL_CLI_HOME", home)

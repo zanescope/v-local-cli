@@ -54,6 +54,44 @@ func fixtureInspector(strictCalls *int, inventoryDigest *string) Inspector {
 	}
 }
 
+func TestSourceMetadataObservationIsCanonicalAndDriftComparable(t *testing.T) {
+	root := fixtureRoot(t)
+	inspector := Inspector{
+		CodeIdentity: func(context.Context, string) (CodeIdentity, error) {
+			return CodeIdentity{Identifier: " com.tencent.xinWeChat ", Team: " TEAM ", Requirement: " anchor fixture "}, nil
+		},
+		PlistString: func(_ context.Context, _ string, key string) (string, error) {
+			switch key {
+			case "CFBundleShortVersionString":
+				return " 4.1.11 ", nil
+			case "CFBundleVersion":
+				return " 269136 ", nil
+			case "CFBundleIdentifier":
+				return " com.tencent.xinWeChat ", nil
+			default:
+				return "", os.ErrNotExist
+			}
+		},
+	}
+	metadata, err := inspector.observeMetadata(context.Background(), root, []RewriteReference{{
+		Path: "Contents/Info.plist", Key: "CFBundleIdentifier",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Code.Identifier != "com.tencent.xinWeChat" || metadata.Code.Team != "TEAM" ||
+		metadata.Version != "4.1.11" || metadata.Build != "269136" ||
+		metadata.RewriteInputs[0].Expected != "com.tencent.xinWeChat" {
+		t.Fatalf("source metadata was not canonicalized: %+v", metadata)
+	}
+	drifted := metadata
+	drifted.RewriteInputs = append([]RewriteInput(nil), metadata.RewriteInputs...)
+	drifted.RewriteInputs[0].Expected = "com.tencent.xinWeChat.changed"
+	if metadata.equal(drifted) {
+		t.Fatal("source metadata comparison accepted rewrite-input drift")
+	}
+}
+
 func TestIndependentInspectFreezeAndQualifyBindIdentityWithoutPath(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("production source inode identity is a macOS-only gate")

@@ -132,6 +132,20 @@ func TestLoadVerifiesExactImmutableDirectoryAndDetectsDrift(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsHardLinkedArtifact(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("frozen build-set hard-link identity is a macOS gate")
+	}
+	root, _ := buildDirectory(t)
+	artifact := filepath.Join(root, "v-local-key-provider")
+	if err := os.Link(artifact, root+".provider-hardlink"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Load(root); err == nil {
+		t.Fatal("build-set verifier accepted a hard-linked artifact")
+	}
+}
+
 func TestAssembleRejectsIncompleteOrAmbiguousArtifactSet(t *testing.T) {
 	value := goldenManifest(t)
 	if _, err := Assemble(value.RouteMode, value.Artifacts[:len(value.Artifacts)-1]); err == nil {

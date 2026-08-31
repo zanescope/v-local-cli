@@ -327,10 +327,14 @@ func runHelperWithStore(input io.Reader, output io.Writer, store itemStore) int 
 		return 3
 	}
 	encoded = append(encoded, '\n')
-	_, err = output.Write(encoded)
-	clearBytes(encoded)
-	if err != nil {
-		return 3
+	defer clearBytes(encoded)
+	remaining := encoded
+	for len(remaining) > 0 {
+		written, writeErr := output.Write(remaining)
+		if writeErr != nil || written <= 0 || written > len(remaining) {
+			return 3
+		}
+		remaining = remaining[written:]
 	}
 	return 0
 }

@@ -70,6 +70,65 @@ func exactReadTarget(root, relative string) (string, error) {
 	return target, nil
 }
 
+type sourceMetadata struct {
+	Code          CodeIdentity
+	Version       string
+	Build         string
+	RewriteInputs []RewriteInput
+}
+
+func (value sourceMetadata) equal(other sourceMetadata) bool {
+	if value.Code != other.Code || value.Version != other.Version || value.Build != other.Build ||
+		len(value.RewriteInputs) != len(other.RewriteInputs) {
+		return false
+	}
+	for index := range value.RewriteInputs {
+		if value.RewriteInputs[index] != other.RewriteInputs[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func (value Inspector) observeMetadata(ctx context.Context, root string, references []RewriteReference) (sourceMetadata, error) {
+	code, err := value.CodeIdentity(ctx, root)
+	code = CodeIdentity{
+		Identifier: strings.TrimSpace(code.Identifier), Team: strings.TrimSpace(code.Team),
+		Requirement: strings.TrimSpace(code.Requirement),
+	}
+	if err != nil || code.Identifier == "" || code.Team == "" || code.Requirement == "" {
+		return sourceMetadata{}, errors.New("source code identity is unavailable")
+	}
+	infoPath, err := exactReadTarget(root, "Contents/Info.plist")
+	if err != nil {
+		return sourceMetadata{}, err
+	}
+	version, err := value.PlistString(ctx, infoPath, "CFBundleShortVersionString")
+	version = strings.TrimSpace(version)
+	if err != nil || version == "" {
+		return sourceMetadata{}, errors.New("source version is unavailable")
+	}
+	build, err := value.PlistString(ctx, infoPath, "CFBundleVersion")
+	build = strings.TrimSpace(build)
+	if err != nil || build == "" {
+		return sourceMetadata{}, errors.New("source build is unavailable")
+	}
+	rewriteInputs := make([]RewriteInput, 0, len(references))
+	for _, reference := range references {
+		target, err := exactReadTarget(root, reference.Path)
+		if err != nil {
+			return sourceMetadata{}, err
+		}
+		expected, err := value.PlistString(ctx, target, reference.Key)
+		expected = strings.TrimSpace(expected)
+		if err != nil || expected == "" {
+			return sourceMetadata{}, errors.New("source rewrite input is unavailable")
+		}
+		rewriteInputs = append(rewriteInputs, RewriteInput{Path: reference.Path, Key: reference.Key, Expected: expected})
+	}
+	return sourceMetadata{Code: code, Version: version, Build: build, RewriteInputs: rewriteInputs}, nil
+}
+
 func (value Inspector) normalized() Inspector {
 	if value.VerifyStrict == nil {
 		value.VerifyStrict = systemVerifyStrict
@@ -106,37 +165,17 @@ func (value Inspector) Inspect(ctx context.Context, sourcePath string, reference
 	if err := value.VerifyStrict(ctx, root); err != nil {
 		return Snapshot{}, errors.New("source strict trust verification failed")
 	}
-	code, err := value.CodeIdentity(ctx, root)
-	if err != nil || strings.TrimSpace(code.Identifier) == "" || strings.TrimSpace(code.Team) == "" || strings.TrimSpace(code.Requirement) == "" {
-		return Snapshot{}, errors.New("source code identity is unavailable")
-	}
-	infoPath, err := exactReadTarget(root, "Contents/Info.plist")
+	metadata, err := value.observeMetadata(ctx, root, references)
 	if err != nil {
 		return Snapshot{}, err
-	}
-	version, err := value.PlistString(ctx, infoPath, "CFBundleShortVersionString")
-	if err != nil || strings.TrimSpace(version) == "" {
-		return Snapshot{}, errors.New("source version is unavailable")
-	}
-	build, err := value.PlistString(ctx, infoPath, "CFBundleVersion")
-	if err != nil || strings.TrimSpace(build) == "" {
-		return Snapshot{}, errors.New("source build is unavailable")
-	}
-	rewriteInputs := make([]RewriteInput, 0, len(references))
-	for _, reference := range references {
-		target, err := exactReadTarget(root, reference.Path)
-		if err != nil {
-			return Snapshot{}, err
-		}
-		expected, err := value.PlistString(ctx, target, reference.Key)
-		if err != nil || strings.TrimSpace(expected) == "" {
-			return Snapshot{}, errors.New("source rewrite input is unavailable")
-		}
-		rewriteInputs = append(rewriteInputs, RewriteInput{Path: reference.Path, Key: reference.Key, Expected: expected})
 	}
 	entries, inventoryDigest, err := value.Inventory(ctx, root)
 	if err != nil {
 		return Snapshot{}, err
+	}
+	afterMetadata, err := value.observeMetadata(ctx, root, references)
+	if err != nil || !metadata.equal(afterMetadata) {
+		return Snapshot{}, errors.New("source metadata drifted during inventory")
 	}
 	if err := value.VerifyStrict(ctx, root); err != nil {
 		return Snapshot{}, errors.New("source strict trust drifted during inventory")
@@ -145,13 +184,13 @@ func (value Inspector) Inspect(ctx context.Context, sourcePath string, reference
 	if err != nil || before != after {
 		return Snapshot{}, errors.New("source identity drifted during qualification")
 	}
-	requirement := sha256.Sum256([]byte(strings.TrimSpace(code.Requirement)))
+	requirement := sha256.Sum256([]byte(metadata.Code.Requirement))
 	result := Snapshot{
-		SourceLeaf: "WeChat.app", SourcePathDigest: pathDigest(root), SourceVersion: strings.TrimSpace(version),
-		SourceBuild: strings.TrimSpace(build), RootIdentifier: strings.TrimSpace(code.Identifier),
-		TeamIdentifier: strings.TrimSpace(code.Team), RequirementDigest: hex.EncodeToString(requirement[:]),
+		SourceLeaf: "WeChat.app", SourcePathDigest: pathDigest(root), SourceVersion: metadata.Version,
+		SourceBuild: metadata.Build, RootIdentifier: metadata.Code.Identifier,
+		TeamIdentifier: metadata.Code.Team, RequirementDigest: hex.EncodeToString(requirement[:]),
 		InventoryDigest: inventoryDigest, InventoryEntries: len(entries), Identity: before,
-		RewriteInputs: rewriteInputs,
+		RewriteInputs: metadata.RewriteInputs,
 	}
 	if err := result.Validate(); err != nil {
 		return Snapshot{}, err

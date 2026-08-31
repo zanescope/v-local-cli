@@ -101,9 +101,12 @@ func newPlatformStartupGenerationReconciler(accountID string) (startupGeneration
 }
 
 func reconcilePlatformShadowGenerations(ctx context.Context) error {
-	accounts, err := state.List()
+	accounts, unreadable, err := state.ListWithUnreadable()
 	if err != nil {
 		return err
+	}
+	if len(unreadable) != 0 {
+		return errors.New("Shadow startup cannot reconcile unreadable account state")
 	}
 	return reconcileStartupShadowGenerations(
 		ctx, clockmodel.System{}, accounts, newPlatformStartupGenerationReconciler,

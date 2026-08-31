@@ -203,8 +203,11 @@ func (value ResourceBinding) Validate() error {
 	}
 	directoryKind := value.Kind == "workspace" || value.Kind == "clone_app" || value.Kind == "container"
 	validLinks := directoryKind && value.LinkCount >= 1 || !directoryKind && value.LinkCount == 1
+	digestKind := value.Kind == "clone_app" || value.Kind == "supervisor"
+	validDigestBinding := digestKind == (value.DigestSHA256 != "") &&
+		(value.DigestSHA256 == "" || validDigest(value.DigestSHA256))
 	if !validKinds[value.Kind] || !validRelativeLeaf(value.Leaf) || value.Device == 0 || value.Inode == 0 ||
-		value.Mode == 0 || !validLinks || value.DigestSHA256 != "" && !validDigest(value.DigestSHA256) {
+		value.Mode == 0 || value.Mode > 0o7777 || !validLinks || !validDigestBinding {
 		return errors.New("shadow resource binding is invalid")
 	}
 	return nil
@@ -268,6 +271,12 @@ func (value Timings) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (value Timings) readyBound() bool {
+	stages := value.PrepareMS + value.TransformMS + value.LaunchCaptureMS + value.CleanupMS
+	return value.TransformMS < int64(TransformationPreparationLimitNS/1_000_000) &&
+		value.ProviderTotalMS >= stages
 }
 
 type CleanupReceipt struct {
@@ -383,16 +392,17 @@ func (value Result) Validate() error {
 		}
 	case "action_required":
 		if value.Action != "approve_shadow_mode" || value.ErrorCode != ErrorApprovalRequired ||
-			value.Receipt != nil || value.CredentialReleased {
+			value.Qualification == nil || value.Receipt != nil || value.CredentialReleased {
 			return errors.New("shadow approval result is inconsistent")
 		}
 	case "ready":
 		if value.Action != "" || value.ErrorCode != ErrorNone || !value.CredentialReleased ||
-			value.Receipt == nil || value.Receipt.Process == nil || !value.Receipt.Cleanup.Complete() {
+			value.Qualification != nil || value.Receipt == nil || value.Receipt.Process == nil ||
+			!value.Receipt.Cleanup.Complete() || !value.Receipt.Timings.readyBound() {
 			return errors.New("shadow ready result lacks complete cleanup evidence")
 		}
 	case "failed", "cleanup_pending":
-		if value.Action != "" || value.ErrorCode == ErrorNone || value.CredentialReleased {
+		if value.Action != "" || value.ErrorCode == ErrorNone || value.CredentialReleased || value.Qualification != nil {
 			return errors.New("shadow failure result is inconsistent")
 		}
 		if value.Status == "cleanup_pending" && value.Receipt != nil && value.Receipt.Cleanup.Complete() {
@@ -433,22 +443,63 @@ func (value GoldenVectors) Validate() error {
 		value.ExecuteRequest.Operation != value.Challenge.Operation ||
 		value.CleanupReceipt.ChallengeID != value.Challenge.ChallengeID ||
 		value.CleanupReceipt.Operation != value.ExecuteRequest.Operation ||
-		value.CleanupReceipt.AccountBindingID != value.ExecuteRequest.AccountBindingID ||
-		value.CleanupReceipt.OptionsDigest != value.ExecuteRequest.OptionsDigest ||
+		value.ReadyResult.RequestID != value.ExecuteRequest.RequestID ||
 		value.ReadyResult.Receipt == nil {
 		return errors.New("shadow vectors are not cross-bound")
+	}
+	type binding struct {
+		buildSetDigest            string
+		sourceQualificationDigest string
+		cleanupRoute              string
+		accountBindingID          string
+		optionsDigest             string
+	}
+	expected := binding{
+		buildSetDigest:            value.Challenge.BuildSetDigest,
+		sourceQualificationDigest: value.Challenge.SourceQualificationDigest,
+		cleanupRoute:              value.Challenge.CleanupRoute,
+		accountBindingID:          value.Challenge.AccountBindingID,
+		optionsDigest:             value.Challenge.OptionsDigest,
+	}
+	bindings := []binding{
+		{
+			buildSetDigest:            value.QualifyRequest.BuildSetDigest,
+			sourceQualificationDigest: value.QualifyRequest.SourceQualificationDigest,
+			cleanupRoute:              value.QualifyRequest.CleanupRoute,
+			accountBindingID:          value.QualifyRequest.AccountBindingID,
+			optionsDigest:             value.QualifyRequest.OptionsDigest,
+		},
+		{
+			buildSetDigest:            value.ExecuteRequest.BuildSetDigest,
+			sourceQualificationDigest: value.ExecuteRequest.SourceQualificationDigest,
+			cleanupRoute:              value.ExecuteRequest.CleanupRoute,
+			accountBindingID:          value.ExecuteRequest.AccountBindingID,
+			optionsDigest:             value.ExecuteRequest.OptionsDigest,
+		},
+		{
+			buildSetDigest:            value.Qualification.BuildSetDigest,
+			sourceQualificationDigest: value.Qualification.SourceQualificationDigest,
+			cleanupRoute:              value.Qualification.CleanupRoute,
+			accountBindingID:          value.Qualification.AccountBindingID,
+			optionsDigest:             value.Qualification.OptionsDigest,
+		},
+		{
+			buildSetDigest:            value.CleanupReceipt.BuildSetDigest,
+			sourceQualificationDigest: value.CleanupReceipt.SourceQualificationDigest,
+			cleanupRoute:              value.CleanupReceipt.CleanupRoute,
+			accountBindingID:          value.CleanupReceipt.AccountBindingID,
+			optionsDigest:             value.CleanupReceipt.OptionsDigest,
+		},
+	}
+	for _, actual := range bindings {
+		if actual != expected {
+			return errors.New("shadow vectors mix frozen attempt bindings")
+		}
 	}
 	cleanupReceipt, cleanupErr := json.Marshal(value.CleanupReceipt)
 	readyReceipt, readyErr := json.Marshal(value.ReadyResult.Receipt)
 	if cleanupErr != nil || readyErr != nil || !bytes.Equal(cleanupReceipt, readyReceipt) {
 		return errors.New("shadow ready result does not carry the exact cleanup vector")
-	}
-	for _, digest := range []string{value.Challenge.BuildSetDigest, value.QualifyRequest.BuildSetDigest,
-		value.ExecuteRequest.BuildSetDigest, value.Qualification.BuildSetDigest,
-		value.CleanupReceipt.BuildSetDigest, value.ReadyResult.Receipt.BuildSetDigest} {
-		if digest != value.Challenge.BuildSetDigest {
-			return errors.New("shadow vectors mix build sets")
-		}
 	}
 	return nil
 }

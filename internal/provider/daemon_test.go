@@ -664,7 +664,7 @@ func TestUnavailableShadowSIPFallbackProducesAValidatedCheckpointedAction(t *tes
 	bundle.Diagnostics["process_access_error"] = "sip_enabled"
 	bundle.Diagnostics["blocking_reasons"] = []any{"standard_route_unavailable", "shadow_route_unavailable_in_build"}
 	if err := ValidateBundle(&bundle); err != nil {
-		t.Fatalf("current Shadow placeholder response failed protocol validation: %v", err)
+		t.Fatalf("current production-disabled Shadow response failed protocol validation: %v", err)
 	}
 	stateErr := acquisitionStateError(bundle.Diagnostics)
 	if stateErr == nil {

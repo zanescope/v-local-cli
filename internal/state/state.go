@@ -527,6 +527,13 @@ func ListWithUnreadable() ([]AccountState, []string, error) {
 	unreadable := make([]string, 0)
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			// An account-shaped entry that is no longer a directory must not be
+			// silently omitted. It can still cover durable Shadow generation
+			// state from an earlier run, so startup reconciliation has to fail
+			// closed until the account root is inspected and repaired.
+			if validAccountID(entry.Name()) {
+				unreadable = append(unreadable, entry.Name())
+			}
 			continue
 		}
 		value, loadErr := Load(entry.Name())

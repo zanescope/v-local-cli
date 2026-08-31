@@ -63,6 +63,17 @@ type contextReader struct {
 	reader io.Reader
 }
 
+func sameRegularFile(left, right os.FileInfo) bool {
+	if left == nil || right == nil || !left.Mode().IsRegular() || !right.Mode().IsRegular() ||
+		!os.SameFile(left, right) || left.Mode() != right.Mode() || left.Size() != right.Size() ||
+		!left.ModTime().Equal(right.ModTime()) {
+		return false
+	}
+	leftLinks, leftErr := regularFileLinkCount(left)
+	rightLinks, rightErr := regularFileLinkCount(right)
+	return leftErr == nil && rightErr == nil && leftLinks == 1 && rightLinks == 1
+}
+
 func (value contextReader) Read(payload []byte) (int, error) {
 	select {
 	case <-value.ctx.Done():
@@ -135,10 +146,18 @@ func ScanContext(ctx context.Context, root string) ([]Entry, string, error) {
 			if openErr != nil {
 				return openErr
 			}
+			opened, statErr := file.Stat()
+			if statErr != nil || !sameRegularFile(info, opened) {
+				_ = file.Close()
+				return errors.New("App inventory file drifted while opening")
+			}
 			digest := sha256.New()
 			read, copyErr := io.Copy(digest, io.LimitReader(contextReader{ctx: ctx, reader: file}, maxFileBytes+1))
+			after, afterErr := file.Stat()
+			current, pathErr := os.Lstat(path)
 			closeErr := file.Close()
-			if copyErr != nil || closeErr != nil || read != info.Size() {
+			if copyErr != nil || afterErr != nil || pathErr != nil || closeErr != nil || ctx.Err() != nil ||
+				read != info.Size() || !sameRegularFile(opened, after) || !sameRegularFile(after, current) {
 				return errors.New("App inventory could not hash a file")
 			}
 			value.Size = info.Size()

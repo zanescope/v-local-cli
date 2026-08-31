@@ -1264,7 +1264,7 @@ func TestAllOnlyChangesTimeWindowAndLimitZeroIsUnbounded(t *testing.T) {
 	if err := os.WriteFile(exportPath, []byte("existing-output"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, output, errorOutput = runForTest("export", "--all", "--output", exportPath, "history", "alice")
+	code, _, errorOutput = runForTest("export", "--all", "--output", exportPath, "history", "alice")
 	if code == 0 || errorOutput["error"].(map[string]any)["type"] != "output_exists" {
 		t.Fatalf("export 默认覆盖了已有输出：code=%d error=%v", code, errorOutput)
 	}

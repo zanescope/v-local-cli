@@ -271,7 +271,7 @@ func readBoundFile(root, leaf string, mode uint32, expectedSize int64) ([]byte, 
 	}
 	defer file.Close()
 	opened, err := file.Stat()
-	if err != nil || !os.SameFile(before, opened) {
+	if err != nil || !os.SameFile(before, opened) || !singleLinkArtifact(before) || !singleLinkArtifact(opened) {
 		return nil, errors.New("Shadow build-set file identity drifted before read")
 	}
 	limit := maxArtifactBytes
@@ -283,13 +283,15 @@ func readBoundFile(root, leaf string, mode uint32, expectedSize int64) ([]byte, 
 		return nil, errors.New("Shadow build-set file content is invalid")
 	}
 	after, err := file.Stat()
-	if err != nil || !os.SameFile(opened, after) || after.Size() != opened.Size() || after.Mode() != opened.Mode() {
+	if err != nil || !os.SameFile(opened, after) || !singleLinkArtifact(after) ||
+		after.Size() != opened.Size() || after.Mode() != opened.Mode() {
 		return nil, errors.New("Shadow build-set file identity drifted during read")
 	}
 	pathAfter, err := os.Lstat(path)
 	resolvedAfter, resolveErr := filepath.EvalSymlinks(path)
 	if err != nil || resolveErr != nil || resolvedAfter != path || pathAfter.Mode()&os.ModeSymlink != 0 ||
-		!os.SameFile(after, pathAfter) || pathAfter.Size() != after.Size() || pathAfter.Mode() != after.Mode() {
+		!os.SameFile(after, pathAfter) || !singleLinkArtifact(pathAfter) ||
+		pathAfter.Size() != after.Size() || pathAfter.Mode() != after.Mode() {
 		return nil, errors.New("Shadow build-set path identity drifted during read")
 	}
 	return payload, nil

@@ -18,6 +18,15 @@ type memoryItemStore struct {
 	failPut string
 }
 
+type shortHelperWriter struct{ bytes.Buffer }
+
+func (value *shortHelperWriter) Write(payload []byte) (int, error) {
+	if len(payload) > 1 {
+		payload = payload[:1]
+	}
+	return value.Buffer.Write(payload)
+}
+
 func (value *memoryItemStore) Put(item string, payload []byte) error {
 	if item == value.failPut {
 		return errors.New("fixture put failure")
@@ -174,5 +183,27 @@ func TestHelperWireIsStrictBoundedAndDoesNotEchoPlatformErrors(t *testing.T) {
 	unknown := append([]byte(`{"unknown":true,`), payload[1:]...)
 	if code := runHelperWithStore(bytes.NewReader(unknown), &output, store); code != 2 {
 		t.Fatalf("unknown helper field code=%d", code)
+	}
+}
+
+func TestHelperWireCompletesShortWrites(t *testing.T) {
+	store := keychainFixture()
+	request := helperRequest{
+		Version: helperVersion, Operation: "get", AccountBindingID: testAccount,
+		GenerationID: testGeneration,
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := &shortHelperWriter{}
+	if code := runHelperWithStore(bytes.NewReader(payload), output, store); code != 0 {
+		t.Fatalf("helper code=%d", code)
+	}
+	var response helperResponse
+	decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&response); err != nil || response.validateFor("get") != nil {
+		t.Fatalf("short-written helper response is incomplete: response=%+v err=%v", response, err)
 	}
 }

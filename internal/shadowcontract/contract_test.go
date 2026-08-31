@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -111,16 +112,65 @@ func TestChallengeOperationMustMatchExecutionRoute(t *testing.T) {
 }
 
 func TestReadyRequiresEveryCleanupFactAndResourceClass(t *testing.T) {
-	vectors := goldenVectors(t)
-	result := vectors.ReadyResult
-	result.Receipt.Cleanup.SocketAbsent = false
-	if err := result.Validate(); err == nil {
-		t.Fatal("ready result accepted incomplete cleanup facts")
+	tests := map[string]func(*CleanupReceipt){
+		"cleanup fact": func(value *CleanupReceipt) { value.Cleanup.SocketAbsent = false },
+		"resource class": func(value *CleanupReceipt) {
+			value.Resources = value.Resources[:len(value.Resources)-1]
+		},
+		"stage total": func(value *CleanupReceipt) { value.Timings.ProviderTotalMS-- },
+		"transformation threshold": func(value *CleanupReceipt) {
+			value.Timings.TransformMS = int64(TransformationPreparationLimitNS / 1_000_000)
+			value.Timings.ProviderTotalMS += value.Timings.TransformMS
+		},
 	}
-	result = vectors.ReadyResult
-	result.Receipt.Resources = result.Receipt.Resources[:len(result.Receipt.Resources)-1]
-	if err := result.Validate(); err == nil {
-		t.Fatal("ready result accepted a receipt without the supervisor binding")
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			vectors := goldenVectors(t)
+			result := vectors.ReadyResult
+			receipt := *result.Receipt
+			receipt.Resources = append([]ResourceBinding(nil), receipt.Resources...)
+			mutate(&receipt)
+			result.Receipt = &receipt
+			if err := result.Validate(); err == nil {
+				t.Fatal("ready result accepted incomplete or impossible evidence")
+			}
+		})
+	}
+}
+
+func TestResultStatusRejectsImpossibleQualificationPayloads(t *testing.T) {
+	vectors := goldenVectors(t)
+	actionRequired := Result{
+		Version: Version, RequestID: vectors.QualifyRequest.RequestID, Status: "action_required",
+		Action: "approve_shadow_mode", ErrorCode: ErrorApprovalRequired,
+	}
+	if err := actionRequired.Validate(); err == nil {
+		t.Fatal("approval result without qualification evidence was accepted")
+	}
+	qualification := vectors.Qualification
+	actionRequired.Qualification = &qualification
+	if err := actionRequired.Validate(); err != nil {
+		t.Fatalf("bound approval result was rejected: %v", err)
+	}
+	for _, status := range []string{"ready", "failed", "cleanup_pending"} {
+		t.Run(status, func(t *testing.T) {
+			var result Result
+			switch status {
+			case "ready":
+				result = vectors.ReadyResult
+			case "failed":
+				result = vectors.FailureResult
+			case "cleanup_pending":
+				result = vectors.FailureResult
+				result.Status = "cleanup_pending"
+				result.ErrorCode = ErrorCleanup
+			}
+			copy := vectors.Qualification
+			result.Qualification = &copy
+			if err := result.Validate(); err == nil {
+				t.Fatal("terminal result accepted a qualification-only payload")
+			}
+		})
 	}
 }
 
@@ -166,6 +216,40 @@ func TestGoldenVectorsRejectReceiptRequestBindingDrift(t *testing.T) {
 	}
 }
 
+func TestGoldenVectorsRejectEveryStageBindingDrift(t *testing.T) {
+	tests := map[string]func(*GoldenVectors){
+		"challenge source": func(value *GoldenVectors) {
+			value.Challenge.SourceQualificationDigest = strings.Repeat("9", 64)
+		},
+		"qualification request account": func(value *GoldenVectors) {
+			value.QualifyRequest.AccountBindingID = "0011223344556677"
+		},
+		"execution request options": func(value *GoldenVectors) {
+			value.ExecuteRequest.OptionsDigest = strings.Repeat("8", 64)
+		},
+		"qualification build set": func(value *GoldenVectors) {
+			value.Qualification.BuildSetDigest = strings.Repeat("7", 64)
+		},
+		"cleanup receipt source": func(value *GoldenVectors) {
+			value.CleanupReceipt.SourceQualificationDigest = strings.Repeat("6", 64)
+			copy := value.CleanupReceipt
+			value.ReadyResult.Receipt = &copy
+		},
+		"ready request": func(value *GoldenVectors) {
+			value.ReadyResult.RequestID = "0123456789abcdef0123456789abcdef"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			vectors := goldenVectors(t)
+			mutate(&vectors)
+			if err := vectors.Validate(); err == nil {
+				t.Fatal("cross-stage binding drift was accepted")
+			}
+		})
+	}
+}
+
 func TestResourceLinkCountDistinguishesDirectoriesFromFiles(t *testing.T) {
 	directory := ResourceBinding{Kind: "container", Leaf: "container", Device: 1, Inode: 2, UID: 501, Mode: 0o700, LinkCount: 2}
 	if err := directory.Validate(); err != nil {
@@ -174,6 +258,32 @@ func TestResourceLinkCountDistinguishesDirectoriesFromFiles(t *testing.T) {
 	file := ResourceBinding{Kind: "hook", Leaf: "hook", Device: 1, Inode: 3, UID: 501, Mode: 0o600, LinkCount: 2}
 	if err := file.Validate(); err == nil {
 		t.Fatal("hard-linked file binding was accepted")
+	}
+}
+
+func TestResourceDigestIsBoundOnlyToContentArtifacts(t *testing.T) {
+	clone := ResourceBinding{
+		Kind: "clone_app", Leaf: "attempt-0123456789abcdef0123456789abcdef/WeChat.app",
+		Device: 1, Inode: 2, UID: 501, Mode: 0o700, LinkCount: 1, DigestSHA256: strings.Repeat("1", 64),
+	}
+	if err := clone.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	clone.DigestSHA256 = ""
+	if err := clone.Validate(); err == nil {
+		t.Fatal("clone resource without its content digest was accepted")
+	}
+	workspace := ResourceBinding{
+		Kind: "workspace", Leaf: "attempt-0123456789abcdef0123456789abcdef",
+		Device: 1, Inode: 3, UID: 501, Mode: 0o700, LinkCount: 1, DigestSHA256: strings.Repeat("2", 64),
+	}
+	if err := workspace.Validate(); err == nil {
+		t.Fatal("non-content resource accepted an ambiguous digest")
+	}
+	workspace.DigestSHA256 = ""
+	workspace.Mode = 1 << 31
+	if err := workspace.Validate(); err == nil {
+		t.Fatal("resource accepted mode bits outside the frozen permission mask")
 	}
 }
 

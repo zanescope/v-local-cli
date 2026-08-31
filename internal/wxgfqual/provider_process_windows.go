@@ -6,10 +6,22 @@ import (
 	"errors"
 	"os/exec"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+type providerJobAccounting struct {
+	TotalUserTime             int64
+	TotalKernelTime           int64
+	ThisPeriodTotalUserTime   int64
+	ThisPeriodTotalKernelTime int64
+	TotalPageFaultCount       uint32
+	TotalProcesses            uint32
+	ActiveProcesses           uint32
+	TotalTerminatedProcesses  uint32
+}
 
 func createProviderJob() (windows.Handle, error) {
 	job, err := windows.CreateJobObject(nil, nil)
@@ -70,6 +82,27 @@ func stopStartedProvider(command *exec.Cmd, job windows.Handle) {
 	_ = command.Wait()
 }
 
+func terminateProviderDescendants(job windows.Handle) error {
+	if err := windows.TerminateJobObject(job, 1); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		accounting := providerJobAccounting{}
+		if err := windows.QueryInformationJobObject(job, windows.JobObjectBasicAccountingInformation,
+			uintptr(unsafe.Pointer(&accounting)), uint32(unsafe.Sizeof(accounting)), nil); err != nil {
+			return err
+		}
+		if accounting.ActiveProcesses == 0 {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return errors.New("provider process tree did not terminate")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func runProviderCommand(command *exec.Cmd) (ProviderIsolation, error) {
 	isolation := ProviderIsolation{
 		Method:                     "windows_job_object_suspended_assignment",
@@ -109,5 +142,13 @@ func runProviderCommand(command *exec.Cmd) (ProviderIsolation, error) {
 		stopStartedProvider(command, job)
 		return ProviderIsolation{}, err
 	}
-	return isolation, command.Wait()
+	waitErr := command.Wait()
+	// Wait only reaps the provider's main process. A descendant can still hold
+	// the private staging directory open while KILL_ON_JOB_CLOSE is being
+	// delivered asynchronously. Terminate the remaining job members and prove
+	// ActiveProcesses reached zero before RunProviderTrial removes plaintext.
+	if err := terminateProviderDescendants(job); err != nil {
+		return isolation, err
+	}
+	return isolation, waitErr
 }
