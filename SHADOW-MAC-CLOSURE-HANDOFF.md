@@ -14,14 +14,32 @@
 | `v-local-key-provider` | `git@github.com:zanescope/v-local-key-provider.git` | `bd477b923a0085e737e115fa80590f23cffb4ea7` | `aa9657c53aa10a4236a454d3ed9094f5ea83cdb2` |
 | `v-local-cli` | `git@github.com:zanescope/v-local-cli.git` | `8dec470fef4901c599b5e2f87f4d4cdaa49b6ec1` | `6949dfcd2e805d6431240eea0584040f10e387bc` |
 
-Both implementation commits are on `codex/shadow-ephemeral-poc`. At the time
-of this handoff they are local only; no push was performed. The CLI checkout
-retains the user's pre-existing untracked `.DS_Store`; it is not part of any
-commit.
+Both implementation commits are on `codex/shadow-ephemeral-poc`. That branch is
+the handoff vehicle; verify that each remote branch contains the corresponding
+implementation commit above and this document before continuing. The CLI
+checkout retains the user's pre-existing untracked `.DS_Store`; it is not part
+of any commit.
 
 The opening baseline was fetched before implementation and baseline tests were
 run before source changes. Do not replace these checkouts, restore an older
 Shadow patch, or treat a later `origin/main` as the recorded baseline.
+
+### Post-closure upstream check
+
+Immediately before branch publication, `git fetch origin main` produced this
+state:
+
+| Repository | Current `origin/main` | `origin/main...HEAD` | Integration status |
+| --- | --- | --- | --- |
+| `v-local-key-provider` | `bd477b923a0085e737e115fa80590f23cffb4ea7` | `0 2` | unchanged from the frozen baseline |
+| `v-local-cli` | `d6f5e24b32a7c049dad652aaea2d1fe89acfd5e4` | `2 2` | diverged after the closure |
+
+The CLI upstream additions are `ff02a7d` and `d6f5e24`. A read-only
+three-way `git merge-tree` check found common edits in
+`internal/app/app.go` and `internal/app/skill_contract_test.go` but no textual
+conflict. Semantic integration is **not verified**: this handoff branch was not
+rebased or merged, and Windows must integrate it onto a fresh current baseline
+and rerun all native and contract gates.
 
 ## 2. Scope that is complete
 
@@ -242,4 +260,3 @@ Do not combine these approvals.
 - **SIP-off fallback**: unverified and untouched.
 - **Goal completion**: no. The original goal must remain incomplete until every
   ordered Shadow and SIP-off machine condition passes on one frozen build set.
-
