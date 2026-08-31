@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -106,6 +107,9 @@ func qualificationFixture(t *testing.T) (string, string, sourcemodel.Inspector, 
 }
 
 func TestCLIQualificationIndependentlyBindsCurrentFrozenBuildSourceAndAccount(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("production source/account qualification is a macOS-only gate")
+	}
 	root, source, inspector, account := qualificationFixture(t)
 	runtime := Runtime{
 		Executable:        func() (string, error) { return filepath.Join(root, "v-local-cli"), nil },
@@ -126,6 +130,9 @@ func TestCLIQualificationIndependentlyBindsCurrentFrozenBuildSourceAndAccount(t 
 }
 
 func TestCLIQualificationRejectsNonFrozenExecutableAndSourceDrift(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("production source/account qualification is a macOS-only gate")
+	}
 	root, source, inspector, account := qualificationFixture(t)
 	runtime := Runtime{
 		Executable:        func() (string, error) { return filepath.Join(root, "renamed-cli"), nil },

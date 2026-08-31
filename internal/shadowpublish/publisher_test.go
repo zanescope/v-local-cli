@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	contract "github.com/zanescope/v-local-cli/internal/shadowcontract"
@@ -43,11 +44,15 @@ func (value *memoryLocker) Acquire(_ context.Context, _ string) (func() error, e
 }
 
 type memoryState struct {
-	ready         *GenerationState
-	pending       *GenerationState
-	log           *[]string
-	failSaveReady int
-	serialized    [][]byte
+	ready                       *GenerationState
+	pending                     *GenerationState
+	log                         *[]string
+	failSaveReady               int
+	commitThenFailSaveReady     int
+	commitThenFailSavePending   int
+	failRemovePending           int
+	commitThenFailRemovePending int
+	serialized                  [][]byte
 }
 
 func (value *memoryState) LoadReady(context.Context, string) (GenerationState, bool, error) {
@@ -72,6 +77,10 @@ func (value *memoryState) SaveReady(_ context.Context, state GenerationState) er
 	}
 	copy := state
 	value.ready = &copy
+	if value.commitThenFailSaveReady > 0 {
+		value.commitThenFailSaveReady--
+		return errors.New("injected post-commit ready failure")
+	}
 	return nil
 }
 func (value *memoryState) SavePending(_ context.Context, state GenerationState) error {
@@ -80,11 +89,23 @@ func (value *memoryState) SavePending(_ context.Context, state GenerationState) 
 	value.serialized = append(value.serialized, payload)
 	copy := state
 	value.pending = &copy
+	if value.commitThenFailSavePending > 0 {
+		value.commitThenFailSavePending--
+		return errors.New("injected post-commit pending failure")
+	}
 	return nil
 }
 func (value *memoryState) RemovePending(context.Context, string) error {
 	*value.log = append(*value.log, "state:remove_pending")
+	if value.failRemovePending > 0 {
+		value.failRemovePending--
+		return errors.New("injected pending removal failure")
+	}
 	value.pending = nil
+	if value.commitThenFailRemovePending > 0 {
+		value.commitThenFailRemovePending--
+		return errors.New("injected post-removal failure")
+	}
 	return nil
 }
 
@@ -367,4 +388,218 @@ func TestPublicationCannotStartAfterT108OrMutateAfterT115(t *testing.T) {
 			t.Fatal("T+115 crossing did not remain fail-closed and recoverable")
 		}
 	})
+}
+
+func TestCrashBoundariesConvergeWithoutPromotingPending(t *testing.T) {
+	tests := []struct {
+		name      string
+		inject    func(*memoryState)
+		committed bool
+	}{
+		{
+			name:   "pending state committed before error",
+			inject: func(state *memoryState) { state.commitThenFailSavePending = 1 },
+		},
+		{
+			name:      "ready state committed before error",
+			inject:    func(state *memoryState) { state.commitThenFailSaveReady = 1 },
+			committed: true,
+		},
+		{
+			name:      "pending removal fails before deletion",
+			inject:    func(state *memoryState) { state.failRemovePending = 1 },
+			committed: true,
+		},
+		{
+			name:      "pending removal commits before error",
+			inject:    func(state *memoryState) { state.commitThenFailRemovePending = 1 },
+			committed: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			publisher, clock, state, keychain, _ := harness(t)
+			test.inject(state)
+			published, publishErr := publisher.Publish(context.Background(), request(clock), []byte(testSecret))
+			if test.committed {
+				if !Committed(publishErr) || published.GenerationID != testNew {
+					t.Fatalf("post-ready crash was not classified committed: state=%+v err=%v", published, publishErr)
+				}
+			} else if !errors.Is(publishErr, ErrReconciliationPending) || Committed(publishErr) || published.GenerationID != "" {
+				t.Fatalf("pre-ready crash crossed the commit boundary: state=%+v err=%v", published, publishErr)
+			}
+
+			reconciled, found, reconcileErr := publisher.Reconcile(
+				context.Background(), testAccount, request(clock).Deadline.MutationStopNS,
+			)
+			if reconcileErr != nil || !found {
+				t.Fatalf("startup reconciliation failed: ready=%+v found=%v err=%v", reconciled, found, reconcileErr)
+			}
+			wantGeneration := testOld
+			wantSecret := "old"
+			if test.committed {
+				wantGeneration = testNew
+				wantSecret = testSecret
+			}
+			if reconciled.GenerationID != wantGeneration || reconciled.ObsoleteGenerationID != "" || state.pending != nil ||
+				state.ready == nil || state.ready.GenerationID != wantGeneration || len(keychain.values) != 1 ||
+				string(keychain.values[key(testAccount, wantGeneration)]) != wantSecret {
+				t.Fatalf("crash recovery did not converge: ready=%+v pending=%+v keys=%v", state.ready, state.pending, keychain.values)
+			}
+			if _, found := keychain.values[key(testAccount, map[bool]string{true: testOld, false: testNew}[test.committed])]; found {
+				t.Fatal("reconciliation retained the exact generation that should have been removed")
+			}
+		})
+	}
+}
+
+type concurrentState struct {
+	mu      sync.Mutex
+	ready   *GenerationState
+	pending *GenerationState
+}
+
+func (value *concurrentState) LoadReady(context.Context, string) (GenerationState, bool, error) {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	if value.ready == nil {
+		return GenerationState{}, false, nil
+	}
+	return *value.ready, true, nil
+}
+func (value *concurrentState) LoadPending(context.Context, string) (GenerationState, bool, error) {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	if value.pending == nil {
+		return GenerationState{}, false, nil
+	}
+	return *value.pending, true, nil
+}
+func (value *concurrentState) SaveReady(_ context.Context, state GenerationState) error {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	copy := state
+	value.ready = &copy
+	return nil
+}
+func (value *concurrentState) SavePending(_ context.Context, state GenerationState) error {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	if value.pending != nil {
+		return errors.New("pending exists")
+	}
+	copy := state
+	value.pending = &copy
+	return nil
+}
+func (value *concurrentState) RemovePending(context.Context, string) error {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	value.pending = nil
+	return nil
+}
+func (value *concurrentState) snapshot() (*GenerationState, *GenerationState) {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	var readyCopy *GenerationState
+	var pendingCopy *GenerationState
+	if value.ready != nil {
+		copy := *value.ready
+		readyCopy = &copy
+	}
+	if value.pending != nil {
+		copy := *value.pending
+		pendingCopy = &copy
+	}
+	return readyCopy, pendingCopy
+}
+
+type concurrentKeychain struct {
+	mu     sync.Mutex
+	values map[string][]byte
+}
+
+func (value *concurrentKeychain) Put(_ context.Context, accountID, generationID string, secret []byte) error {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	value.values[key(accountID, generationID)] = append([]byte(nil), secret...)
+	return nil
+}
+func (value *concurrentKeychain) Get(_ context.Context, accountID, generationID string) ([]byte, bool, error) {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	secret, found := value.values[key(accountID, generationID)]
+	return append([]byte(nil), secret...), found, nil
+}
+func (value *concurrentKeychain) Delete(_ context.Context, accountID, generationID string) error {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	delete(value.values, key(accountID, generationID))
+	return nil
+}
+func (value *concurrentKeychain) snapshot() map[string][]byte {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	result := make(map[string][]byte, len(value.values))
+	for name, secret := range value.values {
+		result[name] = append([]byte(nil), secret...)
+	}
+	return result
+}
+
+type concurrentLocker struct{ mu sync.Mutex }
+
+func (value *concurrentLocker) Acquire(context.Context, string) (func() error, error) {
+	value.mu.Lock()
+	return func() error { value.mu.Unlock(); return nil }, nil
+}
+
+func TestConcurrentPublishAndStartupReconcileSerializeToOneReadyGeneration(t *testing.T) {
+	clock := &fakeClock{now: 1_000_000_000}
+	old := oldReady()
+	state := &concurrentState{ready: &old}
+	keychain := &concurrentKeychain{values: map[string][]byte{key(testAccount, testOld): []byte("old")}}
+	publisher := &Publisher{
+		Clock: clock, State: state, Keychain: keychain, Locker: &concurrentLocker{},
+		NewID: func() (string, error) { return testNew, nil },
+	}
+	req := request(clock)
+	const goroutines = 32
+	start := make(chan struct{})
+	errorsChannel := make(chan error, goroutines)
+	var wait sync.WaitGroup
+	for index := 0; index < goroutines; index++ {
+		wait.Add(1)
+		go func(publish bool) {
+			defer wait.Done()
+			<-start
+			if publish {
+				_, err := publisher.Publish(context.Background(), req, []byte(testSecret))
+				if err != nil && !errors.Is(err, ErrGenerationCollision) {
+					errorsChannel <- err
+				}
+				return
+			}
+			_, _, err := publisher.Reconcile(context.Background(), testAccount, req.Deadline.MutationStopNS)
+			if err != nil {
+				errorsChannel <- err
+			}
+		}(index%2 == 0)
+	}
+	close(start)
+	wait.Wait()
+	close(errorsChannel)
+	for err := range errorsChannel {
+		t.Fatalf("concurrent operation failed: %v", err)
+	}
+	ready, found, err := publisher.Reconcile(context.Background(), testAccount, req.Deadline.MutationStopNS)
+	if err != nil || !found || ready.GenerationID != testNew || ready.ObsoleteGenerationID != "" {
+		t.Fatalf("final reconcile ready=%+v found=%v err=%v", ready, found, err)
+	}
+	storedReady, pending := state.snapshot()
+	values := keychain.snapshot()
+	if storedReady == nil || storedReady.GenerationID != testNew || pending != nil || len(values) != 1 ||
+		string(values[key(testAccount, testNew)]) != testSecret {
+		t.Fatalf("concurrent final state is inconsistent: ready=%+v pending=%+v values=%v", storedReady, pending, values)
+	}
 }

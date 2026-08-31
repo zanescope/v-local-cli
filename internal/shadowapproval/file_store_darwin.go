@@ -76,11 +76,22 @@ func challengeStat(rootFD int, leaf string, allowEmpty bool) (unix.Stat_t, error
 	return stat, nil
 }
 
+func sameChallengeFile(left, right unix.Stat_t) bool {
+	return left.Dev == right.Dev && left.Ino == right.Ino && left.Uid == right.Uid &&
+		left.Mode == right.Mode && left.Nlink == right.Nlink && left.Size == right.Size &&
+		left.Mtim == right.Mtim
+}
+
 func removeChallengeNext(rootFD int) error {
-	if _, err := challengeStat(rootFD, challengeNextFileName, true); errors.Is(err, unix.ENOENT) {
+	stat, err := challengeStat(rootFD, challengeNextFileName, true)
+	if errors.Is(err, unix.ENOENT) {
 		return nil
 	} else if err != nil {
 		return err
+	}
+	current, err := challengeStat(rootFD, challengeNextFileName, true)
+	if err != nil || !sameChallengeFile(stat, current) {
+		return errors.New("Shadow approval next-file removal target drifted")
 	}
 	if err := unix.Unlinkat(rootFD, challengeNextFileName, 0); err != nil {
 		return err
@@ -88,31 +99,42 @@ func removeChallengeNext(rootFD int) error {
 	return unix.Fsync(rootFD)
 }
 
-func loadChallenge(rootFD int) (contract.Challenge, bool, error) {
+func loadChallenge(rootFD int) (contract.Challenge, bool, unix.Stat_t, error) {
 	stat, err := challengeStat(rootFD, challengeFileName, false)
 	if errors.Is(err, unix.ENOENT) {
-		return contract.Challenge{}, false, nil
+		return contract.Challenge{}, false, stat, nil
 	}
 	if err != nil {
-		return contract.Challenge{}, false, err
+		return contract.Challenge{}, false, stat, err
 	}
 	fd, err := unix.Openat(rootFD, challengeFileName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return contract.Challenge{}, false, err
+		return contract.Challenge{}, false, stat, err
 	}
 	file := os.NewFile(uintptr(fd), challengeFileName)
+	var opened unix.Stat_t
+	if err := unix.Fstat(fd, &opened); err != nil || !sameChallengeFile(stat, opened) {
+		_ = file.Close()
+		return contract.Challenge{}, false, stat, errors.New("Shadow approval file drifted while opening")
+	}
 	payload, readErr := io.ReadAll(io.LimitReader(file, maxChallengeBytes+1))
+	var after unix.Stat_t
+	statErr := unix.Fstat(fd, &after)
+	current, pathErr := challengeStat(rootFD, challengeFileName, false)
 	closeErr := file.Close()
 	if readErr != nil || closeErr != nil || len(payload) == 0 || int64(len(payload)) != stat.Size || len(payload) > maxChallengeBytes {
-		return contract.Challenge{}, false, errors.New("Shadow approval file is unreadable")
+		return contract.Challenge{}, false, stat, errors.New("Shadow approval file is unreadable")
+	}
+	if statErr != nil || pathErr != nil || !sameChallengeFile(opened, after) || !sameChallengeFile(after, current) {
+		return contract.Challenge{}, false, stat, errors.New("Shadow approval file drifted during read")
 	}
 	var challenge contract.Challenge
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&challenge); err != nil || decoder.Decode(&struct{}{}) != io.EOF || challenge.Validate() != nil {
-		return contract.Challenge{}, false, errors.New("Shadow approval file contract is invalid")
+		return contract.Challenge{}, false, stat, errors.New("Shadow approval file contract is invalid")
 	}
-	return challenge, true, nil
+	return challenge, true, stat, nil
 }
 
 func (value *FileStore) withRoot(ctx context.Context, action func(int) error) (resultErr error) {
@@ -165,7 +187,7 @@ func (value *FileStore) Load(ctx context.Context) (contract.Challenge, bool, err
 			return err
 		}
 		var err error
-		challenge, found, err = loadChallenge(rootFD)
+		challenge, found, _, err = loadChallenge(rootFD)
 		return err
 	})
 	return challenge, found, err
@@ -227,9 +249,13 @@ func (value *FileStore) Remove(ctx context.Context, challengeID string) error {
 		if err := removeChallengeNext(rootFD); err != nil {
 			return err
 		}
-		challenge, found, err := loadChallenge(rootFD)
+		challenge, found, stat, err := loadChallenge(rootFD)
 		if err != nil || !found || challenge.ChallengeID != challengeID {
 			return errors.New("exact Shadow approval challenge is absent or mismatched")
+		}
+		current, err := challengeStat(rootFD, challengeFileName, false)
+		if err != nil || !sameChallengeFile(stat, current) {
+			return errors.New("exact Shadow approval removal target drifted")
 		}
 		if err := unix.Unlinkat(rootFD, challengeFileName, 0); err != nil {
 			return errors.New("exact Shadow approval challenge could not be removed")

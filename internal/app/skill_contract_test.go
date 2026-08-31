@@ -658,7 +658,8 @@ func TestInternalFlagSetsStayExplicitAndOutsidePublicSchema(t *testing.T) {
 	commands := schemaCommands(t)
 	implemented := implementationFlagSets(t, root)
 	expected := map[string]map[string]bool{
-		"__shadow-qualify": {"account": true, "database-only": true},
+		"__shadow-qualify":         {"account": true, "database-only": true},
+		"__shadow-synthetic-owner": {"confirm": true},
 	}
 	for command, flags := range implemented {
 		if !strings.HasPrefix(command, "__") {

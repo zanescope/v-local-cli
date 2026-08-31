@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -104,6 +105,9 @@ func buildDirectory(t *testing.T) (string, string) {
 }
 
 func TestLoadVerifiesExactImmutableDirectoryAndDetectsDrift(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("frozen build-set POSIX mode verification is a macOS gate")
+	}
 	root, expected := buildDirectory(t)
 	_, digest, err := Load(root)
 	if err != nil || digest != expected {

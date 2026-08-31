@@ -92,7 +92,8 @@ func stateFileStat(rootFD int, leaf string, allowEmpty bool) (unix.Stat_t, error
 
 func sameStateFile(left, right unix.Stat_t) bool {
 	return left.Dev == right.Dev && left.Ino == right.Ino && left.Uid == right.Uid &&
-		left.Mode == right.Mode && left.Nlink == right.Nlink && left.Size == right.Size
+		left.Mode == right.Mode && left.Nlink == right.Nlink && left.Size == right.Size &&
+		left.Mtim == right.Mtim
 }
 
 func removeStateLeaf(rootFD int, leaf string, allowEmpty bool) error {
@@ -132,10 +133,16 @@ func readState(rootFD int, leaf, accountID, status string) (GenerationState, boo
 		return GenerationState{}, false, stat, errors.New("Shadow generation state file drifted while opening")
 	}
 	payload, readErr := io.ReadAll(io.LimitReader(file, maxGenerationStateBytes+1))
+	var after unix.Stat_t
+	statErr := unix.Fstat(fd, &after)
+	current, pathErr := stateFileStat(rootFD, leaf, false)
 	closeErr := file.Close()
 	if readErr != nil || closeErr != nil || len(payload) == 0 || int64(len(payload)) != stat.Size ||
 		len(payload) > maxGenerationStateBytes {
 		return GenerationState{}, false, stat, errors.New("Shadow generation state file is unreadable")
+	}
+	if statErr != nil || pathErr != nil || !sameStateFile(opened, after) || !sameStateFile(after, current) {
+		return GenerationState{}, false, stat, errors.New("Shadow generation state file drifted during read")
 	}
 	var state GenerationState
 	decoder := json.NewDecoder(bytes.NewReader(payload))

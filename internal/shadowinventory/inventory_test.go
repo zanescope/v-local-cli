@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -17,6 +18,9 @@ func canonicalRoot(t *testing.T) string {
 }
 
 func TestScanNormalizesDirectoriesAndSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("macOS App inode/link-count inventory is intentionally unavailable on Windows")
+	}
 	root := filepath.Join(canonicalRoot(t), "Source.app")
 	if err := os.MkdirAll(filepath.Join(root, "Contents", "Resources"), 0o700); err != nil {
 		t.Fatal(err)
@@ -34,6 +38,17 @@ func TestScanNormalizesDirectoriesAndSymlinks(t *testing.T) {
 	for _, entry := range entries {
 		if entry.Type != "file" && entry.Size != 0 {
 			t.Fatalf("non-file size was not normalized: %+v", entry)
+		}
+	}
+}
+
+func TestSafeRelativeUsesHostIndependentWirePaths(t *testing.T) {
+	if !safeRelative("Contents/Frameworks/helper") {
+		t.Fatalf("slash-delimited inventory path was rejected on %s", runtime.GOOS)
+	}
+	for _, value := range []string{"", "/absolute", "../escape", "a/../escape", `a\\escape`, "C:/escape", "file:stream"} {
+		if safeRelative(value) {
+			t.Errorf("unsafe inventory path %q was accepted", value)
 		}
 	}
 }

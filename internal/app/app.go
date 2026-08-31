@@ -113,6 +113,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "__shadow-qualify" {
 		return runShadowQualificationCommand(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "__shadow-synthetic-owner" {
+		return runShadowSyntheticOwnerCommand(args[1:], stdout, stderr)
+	}
 	if output := strings.TrimSpace(os.Getenv(privateOutputPathEnv)); output != "" {
 		return mainWithPrivateOutput(args, output, stderr)
 	}
@@ -189,9 +192,6 @@ func mainWithPolicy(args []string, stdout, stderr io.Writer, immutableOnly bool)
 		writeErrorMode(stderr, &commandError{typeName: "missing_command", message: "缺少命令", hint: "运行 v-local-cli --help 查看可用命令。", code: 2}, mode)
 		return 2
 	}
-	if args[0] == "--daemon" {
-		return runDaemonClient(args[1:], stdout, stderr, mode)
-	}
 	if args[0] == "--version" || args[0] == "version" {
 		fmt.Fprintln(stdout, Version)
 		return 0
@@ -199,6 +199,18 @@ func mainWithPolicy(args []string, stdout, stderr io.Writer, immutableOnly bool)
 	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
 		writeHelp(stdout)
 		return 0
+	}
+	if err := reconcilePlatformShadowGenerations(context.Background()); err != nil {
+		writeErrorMode(stderr, &commandError{
+			typeName: "shadow_generation_reconciliation_pending",
+			message:  "Shadow 凭据代际恢复尚未完成",
+			hint:     "账号不会在 pending 代际被精确删除并验证前报告 ready；请停止并检查当前冻结构建、私有状态目录和 Keychain helper。",
+			code:     5,
+		}, mode)
+		return 5
+	}
+	if args[0] == "--daemon" {
+		return runDaemonClient(args[1:], stdout, stderr, mode)
 	}
 	freshRequested := false
 	var freshErr error

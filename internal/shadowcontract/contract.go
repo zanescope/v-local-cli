@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -499,11 +499,15 @@ func lowerHex(value string) bool {
 }
 
 func validRelativeLeaf(value string) bool {
-	if value == "" || len(value) > 240 || filepath.IsAbs(value) || strings.Contains(value, "\\") {
+	// Contract leaves are wire-format paths, not host filesystem paths. Keep
+	// their slash semantics stable on every OS and reject Windows drive/ADS
+	// syntax explicitly instead of letting filepath.Clean reinterpret it.
+	if value == "" || len(value) > 240 || path.IsAbs(value) ||
+		strings.ContainsAny(value, "\\:") {
 		return false
 	}
-	clean := filepath.Clean(value)
-	return clean == value && clean != "." && clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator))
+	clean := path.Clean(value)
+	return clean == value && clean != "." && clean != ".." && !strings.HasPrefix(clean, "../")
 }
 
 func ValidateErrorCode(value string) error {

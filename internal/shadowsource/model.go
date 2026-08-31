@@ -80,7 +80,7 @@ func lowerHex(value string) bool {
 }
 
 func safeRelative(value string) bool {
-	return value != "" && !strings.Contains(value, "\\") && !strings.HasPrefix(value, "/") &&
+	return value != "" && !strings.ContainsAny(value, "\\:") && !path.IsAbs(value) &&
 		path.Clean(value) == value && value != ".." && !strings.HasPrefix(value, "../")
 }
 

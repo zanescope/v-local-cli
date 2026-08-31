@@ -286,6 +286,12 @@ func readBoundFile(root, leaf string, mode uint32, expectedSize int64) ([]byte, 
 	if err != nil || !os.SameFile(opened, after) || after.Size() != opened.Size() || after.Mode() != opened.Mode() {
 		return nil, errors.New("Shadow build-set file identity drifted during read")
 	}
+	pathAfter, err := os.Lstat(path)
+	resolvedAfter, resolveErr := filepath.EvalSymlinks(path)
+	if err != nil || resolveErr != nil || resolvedAfter != path || pathAfter.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(after, pathAfter) || pathAfter.Size() != after.Size() || pathAfter.Mode() != after.Mode() {
+		return nil, errors.New("Shadow build-set path identity drifted during read")
+	}
 	return payload, nil
 }
 

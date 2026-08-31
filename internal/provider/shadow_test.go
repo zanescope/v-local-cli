@@ -128,6 +128,42 @@ func TestShadowClientSeparatesTransientEvidenceFromMinimalCredential(t *testing.
 	}
 }
 
+func TestShadowQualificationRejectsEveryAcquisitionPayloadField(t *testing.T) {
+	vectors := shadowVectors(t)
+	qualified := contract.Result{
+		Version: contract.Version, RequestID: vectors.QualifyRequest.RequestID,
+		Status: "qualified", ErrorCode: contract.ErrorNone, Qualification: &vectors.Qualification,
+	}
+	if err := qualified.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	mutations := map[string]func(*CandidateBundle){
+		"catalog_id":          func(value *CandidateBundle) { value.CatalogID = strings.Repeat("a", 64) },
+		"catalog_entries":     func(value *CandidateBundle) { value.CatalogEntries = []CatalogEntry{{}} },
+		"database_keys":       func(value *CandidateBundle) { value.DatabaseKeys = map[string]string{"db": "key"} },
+		"database_profiles":   func(value *CandidateBundle) { value.DatabaseProfiles = map[string]string{"db": "profile"} },
+		"database_credential": func(value *CandidateBundle) { value.DatabaseCredential = &DatabaseCredential{} },
+		"image_keys":          func(value *CandidateBundle) { value.ImageKeys = &ImageKeys{} },
+		"profiles":            func(value *CandidateBundle) { value.Profiles = []ProfileSummary{{}} },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			response := CandidateBundle{
+				Protocol: Protocol, RequestID: vectors.QualifyRequest.RequestID,
+				ShadowAttempt: &qualified,
+			}
+			mutate(&response)
+			client := &ShadowClient{
+				path: "/synthetic/provider", clock: &shadowClock{now: 1},
+				exchange: func(context.Context, string, acquireRequest) (CandidateBundle, error) { return response, nil },
+			}
+			if _, err := client.Qualify(context.Background(), vectors.QualifyRequest); err == nil {
+				t.Fatal("qualification accepted acquisition payload data")
+			}
+		})
+	}
+}
+
 func TestShadowCandidateValidatorRequiresTypedReadyEvidenceScopesAndSelectedInput(t *testing.T) {
 	vectors := shadowVectors(t)
 	bundle := CandidateBundle{

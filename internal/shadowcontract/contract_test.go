@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -173,5 +174,25 @@ func TestResourceLinkCountDistinguishesDirectoriesFromFiles(t *testing.T) {
 	file := ResourceBinding{Kind: "hook", Leaf: "hook", Device: 1, Inode: 3, UID: 501, Mode: 0o600, LinkCount: 2}
 	if err := file.Validate(); err == nil {
 		t.Fatal("hard-linked file binding was accepted")
+	}
+}
+
+func TestResourceLeafUsesHostIndependentWirePathSemantics(t *testing.T) {
+	valid := ResourceBinding{
+		Kind: "hook", Leaf: "attempt-0123456789abcdef0123456789abcdef/capture/hook.fifo",
+		Device: 1, Inode: 2, UID: 501, Mode: 0o600, LinkCount: 1,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("slash-delimited wire leaf was rejected on %s: %v", runtime.GOOS, err)
+	}
+	for _, leaf := range []string{
+		`C:/shadow/hook.fifo`, `C:\\shadow\\hook.fifo`, `attempt/../hook.fifo`,
+		`attempt//hook.fifo`, `attempt/hook.fifo:stream`, `/attempt/hook.fifo`,
+	} {
+		invalid := valid
+		invalid.Leaf = leaf
+		if err := invalid.Validate(); err == nil {
+			t.Errorf("host-dependent or non-canonical leaf %q was accepted", leaf)
+		}
 	}
 }

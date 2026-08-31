@@ -173,8 +173,9 @@ func (value *ShadowClient) Qualify(ctx context.Context, request contract.Request
 	if err != nil {
 		return contract.Result{}, err
 	}
-	if response.ShadowAttempt.Status != "qualified" || len(response.DatabaseKeys) != 0 ||
-		response.DatabaseCredential != nil || response.ImageKeys != nil {
+	if response.ShadowAttempt.Status != "qualified" || response.CatalogID != "" || len(response.CatalogEntries) != 0 ||
+		len(response.DatabaseKeys) != 0 || len(response.DatabaseProfiles) != 0 || response.DatabaseCredential != nil ||
+		response.ImageKeys != nil || len(response.Profiles) != 0 {
 		return contract.Result{}, &ProtocolContractError{Cause: errors.New("Shadow qualification carried credential data"), Stage: "shadow_qualification"}
 	}
 	return *response.ShadowAttempt, nil

@@ -392,6 +392,14 @@ func (value *Publisher) Publish(parent context.Context, request Request, credent
 		committed.ObsoleteGenerationID = ready.GenerationID
 	}
 	if err := value.State.SaveReady(ctx, committed); err != nil {
+		// Atomic state publication may have crossed its commit point before a
+		// directory sync or post-replace check reported an error. Re-read under
+		// the same account lock and only classify an exact ready record as
+		// committed; every ambiguous or old value remains non-ready pending work.
+		observed, found, loadErr := value.State.LoadReady(ctx, request.AccountBindingID)
+		if loadErr == nil && found && validateLoaded(observed, true, request.AccountBindingID, "ready") == nil && observed == committed {
+			return committed, &CommittedError{Cause: err}
+		}
 		return GenerationState{}, ErrReconciliationPending
 	}
 	if !before(value.Clock, request.Deadline.MutationStopNS) || value.State.RemovePending(ctx, request.AccountBindingID) != nil {

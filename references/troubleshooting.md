@@ -15,6 +15,7 @@
 | `private_output_invalid` | 只在本机受控验收中设置 `V_LOCAL_CLI_PRIVATE_OUTPUT_PATH`；使用既有、非重解析点私有目录中的绝对新文件路径，不要覆盖现有文件。 |
 | `private_output_unavailable` | 检查私有输出父目录的当前用户写权限与剩余空间，换用新的文件名后重试；不要改写系统安全策略或降级到共享目录。 |
 | `crash_protection_unavailable` | 停止密钥获取；确认当前进程允许把 Unix `RLIMIT_CORE` 降为 0，或检查 Windows crash reporting/应用控制策略。不得在 crash artifact 防护失败时继续接收 Provider secret。 |
+| `shadow_generation_reconciliation_pending` | 启动时检测到未完成的 Shadow 凭据代际事务，账号保持非 ready。停止自动重试；检查当前冻结 build set、账号私有状态目录和 Keychain helper，使 CLI 能对状态中记录的精确 generation ID 完成删除后复查或已提交代际复查。不得手工删除整个账号目录、提升 pending 为 ready，或把该错误解释为新凭据已可用。 |
 | `external_workflow_state_invalid` | 跨重启 checkpoint 已损坏、过期或包含协议不允许的字段。它不是授权凭据；停止自动继续。账号仍可选时用 `setup --cancel-acquisition --account NAME` 精确清理；账号已不可选或记录无法识别时，取得用户对“仅清理全部跨重启 checkpoint”的明确确认后运行 `setup --cancel-all-external-workflows`。该命令保留 daemon resume、快照和凭据。`doctor` 同样会 fail-closed，不能修复该记录。 |
 | `external_workflow_cleanup_failed` | 全局 checkpoint 清理没有完成；不要手工递归删除私有状态目录。检查当前用户对私有 acquisition 目录的权限与剩余空间后重试；快照、凭据和 daemon resume 均不在该命令删除范围内。 |
 | `key_provider_failed` | 运行 `v-local-cli provider status`；确认 Provider 是单独安装的正确平台版本。重新登录微信或打开新消息后再试。 |

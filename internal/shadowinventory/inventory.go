@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -30,9 +31,9 @@ type Entry struct {
 	LinkTarget string `json:"link_target,omitempty"`
 }
 
-func safeRelative(path string) bool {
-	return path != "" && !filepath.IsAbs(path) && !strings.Contains(path, "\\") &&
-		filepath.Clean(path) == path && path != ".." && !strings.HasPrefix(path, ".."+string(filepath.Separator))
+func safeRelative(value string) bool {
+	return value != "" && !path.IsAbs(value) && !strings.ContainsAny(value, "\\:") &&
+		path.Clean(value) == value && value != ".." && !strings.HasPrefix(value, "../")
 }
 
 func WithinRoot(root, target string) bool {
@@ -99,6 +100,7 @@ func ScanContext(ctx context.Context, root string) ([]Entry, string, error) {
 			return errors.New("App inventory exceeds the entry bound")
 		}
 		relative, err := filepath.Rel(root, path)
+		relative = filepath.ToSlash(relative)
 		if err != nil || !safeRelative(relative) {
 			return errors.New("App inventory escaped its root")
 		}
@@ -106,7 +108,7 @@ func ScanContext(ctx context.Context, root string) ([]Entry, string, error) {
 		if err != nil {
 			return err
 		}
-		value := Entry{Path: filepath.ToSlash(relative), Mode: uint32(info.Mode().Perm())}
+		value := Entry{Path: relative, Mode: uint32(info.Mode().Perm())}
 		switch {
 		case info.Mode()&os.ModeSymlink != 0:
 			value.Type = "symlink"

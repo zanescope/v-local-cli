@@ -260,3 +260,166 @@ Do not combine these approvals.
 - **SIP-off fallback**: unverified and untouched.
 - **Goal completion**: no. The original goal must remain incomplete until every
   ordered Shadow and SIP-off machine condition passes on one frozen build set.
+
+## 9. Windows continuation addendum (2026-08-31)
+
+This section supersedes the Windows-side status statements above. The earlier
+sections remain as the immutable incoming handoff record. The continuation was
+created from the latest `origin/main` and integrated only the implementation
+commit identified in section 1 plus its two immediately following handoff-doc
+commits; no older Shadow implementation was imported.
+
+### Completed Windows and cross-platform work
+
+The handoff-touched Shadow packages, including Darwin-only/no-cgo files, were
+reviewed at function granularity. The continuation now provides:
+
+- an internal hidden `__shadow-synthetic-owner --confirm` entry point that
+  composes the real Owner, approval, verifier, candidate validator, publisher,
+  and reconciliation state machine entirely with synthetic/in-memory adapters;
+- startup reconciliation for every discovered account, before normal command
+  execution, with a shared deadline, deterministic ordering, duplicate/empty
+  account rejection, exact pending-generation cleanup, and lazy Darwin frozen
+  build-set/Keychain construction;
+- crash tests on both sides of the ready marker and concurrent
+  publish/reconcile tests;
+- host-independent wire-path validation and inventory conversion, including
+  rejection of backslashes, drive/ADS colons, absolute paths, traversal, and
+  duplicate/non-canonical scopes;
+- post-read file identity checks for build artifacts, approval state,
+  publication state, and the Provider journal, including device/inode, owner,
+  mode, link count, size, and mtime checks where available;
+- nanosecond clock overflow/range validation shared byte-for-byte by both
+  repositories;
+- Provider frame short-write handling, thread-safe locked-memory bookkeeping,
+  cancellation-aware transformation, exact plist rewrite verification,
+  sanitized discovery subprocess environments, and pre/post-transform frozen
+  build-set revalidation;
+- a second target/canonical-path/digest validation after supervisor release and
+  immediately before exec, plus Unix target-drift fault injection;
+- retention of canonical paths produced by `Frame.validateInit` (the previous
+  value receiver silently discarded them);
+- rejection by the CLI of every Provider acquisition payload field during
+  read-only qualification, not only the originally checked credential subset.
+
+Production execution remains disabled. The continuation does not assemble or
+enable a production route and does not implement or infer macOS capture,
+LaunchServices, Keychain trust, signing, TCC/FDA, or real-machine qualification.
+
+### Reproducible Windows gates
+
+Run the common non-test gates from each repository:
+
+```powershell
+New-Item -ItemType Directory -Force .tmp-go-cache | Out-Null
+$env:GOCACHE=(Resolve-Path .tmp-go-cache).Path
+go vet ./...
+go mod verify
+npm test
+```
+
+The final full CLI test used a workspace-local Go temporary directory:
+
+```powershell
+$env:GOCACHE=(Resolve-Path .tmp-go-cache).Path
+$env:GOTMPDIR=(Resolve-Path .tmp-go-cache).Path
+go test -count=1 ./...
+```
+
+The final full Provider test deliberately used the native Windows system
+temporary directory because its DACL and named-pipe tests exercise native temp
+semantics:
+
+```powershell
+$env:GOCACHE=(Resolve-Path .tmp-go-cache).Path
+Remove-Item Env:GOTMPDIR -ErrorAction SilentlyContinue
+go test -count=1 ./...
+```
+
+Results on native Windows:
+
+- CLI `go test -count=1 ./...`: PASS (including `internal/app` 17.657s and
+  `internal/provider` 6.039s);
+- Provider `go test -count=1 ./...`: PASS (including the root package 7.384s
+  and `internal/acquisition` 7.860s);
+- `go vet ./...`: PASS in both repositories;
+- `go mod verify`: `all modules verified` in both repositories;
+- CLI npm: 12/12 tests PASS (587.7873ms);
+- Provider npm: 13/13 tests PASS (792.3302ms).
+
+The Windows host reports `CGO_ENABLED=0` and has no supported C compiler, so
+`go test -race` exits with `-race requires cgo`. This is an explicitly
+unexecuted gate, not a pass. The normal suite includes the concurrent
+publish/reconcile and locked-memory stress tests.
+
+### Contract byte identity
+
+PowerShell `SequenceEqual[byte]` comparison passed for every shared contract
+artifact. SHA-256 values are:
+
+| Shared artifact | SHA-256 |
+| --- | --- |
+| `internal/shadowcontract/contract.go` | `a1fc8158246b52852072863483585c44855c98dcf66b3b275ed4d5770a4f62de` |
+| `internal/shadowbuildset/buildset.go` | `5b34694ab8278fbeda67a777a1f4d471d7b73bbd03101ba638147f03d4273558` |
+| `internal/shadowclock/clock.go` | `27dfe6fa1e0d571a185464cff18cdd9a6450892d69c093015abe2672f791c8b5` |
+| `internal/shadowaccount/account.go` | `5d9a98fe19d557a14cd9c97fdfaf4e18d13d219aeb3488fae2c5d211f458eea2` |
+| `testdata/shadow-contract-v1.json` | `076179a56a4986e281225f20e338afcccb0a09c6fa192dda2999c53627da8fd2` |
+| `testdata/shadow-build-set-v1.json` | `6b63d4f976c936d986d9dc23d2992f7e83a70e3bbbb10c178bbfc20aacc8d698` |
+
+### Darwin compile-only checks
+
+Both repositories passed the following for `amd64` and `arm64` with
+`CGO_ENABLED=0`:
+
+```powershell
+$env:GOOS='darwin'
+$env:GOARCH='amd64' # repeat with arm64
+$env:CGO_ENABLED='0'
+go test -count=1 -exec='cmd /c echo' ./...
+go vet ./...
+```
+
+The test command compiles Darwin test binaries and delegates attempted
+execution to an echo wrapper. No Darwin test binary ran. Darwin cgo files were
+read and statically reviewed but cannot be compiled or executed on this host.
+
+Formatting, `git diff --check`, and placeholder/TODO residue scans are clean.
+Staticcheck is clean for the CLI `./internal/shadow...` packages and for the
+Provider `./internal/command ./internal/shadow...` packages on native Windows
+and Darwin arm64 no-cgo. Including the complete CLI entry packages also reports
+`internal/app/app_test.go:1267` (`SA4006`) from the initial 2026-08-17 commit and
+Darwin no-cgo reports the Windows release-signing injection variable as `U1000`;
+both are unchanged from `origin/main` and outside this handoff diff.
+
+### Mac-return findings and unverified boundaries
+
+No statically certain defect remains in the reviewed Darwin cgo adapters, but
+the following require Mac-side design review, fault injection, or qualification:
+
+1. Verify Security.framework static-code identity via `/dev/fd/N` and running
+   guest CDHash behavior. The current code-hash check is identity evidence, not
+   proof of signature validity and not a replacement for the signing gate.
+2. Exercise generic-password Keychain add/get/delete, locked-Keychain and UI
+   behavior, accessibility attributes, duplicate/crash cleanup, and secret
+   memory lifetime on a real Mac.
+3. Validate `proc_pid_rusage` birth identity and PID-reuse behavior with native
+   cgo tests.
+4. Qualify APFS `clonefile`, directory/file fsync and rename durability,
+   LaunchServices registration, codesign/DER entitlements, real resigning,
+   capture, TCC/FDA, and minimal launch environment behavior.
+5. The supervisor now revalidates after release, but a residual path race exists
+   between its final digest and `syscall.Exec`. Do not claim closure without a
+   Mac-side decision on an fd-based exec/immutable staging design and native
+   adversarial testing.
+6. If a supervisor hangs, client fallback termination does not itself prove
+   cleanup of a separately grouped child. Exact-absence checks fail closed and
+   retain recovery state, but Mac fault injection must prove process-tree and
+   artifact residue behavior.
+7. Discovery currently treats a missing entitlement key and a `codesign`/plist
+   inspection failure as the same negative result. Mac qualification must prove
+   the intended fail-closed policy before entitlement stripping is trusted.
+
+Accordingly, macOS runtime, macOS cgo behavior, signing, Keychain semantics,
+capture, LaunchServices, TCC/FDA, SIP-off acquisition, and the real T+120 flow
+remain unverified. They must not be inferred from the Windows or compile-only
+results above.

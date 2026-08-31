@@ -30,6 +30,18 @@ func TestRemainingUsesOneAbsoluteMonotonicValue(t *testing.T) {
 	}
 }
 
+func TestTimespecNSRejectsInvalidOrOverflowingValues(t *testing.T) {
+	value, err := timespecNS(12, 345)
+	if err != nil || value != 12_000_000_345 {
+		t.Fatalf("value=%d err=%v", value, err)
+	}
+	for _, input := range [][2]int64{{-1, 0}, {0, -1}, {0, 1_000_000_000}, {int64(^uint64(0) / 1_000_000_000), 999_999_999}} {
+		if _, err := timespecNS(input[0], input[1]); err == nil {
+			t.Fatalf("invalid timespec was accepted: %+v", input)
+		}
+	}
+}
+
 func TestSystemClockIsSharedDarwinRawDomain(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("Darwin-only clock domain")
