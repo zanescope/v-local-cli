@@ -393,8 +393,9 @@ both are unchanged from `origin/main` and outside this handoff diff.
 
 ### Mac-return findings and unverified boundaries
 
-No statically certain defect remains in the reviewed Darwin cgo adapters, but
-the following require Mac-side design review, fault injection, or qualification:
+A later deep re-review found and fixed additional cross-platform defects. This
+paragraph and the following list are retained as the earlier review snapshot;
+section 10 supersedes them with the final Windows-side findings and gates.
 
 1. Verify Security.framework static-code identity via `/dev/fd/N` and running
    guest CDHash behavior. The current code-hash check is identity evidence, not
@@ -423,3 +424,219 @@ Accordingly, macOS runtime, macOS cgo behavior, signing, Keychain semantics,
 capture, LaunchServices, TCC/FDA, SIP-off acquisition, and the real T+120 flow
 remain unverified. They must not be inferred from the Windows or compile-only
 results above.
+
+## 10. Windows deep re-review closure (2026-08-31)
+
+This section supersedes the review results, hashes, timings, and residue claim
+in section 9. The production-disabled boundary and all macOS qualification
+limitations remain unchanged. The re-review refreshed both `origin/main` and
+`origin/codex/shadow-ephemeral-poc`; neither remote changed while this work was
+in progress.
+
+### Reviewed commits and method
+
+| Repository | Integrated `origin/main` | Deep-review code commit |
+| --- | --- | --- |
+| `v-local-key-provider` | `bd477b923a0085e737e115fa80590f23cffb4ea7` | `8124bb379cb6629c2d5d42fce78848b902847e53` |
+| `v-local-cli` | `d6f5e24b32a7c049dad652aaea2d1fe89acfd5e4` | `8b769c26b92af626ba6b936c9ae1482394cb4a40` |
+
+The review covered every function in the Shadow-touched packages and the
+supporting startup, state, command, process, inventory, source, build-set,
+Keychain, and supervisor boundaries. It also used whole-repository tests,
+`vet`, staticcheck, vulnerability scanning, added-line residue scans, stress
+runs, Linux race instrumentation, and Darwin no-cgo cross-builds. Only the
+handoff commits from `codex/shadow-ephemeral-poc` were integrated onto the
+current `origin/main`; no earlier Shadow implementation was used.
+
+### Additional defects found and fixed
+
+1. The shared decoder accepted contradictory states and incompletely bound
+   frozen request/qualification/receipt fields. Golden vectors now cross-bind
+   every frozen field, state-dependent qualification presence, timing totals,
+   resource modes, and clone/supervisor digests in both repositories.
+2. Build-set reads could accept hard links and source identity was not observed
+   across the complete inventory interval. Reads now reject multi-link files,
+   recheck path/descriptor identity, and verify source code identity, version,
+   rewrite inputs, per-file metadata, and inventory before and after use.
+3. Startup reconciliation silently ignored account-ID-shaped non-directories.
+   Such entries now fail closed as unreadable state, with deterministic tests.
+4. The CLI Keychain helper did not handle short output writes and cleared only
+   the written prefix. It now completes short writes and clears the full secret
+   buffer; tests exercise both properties.
+5. Provider command dispatch trusted some already-decoded inner bindings. It
+   now independently recomputes the options HMAC from the outer catalog key and
+   exact account/database/scopes, checks request identity at the command
+   boundary, and revalidates runner request, qualification, and receipt output.
+6. Recovery accepted resource combinations that normal execution cannot
+   produce. Recovery states now model only reachable prepared and launched
+   resource sets; a process or supervisor requires the complete launch set.
+7. A supervisor validation failure could close the inherited status descriptor
+   without a status byte, allowing EOF to be mistaken for successful exec.
+   Every reportable failure now writes an explicit failure byte; direct and
+   end-to-end replacement tests cover the boundary.
+8. Darwin gate setup failures could escape without structured JSON. They now
+   emit the same secret-free failed result and failure exit status as later gate
+   failures.
+9. Closing a Windows Job Object does not synchronously prove all descendants
+   have exited. The Windows qualification path now explicitly terminates the
+   job and waits, with a bound, until `ActiveProcesses == 0` before plaintext
+   cleanup. The descendant-cleanup test passed 20 consecutive runs.
+10. Platform test seams had leaked into Darwin behavior and a 300 ms synthetic
+    lease became invalid under race instrumentation. Seams are Linux-only;
+    Darwin uses the native runtime and process-birth implementation. The lease
+    is now 2 seconds while still exercising real expiry.
+11. Deprecated Windows token acquisition and two unrelated baseline staticcheck
+    findings were cleaned up. Full production-code staticcheck is now clean in
+    both repositories on Windows and Darwin no-cgo.
+
+### Exact final gates
+
+All final Go commands used the downloaded official `go1.26.6` toolchain and a
+repository-local `GOCACHE`. The Provider full Windows suite intentionally used
+the system temporary directory because its native DACL and named-pipe tests
+depend on Windows temp semantics.
+
+```powershell
+$env:GOTOOLCHAIN='go1.26.6'
+$env:GOCACHE=(Resolve-Path .tmp-go-cache).Path
+go test -count=1 ./...
+go vet ./...
+go mod verify
+npm test
+```
+
+Native Windows results:
+
+- CLI `go test -count=1 ./...`: PASS (`internal/app` 20.829s,
+  `internal/provider` 7.267s, `internal/wxgfqual` 6.781s, and
+  `internal/store` 7.242s).
+- Provider `go test -count=1 ./...`: PASS (root 12.421s,
+  `internal/acquisition` 11.783s, `internal/command` 2.951s, and
+  `internal/shadow` 2.412s).
+- `go vet ./...`: PASS in both repositories (exit 0, no diagnostics).
+- `go mod verify`: `all modules verified` in both repositories.
+- CLI npm: 12/12 PASS in 950.2269ms; Provider npm: 13/13 PASS in
+  1172.3918ms.
+- CLI Shadow/state stress (`-shuffle=on -count=20`): PASS; synthetic Owner and
+  startup reconciliation (`-count=20`): PASS in 5.481s.
+- Provider command/Shadow/contract stress (`-shuffle=on -count=20`): PASS.
+- Windows descendant cleanup
+  `go test -count=20 -run '^TestWindowsProviderJobKillsDescendantOnClose$' ./internal/wxgfqual`:
+  PASS in 41.561s.
+- Native Windows `go test -race -count=1 ./...`: **not executed**. It exits 1
+  with `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1` because
+  this host has no usable Windows cgo compiler. This is not a pass.
+
+The following Unix gates were executed under WSL Ubuntu with Go 1.26.6:
+
+```powershell
+wsl.exe -d Ubuntu --cd /mnt/d/Projects/zanescope/v-local-cli env GOTOOLCHAIN=go1.26.6 go test -count=1 ./...
+wsl.exe -d Ubuntu --cd /mnt/d/Projects/zanescope/v-local-cli env GOTOOLCHAIN=go1.26.6 go test -race -count=1 ./...
+wsl.exe -d Ubuntu --cd /mnt/d/Projects/zanescope/v-local-key-provider env GOTOOLCHAIN=go1.26.6 go test -count=1 ./...
+wsl.exe -d Ubuntu --cd /mnt/d/Projects/zanescope/v-local-key-provider env GOTOOLCHAIN=go1.26.6 go test -race -count=1 ./...
+```
+
+Both complete non-race suites and both complete race suites passed. The final
+CLI race run included `internal/app` 108.872s, `internal/store` 21.990s, and
+`internal/wxgfqual` 20.829s. The final Provider race run included root 12.236s,
+`internal/acquisition` 23.138s, and `internal/supervisor` 10.293s. `go vet
+./...` also passed in both WSL checkouts. These are Linux/Unix results, not
+Windows race or macOS runtime results.
+
+Darwin compile-only gates passed for both `amd64` and `arm64` in both
+repositories:
+
+```powershell
+$env:GOTOOLCHAIN='go1.26.6'
+$env:GOOS='darwin'
+$env:GOARCH='amd64' # repeated with arm64
+$env:CGO_ENABLED='0'
+go test -count=1 -run '^$' -exec='cmd /c echo' ./...
+go vet ./...
+```
+
+No Darwin test binary ran and Darwin cgo files were not compiled. These results
+prove only the no-cgo build surface. Full test-aware staticcheck
+`-checks='all,-ST*,-U1000,-SA1012'` and production-code staticcheck
+`-tests=false -checks='all,-ST*,-U1000'` passed on native Windows and Darwin
+arm64 no-cgo for both repositories. The production-code check was rerun after
+the Windows Job Object fix and produced no diagnostics.
+
+`govulncheck ./...` initially reported five reachable standard-library findings
+with the host's Go 1.26.5 toolchain (`GO-2026-6218`, `GO-2026-6090`,
+`GO-2026-6088`, `GO-2026-5972`, and `GO-2026-5026`) in the CLI; the Provider had
+none reachable. Both repositories report `No vulnerabilities found.` with Go
+1.26.6, which is the toolchain used for the final gates. This does not assert
+that future vulnerability databases will remain unchanged.
+
+### Frozen shared bytes
+
+Exact byte comparison passed for every shared contract/build-set artifact:
+
+| Shared artifact | SHA-256 |
+| --- | --- |
+| `internal/shadowcontract/contract.go` | `d242b63081c631d73180a8fd42f2cbedd155b0d6b06f9fa14a056a8cb2b141ab` |
+| `internal/shadowcontract/contract_test.go` | `604c4f2885201f179a681072a46910ee717ad3f4106181cea43742423add2bb0` |
+| `internal/shadowbuildset/buildset.go` | `f6c66b5fcd2421d7d2fa36fc3c7affc6a1ccecffc186beee7faba22f1c62fdbc` |
+| `internal/shadowbuildset/buildset_test.go` | `188257c31c86be454eb42fbcbb2c4e24b49bb8e920b30a214dba221601357ab8` |
+| `internal/shadowbuildset/identity_unix.go` | `e610b8cd0daf76e8627417389b91cad6dbe16e3693695181827922ba8c41cef6` |
+| `internal/shadowbuildset/identity_windows.go` | `3894c9225072a799cc1d36755e28b390210e104fdf851eca0ac64129e7049d42` |
+| `internal/shadowclock/clock.go` | `27dfe6fa1e0d571a185464cff18cdd9a6450892d69c093015abe2672f791c8b5` |
+| `internal/shadowaccount/account.go` | `5d9a98fe19d557a14cd9c97fdfaf4e18d13d219aeb3488fae2c5d211f458eea2` |
+| `testdata/shadow-contract-v1.json` | `076179a56a4986e281225f20e338afcccb0a09c6fa192dda2999c53627da8fd2` |
+| `testdata/shadow-build-set-v1.json` | `6b63d4f976c936d986d9dc23d2992f7e83a70e3bbbb10c178bbfc20aacc8d698` |
+
+The inventory and source wrappers intentionally differ by module import,
+package comment/helper, and package-specific tests; they received equivalent
+hardening but are not represented as byte-identical artifacts.
+
+### Route and residue closure
+
+- `shadowproduction.NewDisabledCoordinator` remains disabled for qualification
+  and execution, Provider production execute still returns
+  `shadow_production_route_disabled`, and the CLI production Owner rejects a
+  disabled qualification. No production assembler or route was added.
+- macOS interfaces and build tags are unchanged. No capture, LaunchServices,
+  Keychain trust, signing, TCC/FDA, SIP, or real-machine behavior was invented.
+- `git diff --check`, full production staticcheck, placeholder/TODO/debug/local
+  path scans, and untracked-file inspection are clean after removing test and
+  analysis caches. The committed diff contains no temporary artifacts.
+
+### Findings returned to macOS
+
+These items cannot be closed faithfully from Windows or Linux. They are
+explicit Mac-side review, fault-injection, or real-machine qualification work:
+
+1. Validate Security.framework `/dev/fd/N` static identity and running-guest
+   CDHash semantics; identity evidence is not signature-validity evidence.
+2. Exercise real Keychain add/get/delete, locked/UI/accessibility behavior,
+   duplicate and crash cleanup, and secret-memory lifetime.
+3. Validate `proc_pid_rusage` process-birth identity and PID reuse with Darwin
+   cgo and native fault injection.
+4. Qualify APFS `clonefile`, file/directory fsync and rename durability,
+   LaunchServices, codesign/DER entitlements, real resigning/capture, TCC/FDA,
+   minimal environment, SIP-off acquisition, and SIP restoration.
+5. Decide how to close the residual path race between the final target digest
+   and `syscall.Exec` (for example, fd-based exec or immutable staging), then
+   exercise the selected design adversarially on macOS.
+6. Prove that supervisor-hang fallback removes the exact native process tree
+   and artifacts; current exact-absence checks fail closed but are not a native
+   process-tree proof.
+7. Separate a genuinely missing plist entitlement key from codesign/plist
+   inspection failure and confirm the intended enumeration policy fail-closed.
+8. Source traversal is per-file hardened but not one atomic, ancestor-bound,
+   fd-relative snapshot across a multi-component tree. Review the Mac threat
+   model and add native ancestor/replacement fault injection.
+9. Inject a coordinator crash after the supervisor starts but before durable
+   PID binding. EOF/lease handling is expected to clean up, but that expectation
+   needs native evidence.
+10. Exercise crash cleanup when a staged inode was never made durable; ensure
+    recovery cannot bind a replacement at the same randomized attempt path.
+11. Transformation discovery currently skips candidates whose
+    signed-executable inspection fails. Final strict verification fails later,
+    but macOS must decide whether enumeration itself must abort immediately.
+
+Consequently, macOS runtime/cgo, signing, Keychain, capture, LaunchServices,
+TCC/FDA, SIP-off, native crash/fault behavior, and the real T+120 workflow remain
+unverified. Neither Windows runtime success, WSL race success, nor Darwin
+compile-only success may be reported as a macOS machine qualification result.
